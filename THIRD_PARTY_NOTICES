@@ -1,0 +1,96 @@
+Third-party notices
+===================
+
+The skills-manager package does not bundle node_modules. npm installs the
+following direct runtime dependencies separately, together with their own
+license files and their dependencies' notices:
+
+- @opentui/core 0.5.11 and its platform-specific native package: MIT
+- execa 9.6.1: MIT
+- skills 1.7.6: MIT
+- yaml 2.8.4: ISC
+
+The skills 1.7.6 package includes additional third-party material and its
+ThirdPartyNoticeText.txt contains the corresponding notices. OpenTUI native
+packages contain additional LICENSE-* files for their native components.
+These files are part of the respective dependency distributions and must be
+retained when redistributing them. Transitive dependencies carry their own
+licenses in their installed packages.
+
+MIT-licensed direct dependencies
+--------------------------------
+
+@opentui/core: Copyright (c) 2025 opentui
+skills: Copyright (c) 2026 Vercel, Inc.
+execa: Copyright (c) Sindre Sorhus <sindresorhus@gmail.com>
+       (https://sindresorhus.com)
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+ISC-licensed direct dependency
+------------------------------
+
+yaml: Copyright Eemeli Aro <eemeli@gmail.com>
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+
+Vendored development skills (source repository only)
+----------------------------------------------------
+
+The npm package excludes .agents/ and the license copies below. These
+notices cover development material in the source repository, not the
+@opentui/core runtime package listed above. The commits below are matching
+source snapshots, not pins recorded in skills-lock.json.
+
+- .agents/skills/opentui is from anomalyco/opentui, packages/web/src/content.
+  Its tracked tree matches commit f3018fa86dab7c4c60ab06f0f5bb8b87888dab30.
+  Copyright (c) 2025 opentui. MIT. See
+  THIRD_PARTY_LICENSES/opentui/LICENSE and
+  https://github.com/anomalyco/opentui/blob/f3018fa86dab7c4c60ab06f0f5bb8b87888dab30/LICENSE.
+- .agents/skills/typescript-expert matches sickn33/agentic-awesome-skills,
+  skills/typescript-expert at commit bd1a0d360ae10b107b535f55fd50061ff5f6cbc9.
+  The upstream release credits vudovn/antigravity-kit (now vudovn/ag-kit):
+  https://github.com/sickn33/agentic-awesome-skills/releases/tag/v2.3.0.
+  Its original files match VUDOVN's commit 63938f3f0cac02f9bde0ebcd0f46f73bcf2e531d,
+  and the sickn33 copy changes SKILL.md. See
+  THIRD_PARTY_LICENSES/typescript-expert/LICENSE-VUDOVN (MIT, Copyright (c)
+  2026 VUDOVN). See also LICENSE, LICENSE-CONTENT, and CC-BY-4.0 in the same
+  directory. The sickn33 upstream states that its original code uses MIT,
+  its original documentation uses CC BY 4.0, and more specific upstream
+  notices take precedence:
+  https://github.com/sickn33/agentic-awesome-skills/blob/bd1a0d360ae10b107b535f55fd50061ff5f6cbc9/LICENSE-CONTENT.
+  Earlier authorship is not independently established by those snapshots.
+- A TypeScript skill code example matches an example in Microsoft's handbook:
+  https://www.typescriptlang.org/docs/handbook/2/template-literal-types.html.
+  Microsoft licenses website code under MIT. See
+  THIRD_PARTY_LICENSES/typescript-expert/LICENSE-MICROSOFT-CODE and
+  https://github.com/microsoft/TypeScript-Website/blob/205122bb73dcbf6f3b373de5bdb0d9fa5434d015/LICENSE-CODE.
+  The example's original source is not independently established.

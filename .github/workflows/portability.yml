@@ -1,0 +1,176 @@
+name: Native portability
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portability:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x64
+            machine: x86_64
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            machine: aarch64
+          - runner: macos-26-intel
+            os: darwin
+            arch: x64
+            machine: x86_64
+          - runner: macos-26
+            os: darwin
+            arch: arm64
+            machine: arm64
+    env:
+      EXPECTED_OS: ${{ matrix.os }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      EXPECTED_MACHINE: ${{ matrix.machine }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          set-safe-directory: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '26.13.0'
+          package-manager-cache: false
+          token: ''
+
+      - name: Check native runtime and tools
+        shell: bash
+        run: |
+          node -e '
+            if (process.version !== "v26.13.0" || process.platform !== process.env.EXPECTED_OS || process.arch !== process.env.EXPECTED_ARCH) {
+              throw new Error(`Unexpected runtime: ${process.version} ${process.platform}/${process.arch}`);
+            }
+            console.log(`Node ${process.version} ${process.platform}/${process.arch}`);
+          '
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
+          command -v cc
+          python3 -c 'import fcntl, pty, termios'
+          command -v tar
+
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap build-essential
+          if ! node -e '
+            const { execFileSync } = require("node:child_process");
+            try {
+              const text = execFileSync("/usr/bin/git", ["--version"], { encoding: "utf8" });
+              const match = /^git version (\d+)\.(\d+)/.exec(text);
+              if (!match || !(Number(match[1]) > 2 || (Number(match[1]) === 2 && Number(match[2]) >= 48))) process.exit(1);
+            } catch { process.exit(1); }
+          '; then
+            sudo apt-get install --yes --no-install-recommends software-properties-common
+            sudo add-apt-repository --yes ppa:git-core/ppa
+            sudo apt-get update
+            sudo apt-get install --yes git
+          fi
+
+      - name: Check Git used by the sandbox
+        shell: bash
+        run: |
+          git_binary=/usr/bin/git
+          if [ "$RUNNER_OS" = macOS ]; then
+            git_binary="$(/usr/bin/xcode-select --print-path)/usr/bin/git"
+            /usr/bin/codesign --verify --strict --requirement '=anchor apple and identifier "com.apple.git"' "$git_binary"
+            command -v /usr/bin/sandbox-exec
+          fi
+          node - "$git_binary" <<'NODE'
+          const { execFileSync } = require('node:child_process');
+          const text = execFileSync(process.argv[2], ['--version'], { encoding: 'utf8' }).trim();
+          console.log(`${process.argv[2]}: ${text}`);
+          const match = /^git version (\d+)\.(\d+)/.exec(text);
+          if (!match || !(Number(match[1]) > 2 || (Number(match[1]) === 2 && Number(match[2]) >= 48))) {
+            throw new Error('The sandbox Git must be version 2.48 or newer');
+          }
+          NODE
+
+      - name: Check Linux confinement prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/landlock-probe.c" <<'C'
+          #define _GNU_SOURCE
+          #include <stdio.h>
+          #include <sys/syscall.h>
+          #include <unistd.h>
+          int main(void) {
+            long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, 1);
+            if (abi < 0) { perror("landlock_create_ruleset"); return 1; }
+            printf("Landlock ABI %ld\n", abi);
+            if (abi < 5) { fputs("Landlock ABI 5 or newer is required\n", stderr); return 1; }
+            return 0;
+          }
+          C
+          cc -std=c11 -Wall -Wextra -Werror "$RUNNER_TEMP/landlock-probe.c" -o "$RUNNER_TEMP/landlock-probe"
+          "$RUNNER_TEMP/landlock-probe"
+          bwrap --version
+          probe_bwrap() {
+            bwrap --die-with-parent --new-session --unshare-user --disable-userns \
+              --unshare-pid --unshare-ipc --unshare-uts --proc /proc --dev /dev \
+              --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind-try /lib64 /lib64 \
+              -- /usr/bin/true
+          }
+          if ! probe_bwrap; then
+            if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)" != 1 ]; then
+              echo 'Bubblewrap failed and no enabled AppArmor user-namespace restriction was found.' >&2
+              exit 1
+            fi
+            echo 'Allowing unprivileged user namespaces on this ephemeral GitHub-hosted VM; application Bubblewrap and Landlock remain required.'
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            probe_bwrap
+          fi
+
+      - name: Build and install a tarball in isolated fixtures
+        shell: bash
+        run: |
+          fixture="$RUNNER_TEMP/portability"
+          mkdir -p "$fixture"/{source,home,tmp,pack,consumer}
+          env -i PATH="$PATH" HOME="$fixture/home" /usr/bin/git archive --format=tar HEAD |
+            env -i PATH="$PATH" HOME="$fixture/home" tar -xf - -C "$fixture/source"
+          cd "$fixture/source"
+          env -i PATH="$PATH" HOME="$fixture/home" TMPDIR="$fixture/tmp" CI=1 \
+            npm ci --no-audit --no-fund
+          env -i PATH="$PATH" HOME="$fixture/home" TMPDIR="$fixture/tmp" CI=1 \
+            npm pack --ignore-scripts --pack-destination "$fixture/pack"
+          set -- "$fixture"/pack/*.tgz
+          test "$#" -eq 1 && test -f "$1"
+          tarball="$1"
+          cd "$fixture/consumer"
+          printf '{"private":true}\n' > package.json
+          env -i PATH="$PATH" HOME="$fixture/home" TMPDIR="$fixture/tmp" CI=1 \
+            npm install --no-audit --no-fund "$tarball"
+
+      - name: Exercise Linux upstream ref and update tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          fixture="$RUNNER_TEMP/portability"
+          mkdir -p "$fixture/test-home" "$fixture/test-tmp"
+          cd "$fixture/source"
+          env -i PATH="$PATH" HOME="$fixture/test-home" TMPDIR="$fixture/test-tmp" CI=1 \
+            npm test -- tests/actions/update.test.ts tests/actions/skillsCli.test.ts
+
+      - name: Exercise installed package on a real terminal
+        shell: bash
+        run: |
+          fixture="$RUNNER_TEMP/portability"
+          mkdir -p "$fixture/smoke-home" "$fixture/smoke-tmp"
+          cd "$fixture/source"
+          env -i PATH="$PATH" HOME="$fixture/smoke-home" TMPDIR="$fixture/smoke-tmp" CI=1 TERM=xterm-256color \
+            node scripts/release-smoke.mjs "$fixture/consumer/node_modules/skills-manager"

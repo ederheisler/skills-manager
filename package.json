@@ -1,0 +1,67 @@
+{
+  "name": "skills-manager",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=26.13.0 <27"
+  },
+  "os": ["darwin", "linux"],
+  "cpu": ["arm64", "x64"],
+  "type": "module",
+  "files": [
+    "dist/cli.js",
+    "dist/cliOptions.js",
+    "dist/onboarding.js",
+    "dist/terminalText.js",
+    "dist/tui.js",
+    "dist/actions/boundary.js",
+    "dist/actions/checkUpdates.js",
+    "dist/actions/git.js",
+    "dist/actions/gitBoundary.js",
+    "dist/actions/gitTransaction.js",
+    "dist/actions/gitTransactionWorker.js",
+    "dist/actions/open.js",
+    "dist/actions/remove.js",
+    "dist/actions/sandbox.js",
+    "dist/actions/skillsCli.js",
+    "dist/actions/toggle.js",
+    "dist/actions/update.js",
+    "dist/state/filter.js",
+    "dist/state/format.js",
+    "dist/state/frontmatter.js",
+    "dist/state/gitStatus.js",
+    "dist/state/provenance.js",
+    "dist/state/repo.js",
+    "dist/state/types.js",
+    "dist/state/upstreamProvenance.js",
+    "dist/state/validation.js",
+    "native/skills-boundary",
+    "native/skills-boundary.platform.json",
+    "native/skills-git-boundary",
+    "native/skills-git-boundary.platform.json",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES"
+  ],
+  "bin": {
+    "skills-manager": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "node scripts/check-package.mjs --before-build && node scripts/build-boundary.mjs && tsc -p tsconfig.json",
+    "prepare": "npm run build && node scripts/check-package.mjs",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.11",
+    "execa": "9.6.1",
+    "skills": "1.7.6",
+    "yaml": "2.8.4"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12"
+  }
+}
