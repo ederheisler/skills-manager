@@ -366,13 +366,21 @@ The first full suite had 464 passed, 3 failed, and 11 skipped across 24 files. A
 
 At PR candidate `232738b`, [CI run 41881254732](https://github.com/ederheisler/skills-manager/actions/runs/41881254732) passed native Linux arm64 and macOS Intel verification. Linux x64 reported 472 passed, 1 failed, and 5 skipped; the unborn-commit test reached its five-second whole-test limit. That test now waits for the commit prompt and entered message and has a 20-second integration budget. Per-frame waits remain bounded to four seconds. The revised case passed locally in 3.812 seconds, and its SCB scan reported no findings.
 
+On `main`, [CI run 41884356542](https://github.com/ederheisler/skills-manager/actions/runs/41884356542) failed the Linux x64 worker-kill test. The worktree notification did not stop the worker. The journal still said `prepared` after Git advanced HEAD. A disposable macOS arm64 probe reproduced that state with the original index intact.
+
+The interruption fixture now pauses the real worker after a partial worktree move and before the ref commit. The local real-Git smoke confirmed the old HEAD, original index, held ref locks, and partially moved worktree. After the worker died, the ref locks disappeared. Recovery advanced HEAD to the target and preserved unrelated staged data. Linux CI must pass before publication.
+
+The scoped SCB check of the transaction test exited 1 with complexity and duplicate-structure advisories, but no parser or security-pattern findings. The two process fixtures retain explicit, separate cancellation and cleanup handling so their failure paths remain visible.
+
 A copy of `skills@1.7.6` with a simulated `99.0.0` manifest exercised string and object bin entries with a nonstandard path. Lexical and symlink escapes were refused. This does not test a published `99.0.0` version.
 
 The npm audit reported zero vulnerabilities, including development dependencies. The resolved `vitest` and `@vitest/mocker` versions were 4.1.12, `vite` was 8.3.5, and `esbuild` was 0.28.2.
 
-SCB checked five changed files with no parse errors or security-pattern findings. It reported 36 complexity and four duplication advisories in source; both test-file scans exited zero. The advisories were retained because explicit validation, mode, and cleanup checks cover different states.
+Earlier SCB checks covered five changed files. They found no parse errors or security-pattern findings. They reported 36 complexity and four duplication advisories in source. Both prior test-file scans exited zero. The advisories were retained because explicit validation, mode, and cleanup checks cover different states.
 
 A Graphify update reported 33 hub-derived community renames; nine former community names disappeared. A follow-up refresh after the test changes printed no rename count and lost no community names. The later CI-test correction required another refresh, which reported 31 hub-derived renames and eight disappeared community names.
+
+A refresh after the worker-kill test correction reported 2,392 nodes, 4,878 edges, and 150 communities. The previous graph had 4,877 edges. No community names changed or disappeared.
 
 ### Review findings
 
