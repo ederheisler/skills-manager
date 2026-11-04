@@ -13350,7 +13350,7 @@
       "node_kind": "heading",
       "norm_label": "publication verification and limits",
       "source_file": "docs/superpowers/plans/2026-11-03-portable-open-source-release.md",
-      "source_location": "L387"
+      "source_location": "L395"
     },
     {
       "id": "docs_superpowers_plans_2026_11_03_portable_open_source_release_release_completion",
@@ -13374,7 +13374,7 @@
       "node_kind": "heading",
       "norm_label": "review findings",
       "source_file": "docs/superpowers/plans/2026-11-03-portable-open-source-release.md",
-      "source_location": "L375"
+      "source_location": "L383"
     },
     {
       "id": "docs_superpowers_plans_2026_11_03_portable_open_source_release_runtime_and_distribution",
@@ -48038,7 +48038,19 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "tests/actions/gitTransaction.test.ts",
-      "source_location": "L725",
+      "source_location": "L748",
+      "weight": 1.0
+    },
+    {
+      "source": "tests_actions_gittransaction_test_interruptedpullfixture",
+      "target": "tests_actions_gittransaction_test_text",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "tests/actions/gitTransaction.test.ts",
+      "source_location": "L792",
       "weight": 1.0
     },
     {
@@ -71830,7 +71842,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/superpowers/plans/2026-11-03-portable-open-source-release.md",
-      "source_location": "L375",
+      "source_location": "L383",
       "weight": 1.0
     },
     {
@@ -71841,7 +71853,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/superpowers/plans/2026-11-03-portable-open-source-release.md",
-      "source_location": "L387",
+      "source_location": "L395",
       "weight": 1.0
     },
     {
@@ -85617,5 +85629,5 @@
       "source_file": "docs/superpowers/specs/2026-09-16-skills-manager-design.md"
     }
   ],
-  "built_at_commit": "232738b90964f7969b50d0688fc35e6941d224f3"
+  "built_at_commit": "f5c74ce6abf42a4b2043a9dd6cbd71bd157da96d"
 }

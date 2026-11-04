@@ -1,17 +1,17 @@
 # Graph Report - skill-manager  (2026-11-04)
 
 ## Corpus Check
-- 172 files · ~251,116 words
+- 172 files · ~251,579 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 10 file(s) not represented in the graph (top: (none) 9, .0 1)
 
 ## Summary
-- 2392 nodes · 4877 edges · 150 communities (138 shown, 12 thin omitted)
+- 2392 nodes · 4878 edges · 150 communities (138 shown, 12 thin omitted)
 - Extraction: 93% EXTRACTED · 7% INFERRED · 0% AMBIGUOUS · INFERRED: 319 edges (avg confidence: 0.87)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `232738b9`
+- Built from commit: `f5c74ce6`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -751,7 +751,7 @@ Nodes (13): cleanupGitIndex(), inspectGitIndex(), withSkillsLock(), addRemoteApp
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `createTestRenderer()` connect `Testing` to `Keyboard input`, `React keymap integration`, `Solid keymap integration`, `Other `@opentui/core` entry points`, `tui.test.ts`?**
-  _High betweenness centrality (0.049) - this node is a cross-community bridge._
+  _High betweenness centrality (0.050) - this node is a cross-community bridge._
 - **Why does `OpenTUI Skill` connect `OpenTUI Skill` to `git.ts`, `opentui/SKILL.md`?**
   _High betweenness centrality (0.046) - this node is a cross-community bridge._
 - **Why does `Quick routing by intent` connect `git.ts` to `OpenTUI Skill`, `gitTransaction.test.ts`?**

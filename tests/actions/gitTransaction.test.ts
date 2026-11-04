@@ -715,7 +715,30 @@ async function interruptedPullFixture(signal: AbortSignal, workerOnly = false): 
   const index = await readFile(path.join(root, ".git", "index"));
   const project = fileURLToPath(new URL("../../", import.meta.url));
   const module = new URL("../../src/actions/git.ts", import.meta.url).href;
+  // A watch event reports a move but does not stop the transaction. Pause the
+  // disposable worker on its bridge response after the first real preimage
+  // move, before it can send Git the ref-commit command.
+  const preload = path.join(sandbox, "pause-pull-worker.cjs");
+  const executable = path.join(sandbox, "node-pull-worker");
+  await writeFile(preload, `
+    const fs = require("node:fs");
+    const { syncBuiltinESMExports } = require("node:module");
+    const read = fs.readSync;
+    let stopped = false;
+    fs.readSync = function(fd, ...args) {
+      const count = read.call(this, fd, ...args);
+      if (fd === 6 && count > 0 && !stopped && !fs.existsSync(${JSON.stringify(path.join(root, files[0]))})) {
+        stopped = true;
+        process.kill(process.pid, "SIGSTOP");
+      }
+      return count;
+    };
+    syncBuiltinESMExports();
+  `);
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  await writeFile(executable, `#!/bin/sh\nexec ${quote(process.execPath)} --import ${quote(preload)} "$@"\n`, { mode: 0o700 });
   const script = `
+    process.execPath = ${JSON.stringify(executable)};
     import { pullApproved } from ${JSON.stringify(module)};
     const [approved, preview] = JSON.parse(process.argv[1]);
     const result = await pullApproved(approved, preview);
@@ -738,7 +761,7 @@ async function interruptedPullFixture(signal: AbortSignal, workerOnly = false): 
   const closedResult = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
   child.once("close", (code, childSignal) => closedResult.resolve({ code, signal: childSignal }));
   const closed = closedResult.promise;
-  let killed = false;
+  let completed = false;
   try {
     if (!child.pid) throw new Error("Cannot start the disposable pull process");
     const event = await Promise.race([
@@ -755,19 +778,36 @@ async function interruptedPullFixture(signal: AbortSignal, workerOnly = false): 
     };
     expect(journal.phase).toBe("prepared");
     expect(journal.refLock.proof).toMatch(/^[a-f0-9]+$/);
+    const workerPid = Number(execFileSync("ps", ["-o", "ppid=", "-p", String(journal.refLock.pid)], {
+      encoding: "utf8",
+    }).trim());
+    if (!Number.isSafeInteger(workerPid) || workerPid <= 1 || workerPid === child.pid) {
+      throw new Error("Cannot identify the transaction worker process");
+    }
+    while (true) {
+      const state = execFileSync("ps", ["-o", "state=", "-p", String(workerPid)], { encoding: "utf8" }).trim();
+      if (state.startsWith("T")) break;
+      await delay(20, undefined, { signal });
+    }
+    expect(text("rev-parse", "HEAD")).toBe(oldHead);
+    expect(await readFile(path.join(root, ".git", "index"))).toEqual(index);
+    expect((await lstat(path.join(root, ".git", "HEAD.lock"))).isFile()).toBe(true);
+    expect((await lstat(path.join(root, ".git", "refs/heads/trunk.lock"))).isFile()).toBe(true);
+    await expect(lstat(path.join(root, files[0]))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(path.join(root, files[files.length - 1]), "utf8"))
+      .toBe(`old ${files[files.length - 1]}\n`);
     if (workerOnly) {
-      const workerPid = Number(execFileSync("ps", ["-o", "ppid=", "-p", String(journal.refLock.pid)], {
-        encoding: "utf8",
-      }).trim());
-      if (!Number.isSafeInteger(workerPid) || workerPid <= 1 || workerPid === child.pid) {
-        throw new Error("Cannot identify the transaction worker process");
-      }
       process.kill(workerPid, "SIGKILL");
     } else {
       process.kill(-child.pid, "SIGKILL");
     }
-    killed = true;
-    const outcome = await closed;
+    signal.throwIfAborted();
+    const aborted = Promise.withResolvers<never>();
+    const abortClose = () => aborted.reject(new Error("Waiting for the killed pull process was cancelled"));
+    signal.addEventListener("abort", abortClose, { once: true });
+    let outcome: { code: number | null; signal: NodeJS.Signals | null };
+    try { outcome = await Promise.race([closed, aborted.promise]); }
+    finally { signal.removeEventListener("abort", abortClose); }
     if (workerOnly) expect(outcome.code).not.toBe(0);
     else expect(outcome.signal).toBe("SIGKILL");
     for (let attempts = 0; ; attempts++) {
@@ -780,9 +820,10 @@ async function interruptedPullFixture(signal: AbortSignal, workerOnly = false): 
       // OS process reaping is an external event and cannot use fake timers.
       await delay(20);
     }
+    completed = true;
     return { approved, oldHead, target, index, files };
   } finally {
-    if (!killed && child.pid && child.exitCode === null && child.signalCode === null) {
+    if (!completed && child.pid) {
       try { process.kill(-child.pid, "SIGKILL"); } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
@@ -1029,6 +1070,8 @@ describe("real Git pull transactions", () => {
     await expect(lstat(path.join(root, ".git", "refs/heads/trunk.lock"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(await recoverSkillsGit(approved)).toBeTruthy();
     expect(text("rev-parse", "HEAD")).toBe(target);
+    expect(paths("diff", "--cached", "--name-only", "-z")).toEqual(["notes.txt"]);
+    expect(await readFile(path.join(root, "notes.txt"), "utf8")).toBe("staged independently\n");
     for (const file of files) {
       expect(await readFile(path.join(root, file), "utf8")).toBe(`incoming ${file}\n`);
     }
