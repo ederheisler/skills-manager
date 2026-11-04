@@ -33,7 +33,7 @@ MIT is a permissive license. The copyright name is `Eder Heisler`.
 
 ## Implementation choices
 
-The project uses Node. The primary installation route is the tagged GitHub `npx` command in the [README](../../README.md). It requires neither a manual clone nor npm registry publication. Repository and tarball distribution remain supported.
+The project uses Node. The original primary installation route was a tagged GitHub `npx` command. It required neither a manual clone nor npm registry publication. Repository and tarball distribution remain supported. [Latest main installation](#latest-main-installation) supersedes the tagged primary route.
 
 Other choices:
 - Allow network access only after a user action and disable upstream telemetry. Startup and local browsing make no network requests.
@@ -44,6 +44,12 @@ Other choices:
 - Reset the commit history before public release. [Hosted history replacement](#hosted-history-replacement) supersedes the original choice to keep the hosted repository.
 
 The [release evidence](../superpowers/plans/2026-11-03-portable-open-source-release.md#release-completion) records runtime, confinement, recovery, artifact, and platform checks and their limits.
+
+## Latest main installation
+
+Date: 2026-11-04
+
+The primary installation route is the unpinned GitHub `npx` command in the [README](../../README.md). It requests the latest code on `main` without a manual clone. This supersedes the [tagged primary route](#implementation-choices) because a fixed tag prevents users from receiving new fixes when they run the command again. The existing `v0.1.0` tag remains part of the release history.
 
 ## Concurrency limits
 

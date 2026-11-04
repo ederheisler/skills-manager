@@ -158,7 +158,7 @@ The following choices were open in the reviewed draft. The later selections appe
 
 The draft compared a [Bun-compiled executable](https://bun.com/docs/bundler#compile) with a Node package. A Bun executable contains its runtime, but the separate upstream `skills` CLI needs Node unless separately bundled and tested. No standalone release is claimed.
 
-The current distribution uses Node and a tagged GitHub `npx` command without a manual clone. The [README](../../../README.md) also documents source installation. The project is not published to npm. The package remains private, which prevents npm publication but not repository or tarball distribution.
+The current distribution uses Node and an unpinned GitHub `npx` command to request the latest code on `main` without a manual clone. The [README](../../../README.md) also documents source installation. The project is not published to npm. The package remains private, which prevents npm publication but not repository or tarball distribution.
 
 The [unscoped `skills-manager` package](https://registry.npmjs.org/skills-manager/latest) belongs to another project. Do not run `npx skills-manager` for this app. Test the exact command and package contents before documenting another distribution.
 
