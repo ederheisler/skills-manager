@@ -27,7 +27,7 @@ jobs:
             os: darwin
             arch: x64
             machine: x86_64
-          - runner: macos-26
+          - runner: macos-15
             os: darwin
             arch: arm64
             machine: arm64
@@ -80,6 +80,11 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes git
           fi
+
+      - name: Select Xcode 26 on macOS 15
+        if: matrix.runner == 'macos-15'
+        shell: bash
+        run: sudo xcode-select --switch /Applications/Xcode_26.3.app/Contents/Developer
 
       - name: Check Git used by the sandbox
         shell: bash
