@@ -71,7 +71,9 @@ async function browseInTerminal(skillsDir) {
   let transcript = '';
   let stderr = '';
   let step = 0;
+  let stageStart = 0;
   let failure;
+  let retryHelp;
   let retryQuit;
   const child = spawn('python3', [relay, cli, '--skills-dir', skillsDir], {
     cwd: work, env: process.env, stdio: ['pipe', 'pipe', 'pipe'],
@@ -81,7 +83,7 @@ async function browseInTerminal(skillsDir) {
   child.stderr.setEncoding('utf8');
   child.on('error', (error) => { failure = error; });
   const timer = setTimeout(() => {
-    failure = new Error('Timed out waiting for the installed CLI to browse and quit');
+    failure = new Error('Timed out waiting for the installed CLI to browse, open and close help, and quit');
     child.kill('SIGTERM');
   }, 90_000);
   child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -92,7 +94,7 @@ async function browseInTerminal(skillsDir) {
       child.kill('SIGTERM');
       return;
     }
-    const text = stripVTControlCharacters(transcript);
+    const text = stripVTControlCharacters(transcript.slice(stageStart));
     if (step === 0 && text.includes('Review optional local Git initialization? [y/N]')) {
       step = 1;
       child.stdin.write('\n');
@@ -103,20 +105,31 @@ async function browseInTerminal(skillsDir) {
     }
     if (step === 2 && /Skills\s+1\s+shown/.test(text)) {
       step = 3;
-      child.stdin.write('q');
+      stageStart = transcript.length;
+      child.stdin.write('?');
       // The first rendered frame can precede completion of asynchronous startup.
+      retryHelp = setInterval(() => child.stdin.write('?'), 250);
+    } else if (step === 3 && text.includes('Keyboard help')) {
+      clearInterval(retryHelp);
+      step = 4;
+      stageStart = transcript.length;
+      child.stdin.write('\x1b');
+    } else if (step === 4 && /Skills\s+1\s+shown/.test(text)) {
+      step = 5;
+      child.stdin.write('q');
       retryQuit = setInterval(() => child.stdin.write('q'), 250);
     }
   });
   const result = await new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
   clearTimeout(timer);
+  clearInterval(retryHelp);
   clearInterval(retryQuit);
   const evidence = stripVTControlCharacters(transcript).slice(-12000);
   const diagnostic = `PTY exit=${result.code} signal=${result.signal}\nstderr:\n${stderr}\nterminal:\n${evidence}`;
   if (failure) throw new Error(`${failure.message}\n${diagnostic}`);
   assert.equal(result.signal, null, diagnostic);
   assert.equal(result.code, 0, diagnostic);
-  assert.equal(step, 3, `Did not reach both Git prompts and the populated browse screen.\n${diagnostic}`);
+  assert.equal(step, 5, `Did not reach both Git prompts, browse, help, and the restored browse screen.\n${diagnostic}`);
 }
 
 async function run() {
@@ -222,7 +235,7 @@ async function run() {
   assert.deepEqual(await snapshot(outside), outsideBefore);
   assert.deepEqual(await readFile(externalLock), lockBefore);
 
-  // Each preview runs the pinned installed skills CLI inside the real OS sandbox.
+  // Each preview runs the installed skills CLI inside the real OS sandbox.
   const upstreamRoot = path.join(work, 'upstream-destination');
   const upstreamSource = path.join(work, 'upstream-source');
   const upstreamText = '---\nname: example\ndescription: Example fixture\n---\n\n# Example\n';

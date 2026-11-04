@@ -1,22 +1,31 @@
-# skills-manager Implementation Plan
+# skills-manager implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+This is the original implementation plan, preserved for its design and
+acceptance criteria. It is superseded and is not a current setup or
+operating guide. Do not execute its commands or copy its implementation.
+Its assumptions include a global `skills` CLI, an obsolete directory
+layout, and Git operations over the agent root. The examples also lack
+current safety boundaries. For current installation, commands, and
+behavior, see the [README](../../../README.md) and the
+[decisions index](../../decisions/README.md).
+
+The plan used checkbox steps and proposed the following:
 
 **Goal:** Build a terminal UI (`skills-manager`) that lists every skill under `~/.agents`, shows its provenance (source repo / author / "local (mine)"), and lets the user enable/disable, update, add, and remove skills without leaving the terminal.
 
-**Architecture:** A single Node/TypeScript package. Pure state/logic modules (`state/*`, `actions/*`) that never import React, each independently unit-tested against a temp-directory fixture standing in for `~/.agents`. Thin Ink components (`ui/*`) render that state and forward key presses back into the action modules. No database — every fact is re-derived from the filesystem and `.skill-lock.json` on each scan.
+**Architecture:** A Node/TypeScript package with state and action modules that do not import React. Unit tests use temporary directories as fixtures for `~/.agents`. Ink components render state and pass key presses to the action modules. The proposed scanner derives state from the filesystem and `.skill-lock.json`, without a database.
 
-**Tech Stack:** TypeScript (ESM, NodeNext), Ink 5 + React 18 (TUI), execa (shell out to the `skills` CLI), gray-matter (parse `SKILL.md` frontmatter), vitest + ink-testing-library (tests).
+**Tech stack:** TypeScript (ESM, NodeNext), Ink 5, React 18, execa, gray-matter, vitest, and ink-testing-library.
 
-**Spec:** `docs/superpowers/specs/2026-09-16-skills-manager-design.md`
+**Spec:** [Original design](../specs/2026-09-16-skills-manager-design.md).
 
-## Global Constraints
+## Global constraints
 
-- No *automatic* git mutation of `~/.agents`, ever — nothing calls `add`/`commit`/`push` as a side effect of enable/disable/update/add/remove. The only place this tool stages, commits, or pushes is the Git panel (Task 10), and only in direct response to a keypress in that panel. A read-only `git status --short` for the status line is required and fine anywhere.
+- No *automatic* git mutation of `~/.agents`. Nothing calls `add`/`commit`/`push` as a side effect of enable/disable/update/add/remove. The only place this tool stages, commits, or pushes is the Git panel (Task 10), and only in direct response to a keypress in that panel. A read-only `git status --short` for the status line is required and fine anywhere.
 - Enable/disable is exactly one `fs.rename` between `~/.agents/skills/<name>` and `~/.agents/.disabled_skills/<name>`. No symlink creation/repair code.
 - Provenance is computed fresh on every scan from `.skill-lock.json` + `SKILL.md` frontmatter. Never cache it to disk.
 - A folder with no lock entry is normal (local/author-tagged), not an error. Only an orphaned lock entry (lock entry with no matching folder in either location) counts as "inconsistent."
-- All filesystem/CLI logic takes an explicit `agentRoot: string` parameter — nothing hardcodes `~/.agents`, so every module is testable against a temp directory.
+- All filesystem/CLI logic takes an explicit `agentRoot: string` parameter. Nothing hardcodes `~/.agents`, so every module is testable against a temp directory.
 
 ---
 
@@ -325,7 +334,7 @@ git commit -m "Add Skill types and provenance classification"
 - Produces:
   - `interface AgentRepoPaths { root: string; skillsDir: string; disabledDir: string; lockFile: string }`
   - `resolvePaths(agentRoot: string): AgentRepoPaths`
-  - `scanSkills(agentRoot: string): Promise<Skill[]>` — sorted by `name`, includes orphaned rows (`orphaned: true, path: "", enabled: false`).
+  - `scanSkills(agentRoot: string): Promise<Skill[]>`, sorted by `name`, includes orphaned rows (`orphaned: true, path: "", enabled: false`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -707,7 +716,7 @@ git commit -m "Add enable/disable toggle via fs.rename"
   - `removeSkill(name: string): Promise<SkillsCliResult>`
   - `findSkills(query: string): Promise<SkillsCliResult>`
   - `addSkill(packageName: string): Promise<SkillsCliResult>`
-  - All of them never throw — CLI failures come back as `exitCode !== 0` with `stderr` populated.
+  - None throw. CLI failures return `exitCode !== 0` with `stderr` populated.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1045,7 +1054,7 @@ git commit -m "Add restore-update-re-disable dance so disabled skills stay curre
 - Consumes: `Skill`, `Provenance` types from Task 2.
 - Produces:
   - `formatProvenance(provenance: Provenance): string`
-  - `formatSkillLine(skill: Skill): string` (single-line summary: badge + name + provenance, no ANSI — Ink applies color separately)
+  - `formatSkillLine(skill: Skill): string` (single-line summary: badge + name + provenance, no ANSI; Ink applies color separately)
   - `filterSkills(skills: Skill[], query: string): Skill[]` (case-insensitive substring match against `name` and `frontmatter.description`)
 
 - [ ] **Step 1: Write the failing tests**
@@ -1246,8 +1255,8 @@ git commit -m "Add skill line formatting and name/description filtering"
 **Interfaces:**
 - Consumes: `Skill` type (Task 2), `formatSkillLine`/`formatProvenance` (Task 7).
 - Produces:
-  - `<List skills={Skill[]} selectedIndex={number} />` — pure presentational, one line per skill, `>` prefix on the selected row.
-  - `<Detail skill={Skill | null} />` — pure presentational, full description + provenance, or a placeholder when nothing is selected.
+  - `<List skills={Skill[]} selectedIndex={number} />` is presentational, with one line per skill and a `>` prefix on the selected row.
+  - `<Detail skill={Skill | null} />` is presentational, with the full description and provenance, or a placeholder when nothing is selected.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1432,10 +1441,10 @@ git commit -m "Add List and Detail presentational components"
 - Test: `tests/ui/App.test.tsx`
 
 **Interfaces:**
-- Consumes (gitStatus): nothing new — shells out with `execa` directly, same pattern as Task 5.
-- Produces (gitStatus): `countGitStatusLines(agentRoot: string): Promise<number>` — runs `git status --short` read-only in `agentRoot`, returns the number of non-empty output lines, and returns `0` (never throws) when the command fails for any reason (not a git repo, git not installed, etc.) — the status line degrades silently rather than crashing the TUI.
+- Consumes (gitStatus): nothing new. It shells out with `execa` directly, as in Task 5.
+- Produces (gitStatus): `countGitStatusLines(agentRoot: string): Promise<number>` runs `git status --short` read-only in `agentRoot` and returns the number of non-empty output lines. If the command fails for any reason, such as a missing Git installation or repository, it returns `0` rather than throwing. The status line degrades silently rather than crashing the TUI.
 - Consumes (App): `scanSkills` (Task 3), `disableSkill`/`enableSkill` (Task 4), `updateAll`/`updateOne` (Task 6), `filterSkills` (Task 7), `List`/`Detail` (Task 8), `countGitStatusLines` (this task).
-- Produces (App): `<App agentRoot={string} />` — the only component that touches the filesystem or the `skills` CLI. Keybindings:
+- Produces (App): `<App agentRoot={string} />`, the only component that touches the filesystem or the `skills` CLI. Keybindings:
   - `up`/`k`, `down`/`j`: move selection
   - `/`: enter search mode; typing filters; `enter`/`escape` exits search mode
   - `space`: toggle enable/disable on the selected skill (no-op on orphaned rows)
@@ -1939,12 +1948,12 @@ git commit -m "Wire App: navigation, search mode, toggle, update actions, and gi
 **Interfaces:**
 - Produces (`git.ts`):
   - `interface GitResult { command: string; stdout: string; stderr: string; exitCode: number }`
-  - `getStatus(agentRoot: string): Promise<GitResult>` — `git status --short`
-  - `getDiffStat(agentRoot: string): Promise<GitResult>` — `git diff --stat`
-  - `commitAll(agentRoot: string, message: string): Promise<GitResult>` — `git add -A` then `git commit -m <message>`; if `add` fails, returns that failure without attempting the commit
-  - `push(agentRoot: string): Promise<GitResult>` — `git push`
-  - None of these ever throw — CLI/git failures come back as `exitCode !== 0`.
-- Consumes (`GitPanel.tsx`): nothing beyond props — pure presentational, like `List`/`Detail`.
+  - `getStatus(agentRoot: string): Promise<GitResult>` runs `git status --short`.
+  - `getDiffStat(agentRoot: string): Promise<GitResult>` runs `git diff --stat`.
+  - `commitAll(agentRoot: string, message: string): Promise<GitResult>` runs `git add -A` then `git commit -m <message>`. If `add` fails, it returns that failure without attempting the commit.
+  - `push(agentRoot: string): Promise<GitResult>` runs `git push`.
+  - None throw. CLI or Git failures return `exitCode !== 0`.
+- Consumes (`GitPanel.tsx`): only props. It is presentational, like `List` and `Detail`.
 - Produces (`GitPanel.tsx`): `<GitPanel status={string} diffStat={string} gitMode={"view"|"commit-message"|"confirm-push"} commitMessage={string} lastResult={string} />`
 - Consumes (`App.tsx` changes): `getStatus`, `getDiffStat`, `commitAll`, `push` (this task), `GitPanel` (this task).
 - Produces (`App.tsx` changes): a new top-level mode `"git"` reachable via `g` from browse mode, with its own sub-mode (`view` / `commit-message` / `confirm-push`) as described in the spec's Git panel section: `c` stages+commits (prompts for a message), `p` pushes (prompts y/n), `escape` closes the panel back to browse mode.
@@ -2289,7 +2298,7 @@ describe("App git panel", () => {
 - [ ] **Step 12: Run the test to verify it fails**
 
 Run: `npm test -- tests/ui/App.test.tsx`
-Expected: FAIL — `App.tsx` doesn't yet import `git.js` or handle `g`/`c`/`p` in git mode; the new `describe("App git panel", ...)` tests fail.
+Expected: FAIL. `App.tsx` does not yet import `git.js` or handle `g`/`c`/`p` in git mode, so the new `describe("App git panel", ...)` tests fail.
 
 - [ ] **Step 13: Modify `src/ui/App.tsx`**
 
@@ -2431,7 +2440,7 @@ git commit -m "Wire Git panel into App: g to open, c to commit, p to push"
 
 **Files:**
 - Create: `src/cli.tsx`
-- Modify: `package.json` (already has `bin`/`build`/`dev` from Task 1 — no changes needed, this task just uses them)
+- Modify: `package.json` (already has `bin`/`build`/`dev` from Task 1; this task uses them without changes)
 - Create: `README.md`
 
 **Interfaces:**
@@ -2485,17 +2494,22 @@ EOF
 node dist/cli.js --agent-root /tmp/skills-manager-smoke
 ```
 
-In the running TUI: confirm `demo-skill` is listed as `[on]` with "local (mine)"; press `space` and confirm the status area doesn't error and the row now reads `[off]`; press `space` again to re-enable; press `/` then type `demo` and confirm the row stays visible, type `xyz` and confirm the list goes empty with the "No skills match" placeholder; press `escape` to leave search mode; press `d` then `n` and confirm nothing is removed; press `a` then `escape` and confirm nothing is added and the tool doesn't hang waiting on network; press `g` and confirm the Git panel opens without crashing even though `/tmp/skills-manager-smoke` is not a git repo (status/diff should just come back empty, not throw), then `escape` to close it; press `q` to quit. Then clean up:
+The plan checked that `demo-skill` appeared as `[on]`, changed to `[off]`
+after `space`, and returned to `[on]` after another `space`. Search for
+`demo` had to retain the row, while `xyz` had to show "No skills match".
+The plan also checked that `escape` left search mode, `d` then `n`
+did not remove the skill, and `a` then `escape` did not add one or wait
+on the network. The Git panel had to open without crashing outside a Git
+repository, with empty status and diff, and close with `escape`. `q`
+quit the app. The intent was to exercise the rendered terminal.
 
-```bash
-rm -rf /tmp/skills-manager-smoke
-```
-
-This is a manual step — there is no automated harness for actually watching the rendered terminal, so this confirms the built binary behaves correctly end-to-end before calling the feature done.
+The original plan then removed the fixture with `rm -rf` at a fixed
+`/tmp` path. That cleanup is unsafe if the path contains unrelated data.
 
 - [ ] **Step 5: Manual smoke test of commit against a disposable git fixture**
 
-The commit/push logic is unit-tested with a mocked `execa` in Task 10, but exercise it once against a real (throwaway) git repo so a real `git` invocation is proven to work, not just the mock:
+The plan called for a real disposable Git repository in addition to the
+mocked `execa` tests in Task 10.
 
 ```bash
 mkdir -p /tmp/skills-manager-git-smoke/skills/demo-skill
@@ -2511,11 +2525,11 @@ cd -
 node dist/cli.js --agent-root /tmp/skills-manager-git-smoke
 ```
 
-Edit `/tmp/skills-manager-git-smoke/skills/demo-skill/SKILL.md` in another terminal to create a real diff, then in the TUI: press `g`, confirm the panel shows that file as changed; press `c`, type a message, `enter`, and confirm the status area clears (nothing left to commit) and `git log` in the fixture shows the new commit. Skip testing `p` (push) here — there's no remote on this throwaway repo; push is covered by the unit test's mocked `execa` call in Task 10. Clean up:
-
-```bash
-rm -rf /tmp/skills-manager-git-smoke
-```
+The planned check edited the fixture skill, opened the Git panel, and
+confirmed that a commit appeared in the fixture's log. It skipped push
+because the fixture had no remote and relied on the mocked push test.
+The original cleanup used `rm -rf` at a fixed `/tmp` path, which is
+unsafe if that path contains unrelated data.
 
 - [ ] **Step 6: Write `README.md`**
 
@@ -2555,7 +2569,3 @@ See `docs/superpowers/specs/2026-09-16-skills-manager-design.md` for the design 
 git add src/cli.tsx README.md
 git commit -m "Add CLI entry point and README"
 ```
-
----
-
-**Reply:** what you built, what you chose and why, the throughput checkpoint, open decisions. Tables for design alternatives.

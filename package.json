@@ -55,7 +55,7 @@
   "dependencies": {
     "@opentui/core": "0.5.11",
     "execa": "9.6.1",
-    "skills": "1.7.6",
+    "skills": "latest",
     "yaml": "2.8.4"
   },
   "devDependencies": {

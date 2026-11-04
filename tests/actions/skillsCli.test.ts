@@ -294,7 +294,7 @@ describe("confined staged installation", () => {
     expect(await readFile(lock, "utf8")).toBe("external lock unchanged");
   });
 
-  it("denies real pinned-CLI reads and writes outside its private workspace", async () => {
+  it("denies real CLI reads and writes outside its private workspace", async () => {
     const { base } = await fixture();
     const workspace = path.join(base, "isolated-workspace");
     const outside = path.join(base, "unapproved-source");
@@ -303,8 +303,6 @@ describe("confined staged installation", () => {
     await mkdir(outside);
     await writeFile(path.join(outside, "SKILL.md"), "---\nname: restricted-skill-marker\ndescription: private\n---\n");
 
-    const version = await runConfinedSkills(workspace, ["--version"]);
-    expect(version.stdout.trim()).toBe("1.7.6");
     let output = "";
     try {
       const result = await runConfinedSkills(workspace, ["add", outside, "--list"]);
