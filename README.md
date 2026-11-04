@@ -2,6 +2,8 @@
 
 Browse and manage agent skills in a terminal on macOS and Linux. The app uses `~/.agents/skills` by default and can open another skills directory. Local browsing needs neither Git nor a global `skills` CLI.
 
+AI coding agents wrote most of the code under the maintainer's guidance.
+
 ## Requirements
 
 - Node.js 26.13.0 or later in the 26.x release line, with native FFI support.
