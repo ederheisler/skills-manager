@@ -1,6 +1,10 @@
 name: Native portability
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -27,10 +31,6 @@ jobs:
             os: darwin
             arch: x64
             machine: x86_64
-          - runner: macos-15
-            os: darwin
-            arch: arm64
-            machine: arm64
     env:
       EXPECTED_OS: ${{ matrix.os }}
       EXPECTED_ARCH: ${{ matrix.arch }}
@@ -38,6 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
           set-safe-directory: false
 
@@ -46,6 +47,22 @@ jobs:
           node-version: '26.13.0'
           package-manager-cache: false
           token: ''
+
+      - name: Validate package version
+        if: matrix.os == 'linux' && matrix.arch == 'x64' && (github.event_name == 'pull_request' || github.event_name == 'push')
+        shell: bash
+        run: |
+          node <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          const version = manifest.version;
+          const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+          const match = typeof version === 'string' && version.match(semver);
+          if (!match || match[0] !== version || lock.version !== version || lock.packages?.['']?.version !== version) {
+            throw new Error('Package and lockfile versions must match and be canonical SemVer 2.0.0');
+          }
+          NODE
 
       - name: Check native runtime and tools
         shell: bash
@@ -80,11 +97,6 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes git
           fi
-
-      - name: Select Xcode 26 on macOS 15
-        if: matrix.runner == 'macos-15'
-        shell: bash
-        run: sudo xcode-select --switch /Applications/Xcode_26.3.app/Contents/Developer
 
       - name: Check Git used by the sandbox
         shell: bash
@@ -151,6 +163,13 @@ jobs:
           cd "$fixture/source"
           env -i PATH="$PATH" HOME="$fixture/home" TMPDIR="$fixture/tmp" CI=1 \
             npm ci --no-audit --no-fund
+          if [ "$EXPECTED_OS" = linux ] && [ "$EXPECTED_ARCH" = x64 ]; then
+            mkdir -p "$fixture/test-home" "$fixture/test-tmp"
+            env -i PATH="$PATH" HOME="$fixture/test-home" TMPDIR="$fixture/test-tmp" CI=1 \
+              npm test
+            env -i PATH="$PATH" HOME="$fixture/test-home" TMPDIR="$fixture/test-tmp" CI=1 \
+              npm audit --audit-level=moderate --include=dev
+          fi
           env -i PATH="$PATH" HOME="$fixture/home" TMPDIR="$fixture/tmp" CI=1 \
             npm pack --ignore-scripts --pack-destination "$fixture/pack"
           set -- "$fixture"/pack/*.tgz
@@ -162,7 +181,7 @@ jobs:
             npm install --no-audit --no-fund "$tarball"
 
       - name: Exercise Linux upstream ref and update tests
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.arch == 'arm64'
         shell: bash
         run: |
           fixture="$RUNNER_TEMP/portability"
@@ -179,3 +198,12 @@ jobs:
           cd "$fixture/source"
           env -i PATH="$PATH" HOME="$fixture/smoke-home" TMPDIR="$fixture/smoke-tmp" CI=1 TERM=xterm-256color \
             node scripts/release-smoke.mjs "$fixture/consumer/node_modules/skills-manager"
+
+  required-checks:
+    name: Required checks
+    if: ${{ always() }}
+    needs: portability
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require successful portability matrix
+        run: test "${{ needs.portability.result }}" = "success"

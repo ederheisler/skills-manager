@@ -2,16 +2,18 @@
 
 Date: 2026-09-16
 
-This document records the original design. For current portability, layout,
-and provenance decisions, see [the decisions index](../../decisions/README.md).
+This is the original design, not a description of the current implementation.
+It assumed a globally installed `skills` CLI, a different disabled-skills
+layout, and Git operations over `~/.agents`. Those assumptions were superseded.
+For current setup, behavior, and safety limits, see the [README](../../../README.md)
+and the [decisions index](../../decisions/README.md).
 
 ## Purpose
 
-A visual (terminal UI) wrapper for managing agent skills stored in the
-universal skills repo at `~/.agents`. It wraps the existing `skills` CLI
-(vercel-labs `skills`, installed globally) for install/search/update, and
-adds one capability that CLI doesn't have: quickly enabling and disabling
-individual skills without deleting them.
+The proposed terminal UI would manage agent skills stored in `~/.agents`.
+It would wrap the globally installed vercel-labs `skills` CLI for install,
+search, and update, and add a way to enable or disable individual skills
+without deleting them.
 
 ## Background / confirmed mechanism
 
@@ -20,10 +22,9 @@ individual skills without deleting them.
 - A consuming agent can use a skills directory whose entries are symlinks
   into the canonical folder, for example
   `~/.claude/skills/<name>` -> `../../.agents/skills/<name>`.
-- Consequence: moving `~/.agents/skills/<name>` elsewhere makes every
-  agent's symlink to it dangle, which makes the skill disappear for
-  every agent with no per-agent bookkeeping. Moving it back heals every
-  symlink automatically.
+- Moving `~/.agents/skills/<name>` elsewhere makes each agent symlink to
+  it dangle. The skill disappears for each agent without per-agent
+  bookkeeping. Moving it back restores the links.
 
 ## Enable / disable mechanism
 
@@ -36,20 +37,18 @@ bookkeeping is needed per the mechanism above.
 No new database. On each refresh the app reconciles three sources of
 truth in memory, keyed by folder name:
 
-1. `~/.agents/skills/*` and `~/.agents/.disabled_skills/*` — folder scan,
-   gives enabled/disabled state and existence.
-2. Each folder's `SKILL.md` frontmatter (`name`, `description`, and any
-   `license` / `metadata.authors` / `metadata.version` present) — for
-   display.
-3. `~/.agents/.skill-lock.json` — source repo, install/update timestamps,
-   for provenance.
+1. A folder scan of `~/.agents/skills/*` and
+   `~/.agents/.disabled_skills/*` gives enabled or disabled state and
+   existence.
+2. Each folder's `SKILL.md` frontmatter supplies `name`, `description`,
+   and any `license`, `metadata.authors`, or `metadata.version` for display.
+3. `~/.agents/.skill-lock.json` supplies the source repository and
+   install and update timestamps for provenance.
 
-A skill can be inconsistent: present in the lock file but with no
-matching folder in either `skills/` or `.disabled_skills/` (an orphaned
-install record — the folder was deleted outside the tool). The list
-view flags these rather than hiding them. A folder with no lock entry
-is NOT inconsistent by itself — that's the normal, expected shape for a
-locally authored or manually dropped-in skill; see Provenance below.
+An orphaned install record is a lock entry with no matching folder in
+either location, for example after an external deletion. The proposed
+list would flag it. A folder without a lock entry is normal for a
+locally authored or manually added skill. See Provenance below.
 
 ### Provenance
 
@@ -64,68 +63,55 @@ The original design derives provenance per skill in this order:
 3. **Neither** → labelled **"local (mine)"**. The original design uses
    this label as a heuristic, not proof of authorship.
 
-This is a plain classification function
-(`state/provenance.ts`), not a new stored flag: it's recomputed from
-the two files above on every scan, never persisted.
+The proposed `state/provenance.ts` would recompute this classification
+on every scan instead of storing it.
 
 ## Update flow
 
-Per decision: disabled skills must still receive updates.
+The design required updates for disabled skills. It assumed that
+`skills update` only found skills under `~/.agents/skills` and did not
+recognize `.disabled_skills`. The proposed update flow was:
 
-`skills update` operates on whatever it finds under `~/.agents/skills`;
-it has no notion of `.disabled_skills`. So updating (single skill or
-all) does:
+1. Record which target skills are disabled.
+2. Move them back into `skills/`.
+3. Run `skills update [name] -y` (or `-y` alone for all skills).
+4. Move the recorded skills back into `.disabled_skills/`, even if the
+   update fails, so they do not remain enabled.
 
-1. Snapshot which of the target skill(s) are currently disabled.
-2. Move that snapshot set back into `skills/`.
-3. Run `skills update [name] -y` (or `-y` alone for "update all").
-4. Move the snapshot set back into `.disabled_skills/`, regardless of
-   whether step 3 fully succeeded, so nothing is left stuck re-enabled.
-
-Enabled skills are left in place for step 3 and simply keep whatever
-`skills update` does to them.
+Enabled skills would remain in place for the update.
 
 ## UI (Ink TUI)
 
-Single binary, `skills-manager`.
+The proposed executable was `skills-manager`.
 
-- **List** — one line per skill: name, enabled/disabled badge,
-  provenance (source repo, author, or "local (mine)"), last-updated
-  date, and an inconsistency marker when applicable. Type-to-filter.
-  Keys: `space` toggle enable/disable, `u` update selected, `U` update
-  all, `a` add a skill (wraps `skills find` / `skills add`), `d` remove
-  a skill entirely (wraps `skills remove`, with a confirm step).
-- **Detail pane** — full description, full provenance (source URL and
-  install/update dates from the lock entry, or author/license/version
-  from `SKILL.md` metadata, or the "local (mine)" label), for the
-  currently selected skill.
-- **Status line** — last shell command run against the `skills` CLI and
-  its result (actions are thin wrappers over it); also shows
-  `git status --short` line count for `~/.agents` so the user knows
-  there's something to commit.
-- **Git panel** (`g` to open) — shows `git status --short` and
-  `git diff --stat` for `~/.agents`. From the panel: `c` stages
-  everything (`git add -A`) and commits with a typed message, `p`
-  pushes, `escape` closes. This is the only place the tool touches
-  git beyond the read-only status line, and every action requires an
-  explicit keypress each time — no automatic or background commits.
+- **List**: One line per skill with name, enabled or disabled badge,
+  provenance, last-updated date, and an inconsistency marker where
+  applicable. Type to filter. Keys: `space` toggles enable or disable,
+  `u` updates the selected skill, `U` updates all, `a` adds a skill via
+  `skills find` or `skills add`, and `d` removes a skill via
+  `skills remove` after confirmation.
+- **Detail pane**: Description and provenance for the selected skill,
+  including source URL and dates, author metadata, or "local (mine)".
+- **Status line**: The last `skills` CLI command and its result, plus
+  the `git status --short` line count for `~/.agents`.
+- **Git panel**: `g` opens status and diff statistics for `~/.agents`.
+  `c` stages everything (`git add -A`) and commits with a typed message,
+  `p` pushes, and `escape` closes the panel. Each Git mutation requires
+  an explicit keypress. No commit runs automatically or in the background.
 
 ## Non-goals
 
-- No *automatic* commit to the `~/.agents` repo, ever — nothing commits
-  as a side effect of enable/disable/update/add/remove. Committing (and
-  pushing) is available from the Git panel, but only as an explicit,
-  user-triggered action each time, never implicit or background.
-- No new persistent state/database beyond what's already on disk
-  (skills folders + lock file). No settings beyond maybe a remembered
-  filter string.
-- No per-agent symlink management — disabling relies entirely on the
-  dangling-symlink behavior described above.
+- No automatic commits to `~/.agents` as a side effect of skill actions.
+  The Git panel offers commit and push only as explicit user actions.
+- No persistent database beyond the skill folders and lock file. A
+  remembered filter string was the only contemplated setting.
+- No per-agent symlink management. Disabling relies on the dangling
+  symlinks described above.
 
 ## Tech stack
 
-TypeScript, Ink (TUI), `execa` (shell out to the `skills` CLI),
-`gray-matter` (parse `SKILL.md` frontmatter).
+The proposed stack was TypeScript, Ink for the terminal UI, `execa` to
+run the `skills` CLI, and `gray-matter` to parse frontmatter.
 
 ```
 src/
@@ -144,7 +130,6 @@ src/
 
 ## Open questions / future work
 
-None blocking. Possible later additions (not in scope for v1): a
-file-watcher to auto-refresh if `~/.agents` changes externally while the
-app is open; per-agent symlink repair/creation for agents beyond Claude
-Code once they adopt the same layout.
+The original design listed no blocking questions. Possible later work
+included a file watcher for external changes and symlink repair or
+creation for additional agents.

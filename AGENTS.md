@@ -3,15 +3,14 @@
 Terminal UI for managing skills in an explicitly selected directory.
 The default is `~/.agents/skills`. Adopt existing installations in place.
 
-Design: `docs/superpowers/specs/2026-09-16-skills-manager-design.md`.
-Read it before making structural changes.
-
-For portability, distribution, or skills layout changes, read `docs/decisions/README.md`.
+For structural, portability, distribution, or skills layout changes, read
+`docs/decisions/README.md` first. The original design in
+`docs/superpowers/specs/2026-09-16-skills-manager-design.md` is historical.
 
 ## Stack
 
 TypeScript, OpenTUI (direct renderables, not Ink), bounded data-only YAML,
-and a pinned Vercel `skills` dependency behind an operating-system boundary.
+and the Vercel `skills` dependency behind an operating-system boundary.
 
 ## Rules
 
@@ -63,7 +62,7 @@ and a pinned Vercel `skills` dependency behind an operating-system boundary.
 - Git view's `t` binding is a full-context diff toggle. The header must present it
   as pink `t` followed immediately by `oggle`; do not insert a space between the
   binding and label.
-- Place a shortcut in the header of the pane it controls. Git’s `t` toggle
+- Place a shortcut in the header of the pane it controls. Git's `t` toggle
   belongs above the diff content pane, never above the working-tree file list.
   Verify its captured rendered line contains both the selected path and `toggle`.
 - Git status filtering uses pink `s` followed immediately by `tatus`, never

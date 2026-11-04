@@ -115,7 +115,7 @@ function formatFrontmatter(skill: Skill | null | undefined): FrontmatterItem[] {
   ];
 }
 
-type Mode = "browse" | "search" | "add" | "replace-source" | "search-results" | "git" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch" | "confirm";
+type Mode = "browse" | "search" | "add" | "replace-source" | "search-results" | "git" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch" | "confirm" | "help";
 type DetailRendering = "markdown" | "raw";
 
 interface GitFile {
@@ -138,6 +138,10 @@ export class SkillsManagerTui {
   #skills: Skill[] = [];
   #selectedIndex = 0;
   #mode: Mode = "browse";
+  #helpReturnMode: "browse" | "git" = "browse";
+  #helpOverlay: BoxRenderable | null = null;
+  #helpContent: ScrollBoxRenderable | null = null;
+  #screen: BoxRenderable | null = null;
   #input = "";
   #scope: SkillScope = "all";
   #state: SkillState = "all";
@@ -315,6 +319,7 @@ export class SkillsManagerTui {
   };
 
   #onSelection = (selection: Selection): void => {
+    if (this.#mode === "help") return;
     const text = selection.getSelectedText();
     if (text === "") return;
     const revision = this.#revision;
@@ -362,6 +367,21 @@ export class SkillsManagerTui {
 
   async #handleKey(key: KeyEvent): Promise<void> {
     if (this.#busy) return;
+    if (this.#mode === "help") {
+      key.stopPropagation();
+      if (key.name === "escape" || key.name === "?" || key.sequence === "?") {
+        this.#mode = this.#helpReturnMode;
+        this.#helpOverlay?.destroyRecursively();
+        this.#helpOverlay = null;
+        this.#helpContent = null;
+        if (this.#screen) this.#screen.opacity = 1;
+      } else if (key.name === "pageup" || key.name === "pagedown") {
+        this.#helpContent?.scrollBy(key.name === "pageup" ? -1 : 1, "viewport");
+      } else if (key.name === "up" || key.name === "down") {
+        this.#helpContent?.scrollBy(key.name === "up" ? -1 : 1);
+      }
+      return;
+    }
     if (this.#mode === "confirm") {
       if (key.name === "pageup" || key.name === "pagedown") {
         this.#confirmationContent?.scrollBy(key.name === "pageup" ? -1 : 1, "viewport");
@@ -413,6 +433,15 @@ export class SkillsManagerTui {
       if (key.name === "up" || key.name === "k") this.#moveContextMenuSelection(-1);
       else if (key.name === "down" || key.name === "j") this.#moveContextMenuSelection(1);
       else if (key.name === "return") await this.#runContextMenuAction(this.#contextMenuAction);
+      return;
+    }
+    if ((this.#mode === "browse" || this.#mode === "git") && (key.name === "?" || key.sequence === "?")) {
+      key.stopPropagation();
+      this.#helpReturnMode = this.#mode;
+      this.#mode = "help";
+      if (this.#screen) this.#screen.opacity = 0.1;
+      this.#helpOverlay = this.#createHelpDialog();
+      this.#root.add(this.#helpOverlay);
       return;
     }
     if (this.#mode === "search" || this.#mode === "add" || this.#mode === "replace-source" || this.#mode === "remote-name" || this.#mode === "remote-url" || this.#mode === "fetch-remote" || this.#mode === "fetch-branch") {
@@ -1481,10 +1510,14 @@ export class SkillsManagerTui {
   get #isGitMode(): boolean {
     return this.#mode === "git" || this.#mode === "commit-message" || this.#mode === "remote-name"
       || this.#mode === "remote-url" || this.#mode === "fetch-remote" || this.#mode === "fetch-branch"
-      || (this.#mode === "confirm" && this.#confirmation?.returnMode === "git");
+      || (this.#mode === "confirm" && this.#confirmation?.returnMode === "git")
+      || (this.#mode === "help" && this.#helpReturnMode === "git");
   }
 
   #render(): void {
+    const helpScrollTop = this.#helpContent?.scrollTop ?? 0;
+    this.#helpContent = null;
+    this.#helpOverlay = null;
     this.#detailContent = null;
     this.#metadataContent = null;
     this.#confirmationContent = null;
@@ -1504,9 +1537,10 @@ export class SkillsManagerTui {
       width: "100%",
       height: "100%",
       flexDirection: "column",
-      opacity: this.#mode === "confirm" || this.#mode === "search-results" ? 0.1 : 1,
+      opacity: this.#mode === "confirm" || this.#mode === "search-results" || this.#mode === "help" ? 0.1 : 1,
     });
     this.#root.add(screen);
+    this.#screen = screen;
     const isGitMode = this.#isGitMode;
     const header = new BoxRenderable(this.renderer, {
       width: "100%",
@@ -1561,9 +1595,14 @@ export class SkillsManagerTui {
     if (this.#contextMenu) this.#root.add(this.#createContextMenu());
     if (this.#mode === "confirm") this.#root.add(this.#createConfirmationDialog());
     if (this.#mode === "search-results") this.#root.add(this.#createSearchResultsDialog());
+    if (this.#mode === "help") {
+      this.#helpOverlay = this.#createHelpDialog(helpScrollTop);
+      this.#root.add(this.#helpOverlay);
+    }
   }
 
   #createFooter(): BoxRenderable {
+    const mode = this.#mode === "help" ? this.#helpReturnMode : this.#mode;
     const notice = this.#status || this.#transientMessage || this.#message;
     const footer = new BoxRenderable(this.renderer, {
       width: "100%",
@@ -1607,9 +1646,13 @@ export class SkillsManagerTui {
       controls.add(entry);
       queueMicrotask(() => { if (this.#entryInput === entry) entry.focus(); });
       controls.add(new TextRenderable(this.renderer, { content: " · Enter review · Esc cancel", fg: colors.muted, height: 1, wrapMode: "none" }));
-    } else if (this.#mode === "git" || (this.#mode === "confirm" && this.#isGitMode)) {
-      controls.add(new TextRenderable(this.renderer, { content: this.#gitToolbarText(), fg: colors.muted, height: 1, wrapMode: "none" }));
-    } else if (this.#mode !== "browse") {
+    } else if (mode === "git" || (mode === "confirm" && this.#isGitMode)) {
+      controls.add(new TextRenderable(this.renderer, { content: this.#gitToolbarText(), fg: colors.muted, height: 1, minWidth: 0, flexShrink: 1, wrapMode: "none" }));
+      controls.add(new TextRenderable(this.renderer, {
+        content: t` · ${fg(colors.accent)(bold("?"))} help`,
+        fg: colors.muted, height: 1, flexShrink: 0, wrapMode: "none", selectable: false,
+      }));
+    } else if (mode !== "browse") {
       const entry = new TextRenderable(this.renderer, { content: escapeTerminalSingleLine(this.#footerText()), fg: colors.muted, height: 1, wrapMode: "none" });
       this.#entryText = entry;
       controls.add(entry);
@@ -1618,8 +1661,14 @@ export class SkillsManagerTui {
         content: t`${fg(colors.accent)(bold("o"))}pen · ${fg(colors.accent)(bold("space"))} enable/disable · ${fg(colors.accent)(bold("r"))}efresh · ${fg(colors.accent)(bold("u"))}pdate · u${fg(colors.accent)(bold("p"))}date all · ${fg(colors.accent)(bold("v"))} check · ${fg(colors.accent)(bold("a"))}dd · ${fg(colors.accent)(bold("d"))}elete · ${fg(colors.accent)(bold("g"))}it${this.options.selectSkillsDir ? " · i installation" : ""} · ${fg(colors.accent)(bold("q"))}uit`,
         fg: colors.muted,
         height: 1,
+        minWidth: 0,
+        flexShrink: 1,
         wrapMode: "none",
         selectable: false,
+      }));
+      controls.add(new TextRenderable(this.renderer, {
+        content: t` · ${fg(colors.accent)(bold("?"))} help`,
+        fg: colors.muted, height: 1, flexShrink: 0, wrapMode: "none", selectable: false,
       }));
     }
     footer.add(controls);
@@ -2024,6 +2073,102 @@ export class SkillsManagerTui {
     detail.add(detailTitle);
     column.add(detail);
     return column;
+  }
+
+  #createHelpDialog(scrollTop = 0): BoxRenderable {
+    const overlay = new BoxRenderable(this.renderer, {
+      position: "absolute",
+      width: "100%",
+      height: "100%",
+      flexDirection: "column",
+      justifyContent: "center",
+      alignItems: "center",
+      paddingX: 1,
+      paddingY: 1,
+      onMouse: (event) => event.stopPropagation(),
+    });
+    const dialog = new BoxRenderable(this.renderer, {
+      width: "100%",
+      height: "100%",
+      minWidth: 1,
+      minHeight: 1,
+      maxWidth: 82,
+      maxHeight: 22,
+      flexDirection: "column",
+      border: true,
+      borderColor: colors.accent,
+      title: "Keyboard help",
+      titleColor: colors.accent,
+      backgroundColor: colors.panel,
+    });
+    const content = new ScrollBoxRenderable(this.renderer, {
+      width: "100%",
+      flexGrow: 1,
+      flexBasis: 0,
+      minHeight: 0,
+      contentOptions: { backgroundColor: colors.panel, paddingX: 1 },
+      viewportOptions: { backgroundColor: colors.panel },
+      scrollbarOptions: { trackOptions: { foregroundColor: colors.accent, backgroundColor: colors.panel } },
+    });
+    this.#helpContent = content;
+    if (scrollTop) {
+      this.renderer.once("frame", () => {
+        if (this.#helpContent === content && !content.isDestroyed) content.scrollTo(scrollTop);
+      });
+    }
+    content.add(new TextRenderable(this.renderer, {
+      content: [
+        "Navigation",
+        "Up/down or j/k   Select a skill, Git file or search result",
+        "[ / ] or Ctrl+p/n   Select previous/next skill file",
+        "Alt+up/down   Select previous/next skill file",
+        ", or .   Scroll skill metadata",
+        "PgUp/PgDn   Scroll the file or Git diff",
+        "?   Open help from browsing or Git",
+        "",
+        "Browsing",
+        "/   Filter skills; Enter applies, Esc clears",
+        "s   Cycle source scope     e   Cycle enabled state",
+        "t   Toggle Markdown/raw    o   Open selected file",
+        "Space   Review enable/disable     d or Delete   Review removal",
+        "u   Update selected        p   Update all",
+        "v   Review update check    a   Search and add skills",
+        "r   Refresh                i   Select installation, if available",
+        "g   Open Git               q   Quit",
+        "",
+        "Git",
+        "s   Cycle status filter    t   Toggle full diff context",
+        "r   Refresh                i   Initialize repository",
+        "n   Add remote             c   Review commit",
+        "f   Fetch                  l   Pull",
+        "p   Push                   Esc   Return to browsing",
+        "Git actions depend on repository state and require review.",
+        "",
+        "Reviews and prompts",
+        "Up/down or PgUp/PgDn   Scroll review",
+        "Left/right or Tab   Select Cancel/Approve",
+        "y   Approve     n or Esc   Cancel     Enter   Use selection",
+        "Informational reviews: Enter or Esc closes",
+        "Search results: Up/down or j/k select, Enter prepares, o opens repo",
+        "Text prompts: ? is literal, Enter submits, Esc cancels",
+        "Context menu: Up/down or j/k select, Enter acts; Esc clears filter or closes",
+      ].join("\n"),
+      width: "100%",
+      height: "auto",
+      fg: colors.text,
+      wrapMode: "word",
+      selectable: false,
+    }));
+    dialog.add(content);
+    dialog.add(new TextRenderable(this.renderer, {
+      content: " ?/Esc close · Up/down scroll · PgUp/PgDn page",
+      fg: colors.muted,
+      height: 1,
+      wrapMode: "none",
+      selectable: false,
+    }));
+    overlay.add(dialog);
+    return overlay;
   }
 
   #createConfirmationDialog(): BoxRenderable {

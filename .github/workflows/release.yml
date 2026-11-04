@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [Native portability]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish release
+    if: >-
+      github.repository == 'ederheisler/skills-manager' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # This job never checks out, executes, or downloads artifacts from the validated commit.
+      - name: Publish the validated main commit
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const run = context.payload.workflow_run;
+            const sha = run.head_sha;
+            if (`${owner}/${repo}` !== 'ederheisler/skills-manager' ||
+                run.event !== 'push' || run.head_branch !== 'main' ||
+                run.head_repository?.full_name !== `${owner}/${repo}` ||
+                run.conclusion !== 'success' || !/^[0-9a-f]{40}$/.test(sha)) {
+              throw new Error('Release requires a successful main push in the trusted repository.');
+            }
+
+            async function isCurrentMain() {
+              const { data } = await github.rest.repos.getBranch({ owner, repo, branch: 'main' });
+              if (!data.protected) throw new Error('Refusing to release from an unprotected main branch.');
+              return data.commit.sha === sha;
+            }
+
+            // Stale successful runs never release; the latest main commit must pass its own checks.
+            if (!await isCurrentMain()) {
+              core.notice(`Skipping stale validated commit ${sha}.`);
+              return;
+            }
+
+            async function readJson(path, ref) {
+              const { data } = await github.rest.repos.getContent({ owner, repo, path, ref });
+              if (Array.isArray(data) || data.type !== 'file' || data.encoding !== 'base64') {
+                throw new Error(`Cannot read ${path} as a repository file at ${ref}.`);
+              }
+              return JSON.parse(Buffer.from(data.content, 'base64').toString('utf8'));
+            }
+
+            async function versionAt(ref) {
+              const manifest = await readJson('package.json', ref);
+              const lock = await readJson('package-lock.json', ref);
+              const version = manifest.version;
+              const match = typeof version === 'string' && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(version);
+              if (!match || match[0] !== version || (match[4] && match[4].split('.').some(part => /^\d+$/.test(part) && part.length > 1 && part.startsWith('0'))) ||
+                  lock.version !== version || lock.packages?.['']?.version !== version) {
+                throw new Error(`package.json and package-lock.json must agree on a canonical SemVer at ${ref}.`);
+              }
+              return { version, prerelease: Boolean(match[4]) };
+            }
+
+            const { version, prerelease } = await versionAt(sha);
+            const tag = `v${version}`;
+            let existingRef;
+            try {
+              existingRef = (await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            // The by-tag endpoint excludes drafts, so inspect the authenticated release list too.
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const matching = releases.filter(release => release.tag_name === tag);
+            if (matching.length > 1 || matching.some(release => release.draft)) {
+              throw new Error(`${tag} has a conflicting or draft release; resolve it before retrying.`);
+            }
+            const existingRelease = matching[0];
+            if (Boolean(existingRef) !== Boolean(existingRelease)) {
+              throw new Error(`${tag} has a tag without a published release or a release without its tag; resolve it before retrying.`);
+            }
+
+            if (existingRef) {
+              let object = existingRef.object;
+              for (let depth = 0; object.type === 'tag' && depth < 10; depth++) {
+                object = (await github.rest.git.getTag({ owner, repo, tag_sha: object.sha })).data.object;
+              }
+              if (object.type !== 'commit') throw new Error(`${tag} does not resolve to a commit.`);
+              if (object.sha !== sha) {
+                let comparison;
+                try {
+                  comparison = await github.rest.repos.compareCommitsWithBasehead({
+                    owner, repo, basehead: `${object.sha}...${sha}`, per_page: 1,
+                  });
+                } catch (error) {
+                  if (error.status === 404 || error.status === 409) {
+                    throw new Error(`Cannot verify that ${tag} is in validated main history; resolve it before retrying.`);
+                  }
+                  throw error;
+                }
+                if (comparison.data.merge_base_commit.sha !== object.sha) {
+                  throw new Error(`${tag} points outside validated main history; resolve it before retrying.`);
+                }
+              }
+              if ((await versionAt(object.sha)).version !== version) {
+                throw new Error(`${tag} points to a commit with a different manifest version.`);
+              }
+              core.notice(`${tag} is already released; leaving the existing tag and release unchanged.`);
+              return;
+            }
+
+            if (!await isCurrentMain()) {
+              core.notice(`Skipping stale validated commit ${sha}.`);
+              return;
+            }
+            await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha });
+            // A branch update or an external tag change during publication must not publish the wrong commit.
+            const createdRef = (await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` })).data;
+            if (createdRef.object.type !== 'commit' || createdRef.object.sha !== sha || !await isCurrentMain()) {
+              throw new Error(`${tag} was created but main or the tag changed; no release was published. Resolve the tag before retrying.`);
+            }
+            await github.rest.repos.createRelease({
+              owner, repo, tag_name: tag, target_commitish: sha, name: tag,
+              draft: false, prerelease,
+              make_latest: prerelease ? 'false' : 'legacy',
+              body: [
+                'Requires Node.js >=26.13.0 and <27, npm, Git >=2.48, and a C11 compiler (`cc`).',
+                '',
+                'Run from this tagged repository:',
+                '```sh',
+                `npx --yes github:ederheisler/skills-manager#${tag}`,
+                '```',
+                '',
+                'GitHub provides source archives automatically. No prebuilt native binaries or npm registry package are published.',
+              ].join('\n'),
+            });
+            core.notice(`Published ${tag} at ${sha}.`);

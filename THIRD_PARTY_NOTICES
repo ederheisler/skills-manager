@@ -3,7 +3,8 @@ Third-party notices
 
 The skills-manager package does not bundle node_modules. npm installs the
 following direct runtime dependencies separately, together with their own
-license files and their dependencies' notices:
+license files and their dependencies' notices. The versions listed are the
+versions in the tested dependency inventory:
 
 - @opentui/core 0.5.11 and its platform-specific native package: MIT
 - execa 9.6.1: MIT

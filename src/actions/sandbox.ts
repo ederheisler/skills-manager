@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { isRecord } from "../state/validation.js";
 
-const VERSION = "1.7.6";
 const OUTPUT_LIMIT = 4 * 1024 * 1024;
 const TIMEOUT_MS = 120_000;
 const execFileAsync = promisify(execFile);
@@ -14,6 +13,7 @@ const execFileAsync = promisify(execFile);
 interface RuntimePackage { name: string; root: string }
 interface PackageLocation {
   executable: string;
+  relativeExecutable: string;
   packages: RuntimePackage[];
 }
 interface MacGit {
@@ -25,7 +25,7 @@ interface MacGit {
 async function packageRoot(name: string, requester: string): Promise<string> {
   let entry: string;
   try { entry = createRequire(requester).resolve(name); }
-  catch { throw new Error(`The pinned skills runtime dependency ${name} is unavailable.`); }
+  catch { throw new Error(`The skills runtime dependency ${name} is unavailable.`); }
   let current = path.dirname(await realpath(entry));
   for (;;) {
     try {
@@ -33,7 +33,7 @@ async function packageRoot(name: string, requester: string): Promise<string> {
       if (isRecord(value) && value.name === name) return current;
     } catch { /* Continue from a nested package entry point. */ }
     const parent = path.dirname(current);
-    if (parent === current) throw new Error(`Cannot locate the pinned skills runtime dependency ${name}.`);
+    if (parent === current) throw new Error(`Cannot locate the skills runtime dependency ${name}.`);
     current = parent;
   }
 }
@@ -41,16 +41,21 @@ async function packageRoot(name: string, requester: string): Promise<string> {
 async function locatePackage(): Promise<PackageLocation> {
   let manifest: string;
   try { manifest = await realpath(fileURLToPath(import.meta.resolve("skills/package.json"))); }
-  catch { throw new Error(`The required skills@${VERSION} package is unavailable.`); }
+  catch { throw new Error("The required skills package is unavailable."); }
   let value: unknown;
   try { value = JSON.parse(await readFile(manifest, "utf8")); }
-  catch { throw new Error(`The required skills@${VERSION} package has an unreadable manifest.`); }
-  if (!isRecord(value) || value.name !== "skills" || value.version !== VERSION || !isRecord(value.bin)
-    || typeof value.bin.skills !== "string" || path.posix.normalize(value.bin.skills) !== "bin/cli.mjs") {
-    throw new Error(`Unsupported skills package; exactly skills@${VERSION} is required.`);
+  catch { throw new Error("The required skills package has an unreadable manifest."); }
+  if (!isRecord(value) || value.name !== "skills") {
+    throw new Error("The installed skills package has an invalid identity.");
+  }
+  const bin = typeof value.bin === "string" ? value.bin : isRecord(value.bin) ? value.bin.skills : undefined;
+  if (typeof bin !== "string" || !bin || path.isAbsolute(bin)) {
+    throw new Error("The installed skills package has an invalid executable entry.");
   }
   const root = path.dirname(manifest);
-  const executable = await realpath(path.join(root, "bin", "cli.mjs"));
+  const candidate = path.resolve(root, bin);
+  if (!candidate.startsWith(`${root}${path.sep}`)) throw new Error("The skills executable escapes its package.");
+  const executable = await realpath(candidate);
   if (!executable.startsWith(`${root}${path.sep}`)) throw new Error("The skills executable escapes its package.");
   await access(executable);
   const packages = new Map<string, string>([["skills", root]]);
@@ -72,7 +77,7 @@ async function locatePackage(): Promise<PackageLocation> {
       if (!existing) { packages.set(name, dependencyRoot); queue.push({ name, root: dependencyRoot }); }
     }
   }
-  return { executable, packages: queue };
+  return { executable, relativeExecutable: path.relative(root, executable), packages: queue };
 }
 
 function seatbeltString(value: string): string {
@@ -204,7 +209,7 @@ async function invoke(command: string, args: string[], cwd: string, env: NodeJS.
 }
 
 /**
- * Execute the pinned CLI with direct filesystem access confined to the listed
+ * Execute the installed CLI with direct filesystem access confined to the listed
  * paths. Network access, including loopback, is available for explicit remote
  * operations; this is not an arbitrary-code or network-isolation boundary.
  */
@@ -229,7 +234,7 @@ export async function runConfinedSkills(workspace: string, args: string[], local
   if (process.platform === "linux") {
     // No host home, runtime sockets, or credentials are mounted in this namespace.
     const sandboxArgs = linuxArguments(root, location, node, localSource);
-    sandboxArgs.push("--chdir", "/workspace", "--", "/app/node", "/app/node_modules/skills/bin/cli.mjs", ...args);
+    sandboxArgs.push("--chdir", "/workspace", "--", "/app/node", path.join("/app/node_modules/skills", location.relativeExecutable), ...args);
     return invoke("bwrap", sandboxArgs, root, cleanEnvironment("/workspace"));
   }
   throw new Error("Remote actions require macOS sandbox-exec or Linux bubblewrap; this platform is unsupported.");

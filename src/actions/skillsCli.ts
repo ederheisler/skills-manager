@@ -57,7 +57,7 @@ function installations(count: number): string {
   return String(count);
 }
 
-/** Uses the pinned CLI's documented search endpoint directly: the CLI itself hides network failures. */
+/** Uses the CLI's documented search endpoint directly: the CLI itself hides network failures. */
 export async function findSkills(query: string, endpoint = "https://skills.sh/api/search"): Promise<SkillSearchResult[]> {
   if (!query.trim() || CONTROL.test(query)) throw new Error("Enter a search query without control characters.");
   const url = new URL(endpoint);
@@ -102,7 +102,7 @@ async function sourceForSandbox(source: string): Promise<{ argument: string; loc
   return { argument: source };
 }
 
-/** Pass a selector only when the pinned parser will not apply it itself. */
+/** Pass a selector only when the CLI parser will not apply it itself. */
 function replacementSkillArgument(source: string, targetName: string, localSource?: string): string | null {
   if (localSource) return targetName;
   const hash = source.indexOf("#");
@@ -123,7 +123,7 @@ function replacementSkillArgument(source: string, targetName: string, localSourc
   return selector;
 }
 
-/** Match the pinned CLI's normalized JSON source against its full-URL lock source. */
+/** Match the CLI's normalized JSON source against its full-URL lock source. */
 function matchesStagedSource(entry: LockEntry, reported: string, requested: string): boolean {
   if (entry.source === reported || entry.sourceUrl === reported) return true;
   try {
@@ -263,9 +263,9 @@ export async function prepareSourceChange(approved: ApprovedSkillsRoot, source: 
       throw new Error("The confined installer reported a failure or skipped an unsafe source link.");
     }
     let result: unknown;
-    try { result = JSON.parse(output.stdout); } catch { throw new Error("The pinned installer returned invalid JSON."); }
+    try { result = JSON.parse(output.stdout); } catch { throw new Error("The installer returned invalid JSON."); }
     if (!Array.isArray(result) || result.length === 0 || result.some((item) => !isRecord(item) || item.status !== "installed" || typeof item.name !== "string" || typeof item.path !== "string" || typeof item.source !== "string")) {
-      throw new Error("The pinned installer did not produce a complete successful installation.");
+      throw new Error("The installer did not produce a complete successful installation.");
     }
     if (selected && result.length !== 1) throw new Error("A replacement must produce exactly one staged skill.");
     const stagedRoot = path.join(workspace, "home", ".agents", "skills");
@@ -282,9 +282,9 @@ export async function prepareSourceChange(approved: ApprovedSkillsRoot, source: 
     let stageLock: unknown = null;
     if (lockText !== undefined) {
       try { stageLock = JSON.parse(lockText); }
-      catch { throw new Error("The pinned installer wrote invalid source metadata."); }
+      catch { throw new Error("The installer wrote invalid source metadata."); }
       if (!isRecord(stageLock) || stageLock.version !== 3 || !isRecord(stageLock.skills)) {
-        throw new Error("The pinned installer wrote unsupported source metadata.");
+        throw new Error("The installer wrote unsupported source metadata.");
       }
     }
     const changes: PreparedSkillChange["changes"] = [];
@@ -327,7 +327,7 @@ export async function prepareSourceChange(approved: ApprovedSkillsRoot, source: 
       } else if (!validStagedEntry) {
         entry = explicitSourceEntry(source);
       }
-      if (!entry || !validSourceEntry(entry)) throw new Error("The pinned installer reported unsupported or unsafe source metadata.");
+      if (!entry || !validSourceEntry(entry)) throw new Error("The installer reported unsupported or unsafe source metadata.");
       if (priorReceipt?.entry.sourceUrl === entry.sourceUrl) entry.installedAt = priorReceipt.entry.installedAt;
       const historicalBaseline = selected ? priorReceipt?.historicalBaseline ?? "unknown" : "none";
       const rootIdentity = await physicalRootIdentity(approved);

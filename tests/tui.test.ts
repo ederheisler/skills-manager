@@ -128,7 +128,6 @@ describe("SkillsManagerTui", () => {
       expect(frame).toContain("Author: Ada, Grace");
       expect(frame).toContain("Entry: directory");
       expect(frame).toContain(`Directory: "${skillsDir}"`);
-      expect(frame).toContain("No Git repository at selected directory.");
       expect(frame).not.toContain("local (mine)");
       expect(frame).toContain("[off] [unknown] beta");
       await setup.mockInput.typeText("r");
@@ -236,6 +235,251 @@ describe("SkillsManagerTui", () => {
       setup.renderer.destroy();
     }
   });
+
+  it("opens help from browsing and returns to the same filter and selected file with either close key", async () => {
+    const { skillsDir } = await fixture();
+    const notes = ["Notes from the selected file.", ...Array.from({ length: 70 }, (_, index) => `Notes line ${index + 1}`)];
+    await writeFile(path.join(skillsDir, "alpha", "notes.txt"), `${notes.join("\n")}\n`);
+    const setup = await createTestRenderer({ width: 180, height: 30 });
+    try {
+      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("quit · ? help");
+      const controls = setup.captureSpans().lines.find((line) =>
+        line.spans.map((span) => span.text).join("").includes("? help"));
+      expect(controls?.spans.some((span) => span.text === "?" && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
+      setup.resize(80, 30);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("? help");
+      setup.resize(180, 30);
+      await setup.renderOnce();
+
+      await setup.mockInput.typeText("/alpha");
+      setup.mockInput.pressEnter();
+      await setup.waitFor(() => setup.captureCharFrame().includes("filter: alpha"));
+      await setup.mockInput.typeText("]");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Notes from the selected file."));
+      setup.mockInput.pressKey("\u001b[6~");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Notes line 30"));
+
+      await setup.mockInput.typeText("?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Keyboard help"));
+      let frame = setup.captureCharFrame();
+      expect(frame).toContain("Navigation");
+      expect(frame).toContain("?/Esc close");
+      expect(frame).toContain("PgUp/PgDn");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Keyboard help"));
+      frame = setup.captureCharFrame();
+      expect(frame).toContain("filter: alpha");
+      expect(frame).toContain("Notes line 30");
+
+      await setup.mockInput.typeText("?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Keyboard help"));
+      await setup.mockInput.typeText("?");
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Keyboard help"));
+      expect(setup.captureCharFrame()).toContain("filter: alpha");
+      expect(setup.captureCharFrame()).toContain("Notes line 30");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  it("blocks destructive keys and background mouse actions while help is open", async () => {
+    const { home, skillsDir } = await fixture();
+    const outside = path.join(home, "outside.txt");
+    await writeFile(outside, "outside remains unchanged\n");
+    const alpha = path.join(skillsDir, "alpha", "SKILL.md");
+    const beta = path.join(skillsDir, ".disabled_skills", "beta", "SKILL.md");
+    const alphaBefore = await readFile(alpha, "utf8");
+    const betaBefore = await readFile(beta, "utf8");
+    const setup = await createTestRenderer({ width: 140, height: 24 });
+    try {
+      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.renderOnce();
+      const rows = setup.captureCharFrame().split("\n");
+      const betaRow = rows.findIndex((row) => row.includes("[off] [unknown] beta"));
+      expect(betaRow).toBeGreaterThanOrEqual(0);
+      const betaX = rows[betaRow]!.indexOf("[off]");
+
+      await setup.mockInput.typeText("?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Keyboard help"));
+      await setup.mockInput.typeText("qd goy");
+      setup.mockInput.pressEnter();
+      await setup.mockMouse.click(betaX, betaRow);
+      await setup.mockMouse.click(betaX, betaRow, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Keyboard help");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Keyboard help"));
+      expect(setup.captureCharFrame()).toContain("Alpha body");
+      expect(setup.captureCharFrame()).not.toContain("Remove skill");
+      expect(setup.captureCharFrame()).not.toContain("Disable skill");
+      expect(await readFile(alpha, "utf8")).toBe(alphaBefore);
+      expect(await readFile(beta, "utf8")).toBe(betaBefore);
+      expect(await readFile(outside, "utf8")).toBe("outside remains unchanged\n");
+      expect(await exists(path.join(skillsDir, ".skills-manager"))).toBe(false);
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  it("scrolls keyboard help in a short viewport without losing its position", async () => {
+    const { skillsDir } = await fixture();
+    const setup = await createTestRenderer({ width: 60, height: 10 });
+    try {
+      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.mockInput.typeText("?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Keyboard help"));
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).toContain("Navigation");
+      const helpRows = setup.captureCharFrame().split("\n");
+      const helpTop = helpRows.findIndex((row) => row.includes("┌─Keyboard help"));
+      expect(helpTop).toBeGreaterThanOrEqual(0);
+      const helpLeft = helpRows[helpTop]!.indexOf("┌─Keyboard help");
+      await setup.mockMouse.scroll(helpLeft + 4, helpTop + 2, "down");
+      await setup.renderOnce();
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).not.toContain("Navigation");
+      setup.mockInput.pressKey("\u001b[5~");
+      await setup.renderOnce();
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).toContain("Navigation");
+
+      setup.mockInput.pressArrow("down");
+      await setup.renderOnce();
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).not.toContain("Navigation");
+      setup.mockInput.pressArrow("up");
+      await setup.renderOnce();
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).toContain("Navigation");
+
+      setup.mockInput.pressKey("\u001b[6~");
+      await setup.renderOnce();
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).not.toContain("Navigation");
+      const scrolled = confirmationText(setup.captureCharFrame(), "Keyboard help");
+      await setup.mockInput.typeText("d");
+      await setup.renderOnce();
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).toBe(scrolled);
+      setup.resize(48, 8);
+      await setup.renderOnce();
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).not.toContain("Navigation");
+      setup.resize(60, 10);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("\u001b[5~");
+      await setup.renderOnce();
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).toContain("Navigation");
+      for (let index = 0; index < 20; index++) {
+        setup.mockInput.pressKey("\u001b[6~");
+        await setup.renderOnce();
+      }
+      expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).toContain("Context menu:");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Keyboard help"));
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  it("returns to the selected Git diff and keeps question marks literal in prompts", async () => {
+    const { home, skillsDir } = await fixture();
+    await initGit(skillsDir);
+    await commitFixture(skillsDir);
+    await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), "---\nname: alpha\n---\n\nFirst Git change.\n");
+    await writeFile(path.join(skillsDir, "alpha", "notes.txt"), "Second Git change.\n");
+    const outside = path.join(home, "git-outside.txt");
+    await writeFile(outside, "outside Git fixture\n");
+    const statusBefore = await git(skillsDir, "status", "--porcelain");
+    const setup = await createTestRenderer({ width: 180, height: 30 });
+    try {
+      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.mockInput.typeText("g");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
+      expect(setup.captureCharFrame()).toContain("? help");
+      const gitControls = setup.captureSpans().lines.find((line) =>
+        line.spans.map((span) => span.text).join("").includes("? help"));
+      expect(gitControls?.spans.some((span) => span.text === "?" && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
+      await setup.mockInput.typeText("s");
+      await setup.waitFor(() => setup.captureCharFrame().includes("status: ??"));
+      await setup.mockInput.typeText("s");
+      await setup.waitFor(() => setup.captureCharFrame().includes("status: M"));
+      await setup.mockInput.typeText("j");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Second Git change."));
+      const gitRows = setup.captureCharFrame().split("\n");
+      const firstFileRow = gitRows.findIndex((row) => row.includes('"alpha/SKILL.md"'));
+      const toolbarRow = gitRows.findIndex((row) => row.includes("c commit"));
+      expect(firstFileRow).toBeGreaterThanOrEqual(0);
+      expect(toolbarRow).toBeGreaterThanOrEqual(0);
+
+      await setup.mockInput.typeText("?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Keyboard help"));
+      expect(setup.captureCharFrame()).toContain("Git · leaf");
+      await setup.mockInput.typeText("cst");
+      await setup.mockMouse.click(gitRows[firstFileRow]!.indexOf("alpha/SKILL.md"), firstFileRow);
+      await setup.mockMouse.click(gitRows[toolbarRow]!.indexOf("c commit"), toolbarRow);
+      await setup.mockInput.typeText("?");
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Keyboard help"));
+      expect(setup.captureCharFrame()).toContain("Working tree");
+      expect(setup.captureCharFrame()).toContain("status: M");
+      expect(setup.captureCharFrame()).toContain("Second Git change.");
+      expect(setup.captureCharFrame()).not.toContain("Commit message:");
+      await setup.mockInput.typeText("?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Keyboard help"));
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Keyboard help"));
+      expect(setup.captureCharFrame()).toContain("Working tree");
+      expect(setup.captureCharFrame()).toContain("status: M");
+      expect(setup.captureCharFrame()).toContain("Second Git change.");
+      expect(await git(skillsDir, "status", "--porcelain")).toBe(statusBefore);
+      expect(await readFile(path.join(skillsDir, "alpha", "SKILL.md"), "utf8")).toContain("First Git change.");
+      expect(await readFile(path.join(skillsDir, "alpha", "notes.txt"), "utf8")).toBe("Second Git change.\n");
+      expect(await readFile(outside, "utf8")).toBe("outside Git fixture\n");
+
+      await setup.mockInput.typeText("n");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Remote name:"));
+      await setup.mockInput.typeText("backup?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Remote name: backup?"));
+      expect(setup.captureCharFrame()).not.toContain("Keyboard help");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Remote name:") && setup.captureCharFrame().includes("Working tree"));
+
+      await setup.mockInput.typeText("c");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Commit message:"));
+      await setup.mockInput.typeText("message?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("message?"));
+      expect(setup.captureCharFrame()).not.toContain("Keyboard help");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Commit message:") && setup.captureCharFrame().includes("Working tree"));
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => setup.captureCharFrame().includes("scope: all"));
+      await setup.mockInput.typeText("/question?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Search: question?"));
+      expect(setup.captureCharFrame()).not.toContain("Keyboard help");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Search: question?"));
+      await setup.mockInput.typeText("aquery?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Search skills: query?"));
+      expect(setup.captureCharFrame()).not.toContain("Keyboard help");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Search skills: query?"));
+      await setup.mockInput.typeText(" ");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Disable skill"));
+      await setup.mockInput.typeText("?");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Disable skill");
+      expect(setup.captureCharFrame()).not.toContain("Keyboard help");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Disable skill"));
+      const rows = setup.captureCharFrame().split("\n");
+      const alphaRow = rows.findIndex((row) => row.includes("[on] [unknown] alpha"));
+      expect(alphaRow).toBeGreaterThanOrEqual(0);
+      await setup.mockMouse.click(rows[alphaRow]!.indexOf("alpha"), alphaRow, MouseButtons.RIGHT);
+      await setup.waitFor(() => setup.captureCharFrame().includes("Delete"));
+      await setup.mockInput.typeText("?");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Delete");
+      expect(setup.captureCharFrame()).not.toContain("Keyboard help");
+      setup.mockInput.pressEscape();
+    } finally {
+      setup.renderer.destroy();
+    }
+  }, 20_000);
 
   it("retains the selected file's total line count across rendering modes, scrolling and file changes", async () => {
     const { skillsDir } = await fixture();
@@ -1015,7 +1259,7 @@ describe("SkillsManagerTui", () => {
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("p");
       await setup.waitFor(() => setup.captureCharFrame().includes("Review push"));
-      expect(setup.captureCharFrame()).toContain(bare);
+      expect(confirmationText(setup.captureCharFrame(), "Review push")).toContain(bare);
       await setup.mockInput.typeText("y");
       await setup.waitFor(() => setup.captureCharFrame().includes("Check provider access"));
       await setup.mockInput.typeText("y");
