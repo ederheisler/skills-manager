@@ -1,10 +1,37 @@
 # Portable open-source release plan
 
-The original plan was approved for implementation through Crit session `6d12ddc84e05`. The public repository and its [verification and limits](#release-completion) are recorded below.
+<a id="implementation-verification--2026-11-04"></a>
+<a id="publication-verification-and-limits"></a>
 
-The blockers, recommendations, phases, and acceptance criteria describe the reviewed plan. They are not current installation instructions or proof that every original criterion was met. The [portability decision](../../decisions/2026-11-03-open-source-portability.md) records later choices, including the approved [concurrency limits](../../decisions/2026-11-03-open-source-portability.md#concurrency-limits). The original [design](../specs/2026-09-16-skills-manager-design.md) is historical where it conflicts with those decisions.
+## Release completion
 
-For current behavior and installation, see the [README](../../../README.md). Pre-implementation code descriptions and line numbers below refer to the old snapshot, not the current source.
+On 2026-11-04, [Native portability](https://github.com/ederheisler/skills-manager/actions/runs/41889510435) passed on `main` at commit `a5a547c66f44b80c0228acef9b6b23f050c82e32`. Its Linux arm64, Linux x64, and macOS x64 jobs installed a tarball and exercised the app in a terminal. The [release workflow](https://github.com/ederheisler/skills-manager/actions/runs/41889841054) then published [v0.1.0](https://github.com/ederheisler/skills-manager/releases/tag/v0.1.0) at 18:42:55 UTC.
+
+On the same date, a local macOS arm64 terminal ran the [tagged `npx` command](https://github.com/ederheisler/skills-manager/blob/v0.1.0/README.md#quick-start) with a cold npm cache, Node 26.13.0, and npm 11.20.0. Its isolated path contained neither Bun nor a global `skills` CLI. npm built the tagged project and resolved `skills@1.7.6`.
+
+The run adopted an existing `~/.agents/skills` directory and skipped Git initialization and remote backup. It displayed the skill, opened help with `?`, returned with `Esc`, and exited with `q` and code 0. The selected tree, home, XDG directories, and outside sentinels remained unchanged. This tagged test covered installation, onboarding, browsing, and help. It did not exercise in-app mutations, Git operations, or remote actions. The terminal recording is local and is not attached to the release.
+
+The later README-only [PR #3](https://github.com/ederheisler/skills-manager/pull/3) passed its required checks. Its subsequent [main workflow](https://github.com/ederheisler/skills-manager/actions/runs/41894073676) failed on Linux x64 when a Git-push integration test reached its 5,000 ms timeout. The later [release workflow](https://github.com/ederheisler/skills-manager/actions/runs/41894447710) skipped publication. This failure occurred after v0.1.0 and did not change the release tag.
+
+### Earlier candidate checks and limits
+
+Earlier macOS arm64 candidate tests exercised an installed tarball, local mutations, links, stale and collision refusal, and real Git commit, push, fetch, and pull. Unrelated staged and worktree changes remained intact. Separate tests exercised confined preparation, discard, and import with `skills@1.7.6`. These checks predate later changes and do not establish those results for the tagged `npx` launch.
+
+Scoped SCB checks of changed source and test files in the earlier candidate reported complexity and duplication advisories. They are code-quality evidence, not a security signoff. A separate source-security review found no additional actionable Git transaction issue within the approved concurrency contract. Probes covered reserved-metadata and FIFO-journal refusal, two-process serialization, and outside-target preservation.
+
+An earlier candidate's `npm audit --audit-level=moderate` reported zero vulnerabilities, including development dependencies. That result does not guarantee later dependency resolutions. A pattern-based Gitleaks scan of the prospective public snapshot reported no findings. The scan did not cover retained local backups and does not prove that sensitive data is absent.
+
+Linux mutations require Landlock ABI 5 or later and mount-aware `statx`. Linux remote preparation also requires usable Bubblewrap and the required kernel permissions. macOS remote preparation requires Apple-signed Git 2.48 or later from the active Xcode or Command Line Tools installation. The app refuses an affected action when it cannot establish the required boundary.
+
+A source receipt records continuity for an installation. It does not authenticate a publisher or prove prior approval, and restoring untrusted manager state can falsify source associations. The macOS offline wrapper tested browsing but cannot nest write confinement. Non-nested installed mutations were tested separately. The app does not claim a general hostile-code sandbox or protection against concurrent external edits. If confinement prevents safe cleanup, the app retains and reports the temporary path.
+
+In the browse and Git views, `?` opens scrollable keyboard help. `Up` and `Down` scroll a line, and `PgUp` and `PgDn` scroll a page. Press `?` or `Esc` to return to the prior view. Text prompts keep `?` as text.
+
+## Plan scope
+
+The blockers, recommendations, phases, and acceptance criteria below describe the reviewed plan. They are not current installation instructions or proof that every original criterion was met. The [portability decision](../../decisions/2026-11-03-open-source-portability.md) records later choices, including the approved [concurrency limits](../../decisions/2026-11-03-open-source-portability.md#concurrency-limits). The original [design](../specs/2026-09-16-skills-manager-design.md) is historical where it conflicts with those decisions.
+
+For current behavior and installation, see the [README](../../../README.md). Pre-implementation code descriptions and line numbers refer to the old snapshot, not the current source.
 
 <a id="release-blockers"></a>
 
@@ -28,16 +55,16 @@ The review identified the following blockers before implementation. The first th
 - Manage skills only. The earlier decision to share global instruction files is superseded. Instruction files, imports, and links between instruction files are out of scope.
 - Make the selected skills directory the optional Git repository root. Git is not required for local skill browsing.
 - During onboarding, offer an optional push of the skills repository to a remote for backup. This is not an offer to publish the repository.
-- Select the MIT license. The owner later confirmed the required rights and copyright, and the distribution includes third-party notices.
+- Select the MIT license. The required rights and copyright were confirmed, and the distribution includes third-party notices.
 - Protect existing files and links. Do not use personal machine paths or personal setup assumptions.
 
 These decisions describe the product choices, not proof of their implementation.
 
-The owner later required changes to reach `main` through pull requests and releases to be created by GitHub Actions, not by hand.
+Changes must reach `main` through pull requests. GitHub Actions creates releases.
 
 ### Approved concurrency contract
 
-The owner subsequently selected [standard filesystem concurrency limits](../../decisions/2026-11-03-open-source-portability.md#concurrency-limits). Keep the full app, serialize cooperating app instances, and retain stale-preview checks, collision refusal, and Git locks. External edits, moves, or Git commands during an action are unsupported. No acceptance criterion below promises atomic pathname binding against those external operations.
+The approved [concurrency limits](../../decisions/2026-11-03-open-source-portability.md#concurrency-limits) retain the full app and serialize cooperating app instances. Stale-preview checks, collision refusal, and Git locks remain required. External edits, moves, or Git commands during an action are unsupported. No acceptance criterion below promises atomic pathname binding against those external operations.
 
 This does not relax inert parsing, link-safe operations, outside-target protection, operating-system confinement, literal Git scope, or interrupted-operation recovery. A disposable probe on macOS and Linux arm64 denied fresh `openat`, `renameat`, and `unlinkat` after a parent directory moved outside the boundary, but allowed writes through a regular-file descriptor opened before the move. Descriptor checks alone are therefore not a race-proof pathname guarantee.
 
@@ -84,7 +111,7 @@ The proposed source values were a verified remote origin, a confirmed local orig
 
 The draft proposed an `all` source view, plus filters for remote, local, and unknown entries. It also proposed that any author filter use declared names and an unknown category rather than a "mine" label. Source and author classifications never authorize deletion or update.
 
-The owner had not selected a source or author filter design at that review. Do not add identity configuration, an authorship database, or silent ownership flags to guess an author. Ownership and mutation permission remain separate questions.
+The review did not settle a source or author filter design. Do not add identity configuration, an authorship database, or silent ownership flags to guess an author. Ownership and mutation permission remain separate questions.
 
 At review, the classifier treated an incomplete or missing catalog entry as `local` and offered `local` or `source` kinds. Its `local (mine)` helper implied authorship that the classifier did not establish. The detail view displayed the first scalar `author` or `authors` value, dropped arrays, and showed no author line when none was present. Those observations describe the old source, not the current implementation.
 
@@ -123,13 +150,13 @@ Before a commit, show the exact leaf repository and proposed literal skill paths
 
 ## Previously open release choices
 
-The following choices were open in the reviewed draft. The owner's later selections appear in the [decision record](../../decisions/2026-11-03-open-source-portability.md#implementation-choices). The alternatives below are not current installation instructions or outstanding release gates.
+The following choices were open in the reviewed draft. The later selections appear in the [decision record](../../decisions/2026-11-03-open-source-portability.md#implementation-choices). The alternatives below are not current installation instructions or outstanding release gates.
 
 ### Runtime and distribution
 
 The draft compared a [Bun-compiled executable](https://bun.com/docs/bundler#compile) with a Node package. A Bun executable contains its runtime, but the separate upstream `skills` CLI needs Node unless separately bundled and tested. No standalone release is claimed.
 
-The owner selected Node and repository or tarball distribution. The [README](../../../README.md) documents a GitHub `npx` command for release `v0.1.0` and source installation. The project is not published to npm. The package remains private, which prevents npm publication but not repository or tarball distribution.
+The current distribution uses Node and a tagged GitHub `npx` command without a manual clone. The [README](../../../README.md) also documents source installation. The project is not published to npm. The package remains private, which prevents npm publication but not repository or tarball distribution.
 
 The [unscoped `skills-manager` package](https://registry.npmjs.org/skills-manager/latest) belongs to another project. Do not run `npx skills-manager` for this app. Test the exact command and package contents before documenting another distribution.
 
@@ -137,7 +164,7 @@ An uncached `npx` download needs network access. A cached package does not guara
 
 npm also accepts [repository and tarball package specifications](https://docs.npmjs.com/cli/v11/using-npm/package-spec/). A source archive is not automatically a runnable package. Pin a full repository commit or use a verified immutable release tarball when testing those routes.
 
-The owner later chose the latest upstream `skills` dependency without a version-number gate. The package declares `skills` as `latest`, and the current lockfile resolves `1.7.6`. The `npm ci` command uses the locked version. This does not promise the newest upstream version on every launch. The adapter checks package identity and executable containment without rejecting versions by number. Schema, path, source-association, receipt, and operating-system confinement checks remain required.
+The upstream `skills` dependency uses `latest` without a version-number gate. On 2026-11-04, the source lockfile resolved `1.7.6`. The `npm ci` command uses the locked version. This does not promise the newest upstream version on every launch. The adapter checks package identity and executable containment without rejecting versions by number. Schema, path, source-association, receipt, and operating-system confinement checks remain required.
 
 The tested candidate included `skills@1.7.6` for explicit remote actions. It resolved that dependency without a global install. Local browsing did not require the upstream CLI.
 
@@ -153,15 +180,15 @@ The draft recommended macOS arm64 and x86_64 and Linux arm64 and x86_64 with gli
 
 ### Network and mutation policy
 
-The owner selected user-initiated network access and disabled upstream telemetry. Startup and local browsing make no background requests. Search, add, update checks, updates, fetch, pull, and push require user action. The [upstream telemetry policy](https://github.com/vercel-labs/skills/blob/main/docs/troubleshooting.md#telemetry) says disabling telemetry also disables its security-audit requests.
+Network access is user-initiated and upstream telemetry is disabled. Startup and local browsing make no background requests. Search, add, update checks, updates, fetch, pull, and push require user action. The [upstream telemetry policy](https://github.com/vercel-labs/skills/blob/main/docs/troubleshooting.md#telemetry) says disabling telemetry also disables its security-audit requests.
 
-The owner selected explicitly reviewed changes for adopted skills with an unknown edit baseline. Replacement and removal require an exact path preview and approval. Unknown edit status stays unknown. Recovery applies where the selected policy permits it. Neither provenance nor missing metadata establishes ownership.
+Changes to adopted skills with an unknown edit baseline require explicit review. Replacement and removal require an exact path preview and approval. Unknown edit status stays unknown. Recovery applies where the selected policy permits it. Neither provenance nor missing metadata establishes ownership.
 
 <a id="current-evidence-and-limits"></a>
 
 ## Pre-implementation evidence and limits
 
-The following observations came from the earlier source inspection and disposable probes. File paths and line numbers identify the inspected snapshot, not the current source. The old repository history was later removed.
+The following observations came from the earlier source inspection and disposable probes. File paths and line numbers identify the inspected snapshot, not the current source.
 
 - `src/state/repo.ts:63-79,92-100` passed frontmatter to `gray-matter` during scan and preview. JavaScript frontmatter in a disabled skill changed a harmless global marker during the disposable scan.
 - `src/actions/skillsCli.ts` invoked global upstream operations without the selected skills directory or a working directory.
@@ -313,7 +340,7 @@ Original acceptance:
 
 ### Phase 7: P1 runtime, release artifact, and public documentation
 
-The original scope included `package.json`, `package-lock.json`, `src/cli.ts`, existing tests, `README.md`, and other release documents. The plan called for the selected license after the owner confirmed copyright and for approved security reporting instructions.
+The original scope included `package.json`, `package-lock.json`, `src/cli.ts`, existing tests, `README.md`, and other release documents. The plan called for the selected license after copyright confirmation and for approved security reporting instructions.
 
 Original work:
 
@@ -322,7 +349,7 @@ Original work:
 3. Make the installed executable, shebang, runtime declarations, native dependencies, and documented commands agree. If a Node package with `npx` is selected, test its exact version-pinned command. If it includes the upstream CLI, test how the confined adapter resolves that dependency. If the CLI stays external, document and test its separate installation. If selected, test the Homebrew dependency and wrapper, or the standalone executable and upstream CLI strategy. Keep npm publication optional. Do not change `private` merely to support repository distribution.
 4. Audit the exact files in the chosen public artifact and repository publication. Exclude private settings, secrets, backups, vendored development material, Graphify output, and unnecessary files from the runnable distribution. Review tracked repository documentation and graph artifacts separately for intentional public inclusion. Review history before making a repository public. Do not rewrite history without authorization.
 5. Publish the selected MIT license and required notices after rights and copyright are confirmed. The upstream [`skills` license](https://github.com/vercel-labs/skills/blob/main/LICENSE) requires its notice for copied substantial portions. Inventory all other bundled material separately.
-6. Document installation, prerequisites, default and custom skills directories, adoption, optional leaf Git initialization and remote backup, parent repository safety, offline use, supported platforms, privacy, updates, removal risks, and recovery. Explain the approval steps, destination access warning, and harness limitations. Provide a private vulnerability reporting path chosen by the owner.
+6. Document installation, prerequisites, default and custom skills directories, adoption, optional leaf Git initialization and remote backup, parent repository safety, offline use, supported platforms, privacy, updates, removal risks, and recovery. Explain the approval steps, destination access warning, and harness limitations. Provide a private vulnerability reporting path.
 
 Original acceptance:
 
@@ -333,95 +360,3 @@ Original acceptance:
 - Inspect the final release artifact and repository contents. No private file, token, backup, development setting, or outside sentinel is included or changed. Required license and notice files are present.
 - Run the project tests and build, the scoped source-security review, and the dependency audit on the release candidate. Resolve valid findings or record an approved release decision. A scan parse error is not a clean result.
 
-## Release completion
-
-The acceptance criteria above record the original release gates. The verification and limits below record the observed results and remaining boundaries.
-
-In the normal browse or Git view, `?` opens scrollable keyboard help. `Up` and `Down` scroll a line, and `PgUp` and `PgDn` scroll a page. Press `?` or `Esc` to return to the prior view. Text prompts keep `?` as text. The earlier test results in the table below do not cover this later interface change.
-
-<a id="implementation-verification--2026-11-04"></a>
-
-## Implementation verification, 2026-11-04
-
-The implementation keeps the `skills-manager` name, defaults to `~/.agents/skills`, adopts existing entries in place, and leaves Git optional. The recorded installation checks used Node 26.13.0 and npm. The remote-action checks in this record used `skills@1.7.6`. These results apply to the candidates tested at the time, not to later changes. They do not establish a security guarantee.
-
-| Check | Observed result |
-| --- | --- |
-| Host build | Both native helpers and TypeScript compiled |
-| Full host suite | 24 files passed, with 463 tests passed and 11 skipped |
-| Installed macOS arm64 tarball | Actual executable, onboarding, linked/custom roots, cancellation, toggles, filtering, Markdown/raw controls, offline browsing, and exit cleanup passed |
-| Installed pinned CLI | Actual local-source prepare, reviewed import, discard, outside-link refusal, and receipt creation passed without a global CLI or Bun |
-| macOS remote refs | Controlled smart-HTTP fixtures passed for encoded refs and selectors. Mismatched approvals and changed source associations were refused |
-| Linux arm64 | Nonroot source installation, actual PTY browsing, mutations, reviewed imports, and Git initialization/commit/push/fetch/pull passed |
-| Linux final deltas | Restored-byte/stale-mtime pull preserved unrelated staged and unstaged data. Reviewed import and identity-approved disposal passed |
-| Dependency audit | `npm audit --audit-level=moderate` reported zero vulnerabilities, including development dependencies |
-
-The previously verified macOS tarball had exactly 34 reviewed members, including both platform-tagged native helpers and license/notices files. Its SHA-256 was `3b2eef218223334154373bf8d0e736dfde2a42cfcdc7141a4c58c0e3e3017236`. Its source fingerprint was `382a047b0d449331f5f3cd203cdccbce15b31d7dece57deaa85c71a0dd83966e`. This is the agent's sorted per-file source-hash fingerprint, not a Git commit ID. The previously verified Linux source-export archive hash was `0416b7f73d4987af5fe0345ac1c67846ad27a1404e715e6f73164675935db12e`. These hashes identify earlier artifacts, not a package built after later changes. Disposable exports, installations, and smoke fixtures were removed.
-
-### Latest local verification, 2026-11-04
-
-On macOS arm64, Node 26.13.0 and npm 11.20 built the project and passed the post-build package guard. A real terminal smoke test of an installed 34-file tarball passed, including help open and close, native filesystem actions, and Git sentinels. Captured frames showed contiguous `Keyboard help` and `? help` text and passed the split-text checks.
-
-The first full suite had 464 passed, 3 failed, and 11 skipped across 24 files. All three failures were in the TUI file. Test-only changes removed an incidental footer assertion, checked the wrapped push destination, waited for prompt dismissal, and raised one Git case timeout to 20 seconds. After those changes all 48 TUI tests passed. The other 23 files passed in the earlier run; the full suite was not rerun locally.
-
-At PR candidate `232738b`, [CI run 41881254732](https://github.com/ederheisler/skills-manager/actions/runs/41881254732) passed native Linux arm64 and macOS Intel verification. Linux x64 reported 472 passed, 1 failed, and 5 skipped; the unborn-commit test reached its five-second whole-test limit. That test now waits for the commit prompt and entered message and has a 20-second integration budget. Per-frame waits remain bounded to four seconds. The revised case passed locally in 3.812 seconds, and its SCB scan reported no findings.
-
-On `main`, [CI run 41884356542](https://github.com/ederheisler/skills-manager/actions/runs/41884356542) failed the Linux x64 worker-kill test. The worktree notification did not stop the worker. The journal still said `prepared` after Git advanced HEAD. A disposable macOS arm64 probe reproduced that state with the original index intact.
-
-The interruption fixture now pauses the real worker after a partial worktree move and before the ref commit. The local real-Git smoke confirmed the old HEAD, original index, held ref locks, and partially moved worktree. After the worker died, the ref locks disappeared. Recovery advanced HEAD to the target and preserved unrelated staged data. Linux CI must pass before publication.
-
-The scoped SCB check of the transaction test exited 1 with complexity and duplicate-structure advisories, but no parser or security-pattern findings. The two process fixtures retain explicit, separate cancellation and cleanup handling so their failure paths remain visible.
-
-A copy of `skills@1.7.6` with a simulated `99.0.0` manifest exercised string and object bin entries with a nonstandard path. Lexical and symlink escapes were refused. This does not test a published `99.0.0` version.
-
-The npm audit reported zero vulnerabilities, including development dependencies. The resolved `vitest` and `@vitest/mocker` versions were 4.1.12, `vite` was 8.3.5, and `esbuild` was 0.28.2.
-
-Earlier SCB checks covered five changed files. They found no parse errors or security-pattern findings. They reported 36 complexity and four duplication advisories in source. Both prior test-file scans exited zero. The advisories were retained because explicit validation, mode, and cleanup checks cover different states.
-
-A Graphify update reported 33 hub-derived community renames; nine former community names disappeared. A follow-up refresh after the test changes printed no rename count and lost no community names. The later CI-test correction required another refresh, which reported 31 hub-derived renames and eight disappeared community names.
-
-A refresh after the worker-kill test correction reported 2,392 nodes, 4,878 edges, and 150 communities. The previous graph had 4,877 edges. No community names changed or disappeared.
-
-### Review findings
-
-Every `src/` and `tests/` file changed in the tested candidate received a scoped SCB check. Remaining advisories concern complexity and duplication. They are not a clean security signoff. Parser budgets, journal schema checks, filesystem identity checks, and recovery transitions remain explicit to keep failure boundaries visible. Repeated checks and fixtures cover different states, including separate crash scenarios. No scanner parse error is counted as success.
-
-The source security review found no additional actionable Git transaction issue within the approved concurrency contract. Runtime probes demonstrated reserved-metadata refusal, nonblocking FIFO-journal refusal, two-process serialization, and preservation of outside targets. Four shared-header unused-function compiler warnings remain. Those functions are used by the other native helper.
-
-The source snapshot retains licensed, repository-local development skills and their relative development symlink. Private settings, machine-local sidecars, and dated backups are untracked while their local copies are retained. Historical personal inventory and workspace-remote details were removed from the design and public graph artifacts.
-
-An offline Gitleaks scan of the prospective public snapshot used full redaction and reported no findings. It covered the 185 selected entries, not private Git history or preserved local backups. This is pattern-scanner evidence, not proof that publication is safe.
-
-Three guarded Graphify AST refreshes reported 32, 35, and 36 hub-derived community renames. They did not re-extract document semantics, so historical document-derived relationships are not necessarily current.
-
-### Publication verification and limits
-
-The recreated repository is public at the same URL, with `main` as its default branch. GitHub private vulnerability reporting, secret scanning, and push protection are enabled.
-
-An active GitHub [ruleset](https://api.github.com/repos/ederheisler/skills-manager/rulesets/26549966) requires pull requests for `main`, resolved review threads, and the `Required checks` status from GitHub Actions (integration ID `15368`) with strict up-to-date enforcement. It blocks branch deletion and force pushes and requires no approving reviews. Local checks do not establish that the status appeared on a pull request.
-
-The `Release` workflow is configured to follow a successful `Native portability` run for a `main` push. It checks the protected branch head and matching semantic versions in the manifest and lockfile. Its API-only job creates the matching tag and GitHub Release. This pre-release evidence does not establish a workflow-created release or a tagged `npx` launch. See [Actions](https://github.com/ederheisler/skills-manager/actions) and [releases](https://github.com/ederheisler/skills-manager/releases) for current status.
-
-An anonymous, credential-free clone of `081ffc7` from the public URL passed with an isolated home and Git configuration. In that clone, `npm ci` built the project and passed the package guard. The audit reported zero vulnerabilities. With Node 26.13.0 and npm 11.20, the `node dist/cli.js` command and `--skills-dir` option launched in a real terminal. Onboarding skipped both Git prompts, displayed the existing skill, and exited successfully. The skill remained unchanged, and no Git or manager metadata was created. This check used no Bun or global upstream CLI. It covered onboarding and browsing, not the full installed-tarball smoke test.
-
-A separate credential-free macOS arm64 test used `npx --yes github:ederheisler/skills-manager#5178c7a13447d05d94aee4d29d88e645cb5295cd` with Node 26.13.0 and npm 11.20. Git preparation built the native helpers and TypeScript. Bun and a global `skills` CLI were not installed.
-
-The command passed both with no arguments and with `--skills-dir` selecting an existing directory. In each real terminal session, onboarding skipped both Git prompts, displayed the existing skill, and exited with code 0. The fixtures and isolated home and XDG contents remained unchanged. npm used a separate disposable cache for downloads and builds. No Git or manager metadata was created. These checks covered installation, onboarding, and browsing, not the full installed-tarball smoke test. The README uses the `v0.1.0` tag instead of the commit tested above.
-
-Production source was unchanged between the host build, full suite, and a subsequent local installed-release smoke test. That smoke test passed on native macOS arm64 with Node 26.13.0. It exercised terminal onboarding with the default Git choice set to no, native boundary mutations, links, stale refusal, and collision preservation. It also exercised the pinned `skills@1.7.6` sandbox prepare, discard, and apply operations. Real Git commit, push, fetch, and pull preserved unrelated staged and worktree changes.
-
-In [Native portability workflow run 41855041774](https://github.com/ederheisler/skills-manager/actions/runs/41855041774), at candidate `28de42a`, the native Linux x64, Linux arm64, and macOS x64 jobs passed. Each successful job installed a tarball and ran the installed-app smoke test in a real terminal. Both Linux jobs also passed sandboxed upstream and loopback Git ref tests. The earlier Bubblewrap `EPERM` limitation did not apply in these CI jobs, which supplied the required kernel permissions.
-
-The macOS arm64 job in that run acquired no runner and had no steps. GitHub canceled it and reported that no job was acquired because of capacity constraints. This was a runner capacity limit, not an application failure. Native macOS arm64 evidence comes from the local installed-release test, not a successful job in that run.
-
-In the later [workflow run 41858374818](https://github.com/ederheisler/skills-manager/actions/runs/41858374818), both Linux jobs passed. Both macOS jobs acquired no runner, had no steps, and were canceled after 15 minutes. GitHub reported capacity constraints and no acquired job for arm64, and no acquired job for x64. Neither cancellation exercised the application.
-
-The owner subsequently chose local native verification for macOS arm64 and removed that duplicate hosted job. CI retains Linux arm64, Linux x86_64, and macOS x86_64. This changes where macOS arm64 is verified, not the supported platform matrix.
-
-An offline Gitleaks scan of all 36 commits in the old history covered 24.18 MB and reported zero findings. The owner authorized replacing that history without an archive or backup. The original repository was deleted and recreated at the same URL with a parentless clean root. Before fresh CI, the recreated repository had zero pull requests, zero Actions runs, only `main`, and no tags. The old five pull request refs and Actions history were gone. Local reflogs and old objects were pruned, and old commit `9d50dfa` was confirmed missing. The new root `28de42a` initially contained only the audited source, totaling 7.5 MB. A prospective-history Gitleaks scan covered two clean new-root refs totaling 15.03 MB and reported zero findings. These scans do not prove that the repository contains no sensitive data.
-
-Linux mutations require Landlock ABI 5 or later and mount-aware `statx`. Remote actions on Linux also require working Bubblewrap and the required kernel permissions. Remote installs on macOS require Apple-signed Git 2.48 or later from the active Xcode or Command Line Tools installation. If a required boundary is unavailable, the app refuses the affected action.
-
-A matching source receipt records continuity for an installation. It does not authenticate a publisher or prove prior approval. Restoring untrusted manager state can falsify source associations.
-
-The macOS offline wrapper verified browsing but cannot nest write confinement. Ordinary, non-nested installed mutations passed separately. The app does not claim a general hostile-code sandbox or protection against concurrent external edits. If confinement prevents safe cleanup, the app retains and reports the temporary path rather than deleting without a boundary.
