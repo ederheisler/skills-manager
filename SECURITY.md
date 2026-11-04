@@ -6,11 +6,11 @@ Do not report vulnerabilities in public issues or pull requests. Do not include 
 
 Use [GitHub private vulnerability reporting](https://github.com/ederheisler/skills-manager/security/advisories/new). Include the affected version, operating system, reproduction steps, and impact. Use a disposable skills directory and harmless sentinel files for filesystem reports.
 
-See GitHub's [reporting process](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/configure-vulnerability-reporting/configure-for-a-repository) for details.
+See GitHub's [reporting process](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately) for details.
 
 ## Release status
 
-The [release plan](docs/superpowers/plans/2026-11-03-portable-open-source-release.md) records test results and their limits.
+The [release plan](docs/superpowers/plans/2026-11-03-portable-open-source-release.md#release-completion) records test results and their limits.
 
 The app reads skills as untrusted data. It must not execute frontmatter, infer ownership from a missing lock, or use a containing repository for Git actions. Remote preparation requires an operating-system boundary. If that boundary is unavailable, the app must refuse the action.
 
@@ -52,7 +52,7 @@ Push and pull reviews require complete, original history. Shallow repositories a
 
 ## Remote actions and privacy
 
-The app uses Vercel's [`skills`](https://www.npmjs.com/package/skills) dependency for explicit remote actions. The dependency requests `latest`; the lockfile records the installed resolution, and tests used version 1.7.6. The app validates the installed package's declared executable path before use. It does not require a global `skills` installation. Normal npm lockfile and cache behavior applies, so a newer version is not necessarily installed on every launch.
+The app uses Vercel's [`skills`](https://www.npmjs.com/package/skills) dependency for explicit remote actions. The dependency requests `latest`, and tests used version 1.7.6. In a source checkout, `npm ci` installs the resolution recorded in the lockfile. The recommended GitHub `npx` installation is subject to npm's dependency resolution and cache behavior. The app's tag does not pin `skills` to the tested version, and a newer version is not necessarily installed on every launch. The app validates the installed package's declared executable path before use. It does not require a global `skills` installation.
 
 Startup, refresh, and local browsing make no background network requests. Search, remote preparation, update checks, fetch, pull, and push require explicit user actions. Disabling network access does not disable local browsing.
 
