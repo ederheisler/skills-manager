@@ -1088,6 +1088,7 @@ describe("SkillsManagerTui", () => {
       await setup.mockInput.typeText("c");
       await setup.waitFor(() => setup.captureCharFrame().includes("Commit message:"));
       await setup.mockInput.typeText("first reviewed commit");
+      await setup.waitFor(() => setup.captureCharFrame().includes("first reviewed commit"));
       setup.mockInput.pressEnter();
       await setup.waitFor(() => setup.captureCharFrame().includes("Review commit"));
       const preview = setup.captureCharFrame();
@@ -1099,7 +1100,9 @@ describe("SkillsManagerTui", () => {
       await setup.waitFor(() => !setup.captureCharFrame().includes("Review commit"));
       await expect(git(skillsDir, "rev-parse", "--verify", "HEAD")).rejects.toThrow();
       await setup.mockInput.typeText("c");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Commit message:"));
       await setup.mockInput.typeText("first reviewed commit");
+      await setup.waitFor(() => setup.captureCharFrame().includes("first reviewed commit"));
       setup.mockInput.pressEnter();
       await setup.waitFor(() => setup.captureCharFrame().includes("Review commit"));
       await setup.mockInput.typeText("y");
@@ -1115,7 +1118,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  });
+  }, 20_000);
 
   it("identifies blocker paths separately in a directory-to-file commit preview", async () => {
     const { skillsDir } = await fixture();

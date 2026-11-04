@@ -364,13 +364,15 @@ On macOS arm64, Node 26.13.0 and npm 11.20 built the project and passed the post
 
 The first full suite had 464 passed, 3 failed, and 11 skipped across 24 files. All three failures were in the TUI file. Test-only changes removed an incidental footer assertion, checked the wrapped push destination, waited for prompt dismissal, and raised one Git case timeout to 20 seconds. After those changes all 48 TUI tests passed. The other 23 files passed in the earlier run; the full suite was not rerun locally.
 
+At PR candidate `232738b`, [CI run 41881254732](https://github.com/ederheisler/skills-manager/actions/runs/41881254732) passed native Linux arm64 and macOS Intel verification. Linux x64 reported 472 passed, 1 failed, and 5 skipped; the unborn-commit test reached its five-second whole-test limit. That test now waits for the commit prompt and entered message and has a 20-second integration budget. Per-frame waits remain bounded to four seconds. The revised case passed locally in 3.812 seconds, and its SCB scan reported no findings.
+
 A copy of `skills@1.7.6` with a simulated `99.0.0` manifest exercised string and object bin entries with a nonstandard path. Lexical and symlink escapes were refused. This does not test a published `99.0.0` version.
 
 The npm audit reported zero vulnerabilities, including development dependencies. The resolved `vitest` and `@vitest/mocker` versions were 4.1.12, `vite` was 8.3.5, and `esbuild` was 0.28.2.
 
 SCB checked five changed files with no parse errors or security-pattern findings. It reported 36 complexity and four duplication advisories in source; both test-file scans exited zero. The advisories were retained because explicit validation, mode, and cleanup checks cover different states.
 
-A Graphify update reported 33 hub-derived community renames; nine former community names disappeared. A follow-up refresh after the test changes printed no rename count and lost no community names.
+A Graphify update reported 33 hub-derived community renames; nine former community names disappeared. A follow-up refresh after the test changes printed no rename count and lost no community names. The later CI-test correction required another refresh, which reported 31 hub-derived renames and eight disappeared community names.
 
 ### Review findings
 
