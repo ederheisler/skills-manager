@@ -52,7 +52,7 @@ Push and pull reviews require complete, original history. Shallow repositories a
 
 ## Remote actions and privacy
 
-The app uses Vercel's [`skills`](https://www.npmjs.com/package/skills) dependency for explicit remote actions. The dependency requests `latest`, and tests used version 1.7.6. In a source checkout, `npm ci` installs the resolution recorded in the lockfile. The recommended GitHub `npx` installation is subject to npm's dependency resolution and cache behavior. The app's tag does not pin `skills` to the tested version, and a newer version is not necessarily installed on every launch. The app validates the installed package's declared executable path before use. It does not require a global `skills` installation.
+The app uses Vercel's [`skills`](https://www.npmjs.com/package/skills) dependency for explicit remote actions. The dependency requests `latest`, and tests used version 1.7.6. In a source checkout, `npm ci` installs the resolution recorded in the lockfile. The recommended GitHub `npx` command requests the app from `main`, but npm's dependency resolution and cache can retain an earlier `skills` version. A newer `skills` version is not necessarily installed on every launch. The app validates the installed package's declared executable path before use. It does not require a global `skills` installation.
 
 Startup, refresh, and local browsing make no background network requests. Search, remote preparation, update checks, fetch, pull, and push require explicit user actions. Disabling network access does not disable local browsing.
 

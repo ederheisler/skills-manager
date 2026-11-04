@@ -15,13 +15,15 @@ Local browsing uses the requirements above. Linux changes also need Landlock ABI
 
 ## Quick start
 
-Run the released version:
+Run the latest code on `main`:
 
 ```sh
-npx --yes github:ederheisler/skills-manager#v0.1.0
+npx --yes --prefer-online github:ederheisler/skills-manager
 ```
 
 This command downloads the project and runs its build script locally. The `--yes` flag skips npm's installation prompt, not the app's confirmations. To select a directory directly, append `--skills-dir /absolute/path/to/skills`. The path is the skills directory itself, not its parent.
+
+Run the command again to check for the latest `main` code. `npx` does not notify you of updates or update an app that is already running.
 
 Do not run `npx skills-manager`. That unscoped npm name belongs to another project. This project is not published to the npm registry.
 
