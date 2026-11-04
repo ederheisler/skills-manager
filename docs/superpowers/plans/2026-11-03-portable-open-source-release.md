@@ -342,11 +342,11 @@ Acceptance:
 
 ## Release completion
 
-The release is ready only after all P0 and P1 acceptance criteria pass, open owner choices are recorded, and the documented installation method works from a clean environment. Record any unsupported platform or feature explicitly. Do not publish from the current evidence alone.
+The acceptance criteria above record the original release gates. The verification and limits below record the observed results and remaining boundaries.
 
 ## Implementation verification — 2026-11-04
 
-The implementation keeps the `skills-manager` name, defaults to `~/.agents/skills`, adopts existing entries in place, and leaves Git optional. Repository installation uses Node 26.13.x and npm; remote skills use the pinned `skills@1.7.6` dependency. This is implementation evidence, not certification of the whole intended platform matrix or authorization to publish.
+The implementation keeps the `skills-manager` name, defaults to `~/.agents/skills`, adopts existing entries in place, and leaves Git optional. Repository installation uses Node 26.13.x and npm. Remote skills use the pinned `skills@1.7.6` dependency. The evidence below records specific checks and does not establish a security guarantee.
 
 | Check | Observed result |
 | --- | --- |
@@ -359,7 +359,7 @@ The implementation keeps the `skills-manager` name, defaults to `~/.agents/skill
 | Linux final deltas | Restored-byte/stale-mtime pull preserved unrelated staged and unstaged data; reviewed import and identity-approved disposal passed |
 | Dependency audit | `npm audit --audit-level=moderate` reported zero vulnerabilities, including development dependencies |
 
-The final macOS tarball had exactly 34 reviewed members, including both platform-tagged native helpers and license/notices files. SHA-256: `3b2eef218223334154373bf8d0e736dfde2a42cfcdc7141a4c58c0e3e3017236`. Its source fingerprint was `382a047b0d449331f5f3cd203cdccbce15b31d7dece57deaa85c71a0dd83966e`; this is the agent's sorted per-file source-hash fingerprint, not a Git commit ID. The final Linux source-export archive hash was `0416b7f73d4987af5fe0345ac1c67846ad27a1404e715e6f73164675935db12e`. Disposable exports, installations, and smoke fixtures were removed.
+The previously verified macOS tarball had exactly 34 reviewed members, including both platform-tagged native helpers and license/notices files. Its SHA-256 was `3b2eef218223334154373bf8d0e736dfde2a42cfcdc7141a4c58c0e3e3017236`. Its source fingerprint was `382a047b0d449331f5f3cd203cdccbce15b31d7dece57deaa85c71a0dd83966e`. This is the agent's sorted per-file source-hash fingerprint, not a Git commit ID. The previously verified Linux source-export archive hash was `0416b7f73d4987af5fe0345ac1c67846ad27a1404e715e6f73164675935db12e`. These hashes identify earlier artifacts, not a package built after later documentation edits. Disposable exports, installations, and smoke fixtures were removed.
 
 ### Review findings
 
@@ -371,13 +371,24 @@ The source snapshot retains licensed, repository-local development skills and th
 
 An offline Gitleaks scan of the prospective public snapshot used full redaction and reported no findings. It covered the 185 selected entries, not private Git history or preserved local backups. This is pattern-scanner evidence, not proof that publication is safe.
 
-Graphify received two guarded local AST refreshes, without semantic re-extraction. They reported 32 and 35 hub-derived community renames. Names removed by the first refresh: `.start`, `Global Constraints`, `Method reference`, `Play decoded PCM`, `checkUpdates.ts`, `format.ts`, `update.ts`, `vitest`. Names removed by the final refresh: `boundary.test.ts`, `cli.ts`, `getStatus`, `git-tree-hash.h`, `git.test.ts`, `gitTransaction.test.ts`, `gitTransaction.ts`, `gitTransactionState.test.ts`, `onboarding.ts`, `previewPull`, `types.ts`. Historical document-derived semantics are not claimed freshly re-extracted.
+Graphify received two guarded local AST refreshes, without semantic re-extraction. They reported 32 and 35 hub-derived community renames. Names removed by the first refresh: `.start`, `Global Constraints`, `Method reference`, `Play decoded PCM`, `checkUpdates.ts`, `format.ts`, `update.ts`, `vitest`. Names removed by the second refresh: `boundary.test.ts`, `cli.ts`, `getStatus`, `git-tree-hash.h`, `git.test.ts`, `gitTransaction.test.ts`, `gitTransaction.ts`, `gitTransactionState.test.ts`, `onboarding.ts`, `previewPull`, `types.ts`. Historical document-derived semantics are not claimed freshly re-extracted.
 
-### Remaining public-release gates and limits
+### Publication verification and limits
 
-- Native macOS x86_64 was unavailable; Linux x86_64 was exercised only under emulation. Browsing worked there, but Landlock returned `ENOSYS` and mutations refused. Neither is a complete x86_64 support claim.
-- The Linux container denied Bubblewrap namespace creation. Upstream preparation refused safely; successful Linux upstream execution remains unverified. When confinement also prevents cleanup, the app retains and reports the temporary path rather than deleting without a boundary.
-- The macOS offline wrapper verified browsing but cannot nest write confinement. Ordinary, non-nested installed mutations passed separately. No general hostile-code or concurrent external-edit guarantee is made.
-- Enable and verify private vulnerability reporting before public release. The private repository's reporting URL returned HTTP 404 during preparation.
-- Replace private history before public visibility, as selected by the owner, without an archive or backup. No history rewrite, force-push, visibility change, or public release was performed here. A branch rewrite alone is not proof that hosted historical objects or cached views are inaccessible.
-- The protected global instruction file still has nine old singular-directory references. It was not edited without the required direct authorization; project defaults and documentation use plural `agents`.
+The recreated repository is public at the same URL, with `main` as its default branch. GitHub private vulnerability reporting, secret scanning, and push protection are enabled.
+
+An anonymous, credential-free clone of `081ffc7` from the public URL passed with an isolated home and Git configuration. In that clone, `npm ci` built the project and passed the package guard. The audit reported zero vulnerabilities. With Node 26.13.0 and npm 11.20, the documented `node dist/cli.js` command and `--skills-dir` option launched in a real terminal. Onboarding skipped both Git prompts, displayed the existing skill, and exited successfully. The skill remained unchanged, and no Git or manager metadata was created. This check used no Bun or global upstream CLI. It covered onboarding and browsing, not the full installed-tarball smoke test.
+
+The production source did not change after the host build and full suite recorded above. A subsequent local installed-release smoke test passed on native macOS arm64 with Node 26.13.0. It exercised real terminal onboarding with the default Git choice set to no, native boundary mutations, links, stale refusal, and collision preservation. It also exercised the actual pinned `skills@1.7.6` sandbox prepare, discard, and apply operations. Real Git commit, push, fetch, and pull preserved unrelated staged and worktree changes.
+
+The [Native portability workflow run 41855041774](https://github.com/ederheisler/skills-manager/actions/runs/41855041774), at candidate `28de42a`, passed on native Linux x64, Linux arm64, and macOS x64. Each successful job installed a tarball and ran the installed-app smoke test in a real terminal. Both Linux jobs also passed actual sandboxed upstream and loopback Git ref tests. The earlier Bubblewrap `EPERM` limitation did not apply in these CI jobs, which supplied the required kernel permissions.
+
+The macOS arm64 job in that run acquired no runner and had no steps. GitHub canceled it and reported that no job was acquired because of capacity constraints. This was a runner capacity limit, not an application failure. Native macOS arm64 evidence comes from the local installed-release test, not a successful job in that run.
+
+In the later [workflow run 41858374818](https://github.com/ederheisler/skills-manager/actions/runs/41858374818), both Linux jobs passed. Both macOS jobs acquired no runner, had no steps, and were canceled after 15 minutes. GitHub reported capacity constraints and no acquired job for arm64, and no acquired job for x64. Neither cancellation exercised the application.
+
+An offline Gitleaks scan of all 36 commits in the old history covered 24.18 MB and reported zero findings. The owner authorized replacing that history without an archive or backup. The original repository was deleted and recreated at the same URL with a parentless clean root. Before fresh CI, the recreated repository had zero pull requests, zero Actions runs, only `main`, and no tags. The old five pull request refs and Actions history were gone. Local reflogs and old objects were pruned, and old commit `9d50dfa` was confirmed missing. The new root `28de42a` initially contained only the audited source, totaling 7.5 MB. A prospective-history Gitleaks scan covered two clean new-root refs totaling 15.03 MB and reported zero findings. These scans do not prove that the repository contains no sensitive data.
+
+A later guarded Graphify AST update reported 36 hub-derived community renames. It removed the names `.write`, Engine methods, React and Solid handoff, Stream and recorder members, Three.js WebGPU, `git-transaction-state.h`, `owned_regular_stat`, `sandbox.ts`, `tree_same_snapshot`, `tree_walk_entry`, and `~/.agent repo (design doc)`. No LLM semantic re-extraction was performed. The earlier refresh counts and removed names above remain historical evidence.
+
+The macOS offline wrapper verified browsing but cannot nest write confinement. Ordinary, non-nested installed mutations passed separately. The app does not claim a general hostile-code sandbox or protection against concurrent external edits. If confinement prevents safe cleanup, the app retains and reports the temporary path rather than deleting without a boundary.

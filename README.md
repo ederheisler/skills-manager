@@ -4,7 +4,7 @@ A terminal UI for browsing and managing agent skills on macOS and Linux.
 
 The default skills directory is `~/.agents/skills`, with plural `agents`. Existing skills stay where they are. A Git repository and the Vercel `skills` CLI are not required for local browsing.
 
-This project is preparing its first portable release. See the [release plan](https://github.com/ederheisler/skills-manager/blob/main/docs/superpowers/plans/2026-11-03-portable-open-source-release.md) for acceptance criteria and verification limits. Do not treat the intended platform matrix as a tested release claim.
+See the [release plan](https://github.com/ederheisler/skills-manager/blob/main/docs/superpowers/plans/2026-11-03-portable-open-source-release.md) for verification evidence and its limits.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ This project is preparing its first portable release. See the [release plan](htt
 - A C compiler for a source installation. The build compiles the filesystem boundary for the current host.
 - A terminal. A Nerd Font is not required.
 
-The intended matrix is macOS and Linux on arm64 and x86_64. Linux uses glibc. Windows and Linux with musl are out of scope. Each advertised combination needs an installed-app test.
+Native installed-app tests passed on macOS arm64 and x86_64, and on Linux arm64 and x86_64 with glibc. Windows and Linux with musl are not supported. The macOS arm64 evidence is from a local host. The other three combinations passed in GitHub Actions.
 
 Linux mutations require Landlock ABI 5 or later and mount-aware `statx`. If the required boundary is unavailable, the app refuses the mutation; it does not fall back to unrestricted writes. Optional Git actions require Git 2.48 or later.
 
