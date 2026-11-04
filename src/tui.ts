@@ -1498,7 +1498,8 @@ export class SkillsManagerTui {
     try {
       const result = await action();
       if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout || `${result.command} failed (${result.exitCode})`);
-      this.#gitResult = result.stdout || result.stderr || result.command;
+      const message = result.stdout || result.stderr || result.command;
+      this.#gitResult = message.endsWith("\n") ? message.slice(0, -1) : message;
       this.#message = this.#gitResult;
     } finally {
       await this.#refreshGit();

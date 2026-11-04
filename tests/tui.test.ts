@@ -47,10 +47,10 @@ function confirmationText(frame: string, title: string): string {
   return body.join("");
 }
 
-async function fixture(): Promise<{ home: string; skillsDir: string }> {
+async function fixture(directoryName = "chosen-skills"): Promise<{ home: string; skillsDir: string }> {
   const home = await realpath(await mkdtemp(path.join(tmpdir(), "skills-manager-tui-")));
   roots.push(home);
-  const skillsDir = path.join(home, "chosen-skills");
+  const skillsDir = path.join(home, directoryName);
   await mkdir(path.join(skillsDir, "alpha"), { recursive: true });
   await mkdir(path.join(skillsDir, ".disabled_skills", "beta"), { recursive: true });
   await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), "---\nname: alpha\ndescription: Alpha description\nauthors: [Ada, Grace]\n---\n\n# Alpha body\n\nLocal content for selection.\n");
@@ -838,8 +838,11 @@ describe("SkillsManagerTui", () => {
     }
   });
 
-  it("offers reviewed remote setup only after separately approved initialization", async () => {
-    const { skillsDir } = await fixture();
+  it.each([
+    ["chosen-skills", "chosen-skills"],
+    ["literal\\n-skills", "literal\\\\n-skills"],
+  ])("offers reviewed remote setup only after separately approved initialization in %s", async (directoryName, quotedDirectoryName) => {
+    const { home, skillsDir } = await fixture(directoryName);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
       await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
@@ -848,6 +851,10 @@ describe("SkillsManagerTui", () => {
       await setup.waitFor(() => setup.captureCharFrame().includes("Initialize Git"));
       await setup.mockInput.typeText("y");
       await setup.waitFor(() => setup.captureCharFrame().includes("Remote name:"));
+      const frame = setup.captureCharFrame();
+      const notice = frame.split("\n").map((line) => line.trim()).find((line) => line.startsWith("Initialized empty Git repository in "));
+      expect(notice).toBe(`Initialized empty Git repository in ${skillsDir}/.git/`);
+      expect(frame).toContain(`Directory: "${path.join(home, quotedDirectoryName)}" | Git: leaf`);
       expect(await exists(path.join(skillsDir, ".git"))).toBe(true);
       await setup.mockInput.typeText("backup");
       setup.mockInput.pressEnter();
@@ -1263,8 +1270,10 @@ describe("SkillsManagerTui", () => {
       await setup.mockInput.typeText("p");
       await setup.waitFor(() => setup.captureCharFrame().includes("Review push"));
       expect(confirmationText(setup.captureCharFrame(), "Review push")).toContain(bare);
+      expect(await git(bare, "for-each-ref", "--format=%(objectname)", "refs/heads/fixture-main")).toBe("");
       await setup.mockInput.typeText("y");
       await setup.waitFor(() => setup.captureCharFrame().includes("Check provider access"));
+      expect(await git(bare, "for-each-ref", "--format=%(objectname)", "refs/heads/fixture-main")).toBe("");
       await setup.mockInput.typeText("y");
       await setup.waitFor(() => !setup.captureCharFrame().includes("Check provider access"));
       await setup.waitFor(async () => {
@@ -1274,7 +1283,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  });
+  }, 30_000); // The aggregate waits and real Git setup need more than the default whole-test budget.
 
   it("revisits installation selection without changing the old installation", async () => {
     const { home, skillsDir } = await fixture();

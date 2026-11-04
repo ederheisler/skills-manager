@@ -1,17 +1,17 @@
-# Graph Report - skill-manager  (2026-11-04)
+# Graph Report - repo  (2026-11-04)
 
 ## Corpus Check
-- 172 files · ~251,579 words
+- 172 files · ~250,060 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 10 file(s) not represented in the graph (top: (none) 9, .0 1)
 
 ## Summary
-- 2392 nodes · 4878 edges · 150 communities (138 shown, 12 thin omitted)
+- 2390 nodes · 4876 edges · 150 communities (138 shown, 12 thin omitted)
 - Extraction: 93% EXTRACTED · 7% INFERRED · 0% AMBIGUOUS · INFERRED: 319 edges (avg confidence: 0.87)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `f5c74ce6`
+- Built from commit: `35da78ef`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -19,12 +19,12 @@
 - ~/.agent universal skills repo
 - package.json
 - src/ui/App.tsx
-- types.ts
+- tui.ts
 - repo.ts
-- tree.h
+- tree_walk_entry
 - compilerOptions
 - SkillsManagerTui
-- ref_node_path
+- gitTransaction.test.ts
 - list-boundary.h
 - git-transaction.h
 - gitTransactionWorker.ts
@@ -44,7 +44,7 @@
 - Clipboard
 - Testing
 - Syntax highlighting with Tree-sitter
-- Texture and sprite helpers
+- Three.js WebGPU
 - Code
 - Drawing methods
 - Custom renderables
@@ -56,7 +56,7 @@
 - NativeImage
 - SSH
 - Yoga API
-- Select
+- git-transaction-state.h
 - Text
 - Textarea
 - Editing buffers and views
@@ -119,31 +119,32 @@
 - ts_diagnostic.py
 - TypeScript Cheatsheet
 - tree_check_mount_entry
-- gitTransaction.test.ts
-- read-boundary.h
-- boundary.test.ts
+- interruptedFixture
+- tree_check_mount_fd
+- checkUpdates.ts
 - git.ts
 - gitBoundary.test.ts
-- tui.ts
+- createTestRenderer
 - git-tree-hash.h
 - release-smoke.mjs
-- previewPull
+- Texture and sprite helpers
 - tui.test.ts
 - boundary.ts
-- gitTransaction.ts
+- .write
 - Engine methods
 - Lifecycle and cleanup
 - StateSession
-- gitTransactionState.test.ts
+- Drawing inventory
 - Hooks
 - `@opentui/keymap`
 - `@opentui/core`
 - Portable open-source release plan
 - check-package.mjs
-- containment.h
+- Stream and recorder members
 - Renderables
 - skills-manager design doc
 - Execution order
+- React and Solid handoff
 - Test renderer
 - Key binding pipeline callbacks
 - Open-source portability
@@ -154,7 +155,6 @@
 - Other `@opentui/core` entry points
 - Security policy
 - sandbox.ts
-- withSkillsLock
 
 ## God Nodes (most connected - your core abstractions)
 1. `SkillsManagerTui` - 96 edges
@@ -195,52 +195,52 @@ Cohesion: 0.15
 Nodes (7): ~/.agent universal skills repo, skills CLI, skills-manager (project), ~/.agent repo (design doc), User-owned skills repository (historical design), .skill-lock.json, UI: Status line
 
 ### Community 1 - "package.json"
-Cohesion: 0.06
-Nodes (32): bin, skills-manager, cpu, dependencies, execa, @opentui/core, skills, yaml (+24 more)
+Cohesion: 0.05
+Nodes (39): bin, skills-manager, cpu, dependencies, execa, @opentui/core, skills, yaml (+31 more)
 
 ### Community 2 - "src/ui/App.tsx"
 Cohesion: 0.33
 Nodes (6): src/cli.tsx, src/ui/App.tsx, UI: Detail pane, src/ui/Detail.tsx, UI: List view, src/ui/List.tsx
 
-### Community 3 - "types.ts"
+### Community 3 - "tui.ts"
 Cohesion: 0.07
-Nodes (34): Global constraints, skills-manager implementation plan, Task 11: CLI entry point and manual smoke test, Task 1: Project scaffolding, Task 2: Types and provenance classification, Task 3: Repo scanner, Task 4: Enable/disable toggle, Task 5: `skills` CLI wrapper (+26 more)
+Nodes (36): Global constraints, skills-manager implementation plan, Task 10: Git panel (diff, commit, push), Task 11: CLI entry point and manual smoke test, Task 1: Project scaffolding, Task 2: Types and provenance classification, Task 4: Enable/disable toggle, Task 5: `skills` CLI wrapper (+28 more)
 
 ### Community 4 - "repo.ts"
-Cohesion: 0.12
-Nodes (26): Data model: reconciling three sources of truth, yaml, countSkillPathLines(), readSkillPath(), checkDocumentBudget(), checkSyntaxDepth(), FrontmatterError, ParsedSkillDocument (+18 more)
+Cohesion: 0.10
+Nodes (31): Task 3: Repo scanner, Data model: reconciling three sources of truth, countSkillPathLines(), readSkillPath(), checkDocumentBudget(), checkSyntaxDepth(), FrontmatterError, ParsedSkillDocument (+23 more)
 
-### Community 5 - "tree.h"
-Cohesion: 0.22
-Nodes (22): git_state_digest(), tree_check_source(), tree_component(), tree_copy_at(), tree_fingerprint_at(), tree_hash_link(), tree_hash_object(), tree_hash_u64() (+14 more)
+### Community 5 - "tree_walk_entry"
+Cohesion: 0.32
+Nodes (13): tree_component(), tree_hash_link(), tree_hash_object(), tree_hash_u64(), tree_names_free(), tree_names_read(), tree_read_file(), tree_remove_at() (+5 more)
 
 ### Community 6 - "compilerOptions"
 Cohesion: 0.15
 Nodes (12): compilerOptions, declaration, esModuleInterop, module, moduleResolution, outDir, resolveJsonModule, rootDir (+4 more)
 
 ### Community 7 - "SkillsManagerTui"
-Cohesion: 0.06
-Nodes (26): PreparedSkillChange, main(), CliOptions, helpText, parseCliOptions(), runtimeError(), DirectoryCandidate, DirectorySelectionOptions (+18 more)
+Cohesion: 0.09
+Nodes (7): SkillsRootSelection, escapeCharacter(), escapeTerminalMultiline(), escapeTerminalSingleLine(), quoteTerminalPath(), errorMessage(), SkillsManagerTui
 
-### Community 8 - "ref_node_path"
-Cohesion: 0.13
-Nodes (10): vitest, flags, helpers, nativeDir, FileOpener, openFile(), openRepository(), openTarget() (+2 more)
+### Community 8 - "gitTransaction.test.ts"
+Cohesion: 0.06
+Nodes (28): vitest, flags, helpers, nativeDir, FileOpener, openFile(), openRepository(), openTarget() (+20 more)
 
 ### Community 9 - "list-boundary.h"
 Cohesion: 0.41
 Nodes (11): boundary_list(), boundary_list_add(), boundary_list_append(), boundary_list_check_named(), boundary_list_check_opened(), boundary_list_json_path(), boundary_list_subtree(), boundary_list_validate_name() (+3 more)
 
 ### Community 10 - "git-transaction.h"
-Cohesion: 0.06
-Nodes (111): git_transaction_serve(), git_tx_absent(), git_tx_body_drain(), git_tx_body_read(), git_tx_check_mount_entry(), git_tx_check_mount_fd(), git_tx_copy_body(), git_tx_empty_at() (+103 more)
+Cohesion: 0.09
+Nodes (70): git_transaction_serve(), git_tx_absent(), git_tx_body_drain(), git_tx_body_read(), git_tx_check_mount_entry(), git_tx_check_mount_fd(), git_tx_copy_body(), git_tx_forget_lock() (+62 more)
 
 ### Community 11 - "gitTransactionWorker.ts"
 Cohesion: 0.08
 Nodes (78): Events and errors, CommitPreview, GitBinding, PullPreview, TransactionEntry, WorkerRequest, acquire(), applyPullWorktree() (+70 more)
 
 ### Community 12 - "upstreamProvenance.ts"
-Cohesion: 0.16
-Nodes (25): execa, approveSkillsRoot(), gitTreeHash(), readParentSkillLock(), prepareReplacement(), prepareUpdate(), LockEntry, directSkill() (+17 more)
+Cohesion: 0.17
+Nodes (23): execa, approveSkillsRoot(), gitTreeHash(), readParentSkillLock(), prepareReplacement(), prepareUpdate(), directSkill(), HistoricalBaseline (+15 more)
 
 ### Community 13 - "skills-manager"
 Cohesion: 0.33
@@ -287,24 +287,24 @@ Cohesion: 0.10
 Nodes (19): Audio, Control voices and groups, Create the engine, Events and errors, Load sounds, Low-level start options, Method reference, Mix PCM and inspect the master tap (+11 more)
 
 ### Community 24 - "Audio capture and recording"
-Cohesion: 0.11
-Nodes (17): Audio capture and recording, `AudioCaptureStream`, `AudioRecorder`, Capture a PCM stream, Capture options, Capture start-option detail, Direct method reference, Exclusive capture ownership (+9 more)
+Cohesion: 0.13
+Nodes (14): Audio capture and recording, Capture a PCM stream, Capture options, Capture start-option detail, Direct method reference, Exclusive capture ownership, Next, PCM stream behavior (+6 more)
 
 ### Community 25 - "Clipboard"
 Cohesion: 0.11
 Nodes (18): Cancellation, Clearing, Clipboard, Demo, Disposal, Host-only usage, Limits and options, Next (+10 more)
 
 ### Community 26 - "Testing"
-Cohesion: 0.12
-Nodes (17): Testing, Test, Test interaction, Framework tests, Keyboard input, Keymap tests, ManualClock, MockTreeSitterClient (+9 more)
+Cohesion: 0.18
+Nodes (10): Framework tests, Keymap tests, ManualClock, MockTreeSitterClient, Mouse input, Next, Small callback spies, Terminal capabilities (+2 more)
 
 ### Community 27 - "Syntax highlighting with Tree-sitter"
 Cohesion: 0.11
 Nodes (18): Choose client ownership, Client API, Configure a parser, Configure language injections, Configure the worker, Convert highlights to styled text, Global client, Handle errors and warnings (+10 more)
 
-### Community 28 - "Texture and sprite helpers"
-Cohesion: 0.11
-Nodes (17): Lifecycle and API, Low-level canvas and Three namespace, Methods, Options and defaults, Options and defaults, Particles and explosions, Physics adapters, Public export groups (+9 more)
+### Community 28 - "Three.js WebGPU"
+Cohesion: 0.18
+Nodes (10): Lifecycle and API, Methods, Options and defaults, Options and defaults, Public export groups, Requirements, Runtime-loaded modules, Three.js WebGPU (+2 more)
 
 ### Community 29 - "Code"
 Cohesion: 0.12
@@ -319,8 +319,8 @@ Cohesion: 0.14
 Nodes (13): Build a renderable, Choose the base class, Clean up ownership, Custom renderables, Handle coordinates, clipping, and buffering, Handle failures, Handle resize, Measure intrinsic size (+5 more)
 
 ### Community 32 - "Embedded terminal"
-Cohesion: 0.12
-Nodes (16): Events and error actions, Attach a process, Availability, Cursor and paint, Draw VT output, Embedded terminal, Focus and keyboard, I/O model (+8 more)
+Cohesion: 0.17
+Nodes (11): Availability, Cursor and paint, Embedded terminal, Focus and keyboard, I/O model, Mouse and local scroll, Options and state, React and Solid (+3 more)
 
 ### Community 33 - "Input"
 Cohesion: 0.12
@@ -335,24 +335,24 @@ Cohesion: 0.12
 Nodes (15): Concepts, Create a registry, Define slots and host context, Error handling, Next, Ordering, Plugin interface, Plugin slots (+7 more)
 
 ### Community 36 - "Buffer API"
-Cohesion: 0.13
-Nodes (14): Basic drawing, Boxes and grids, Buffer API, Cell model, Clipping and opacity, Color transforms, Compose buffers and views, Create and destroy a buffer (+6 more)
+Cohesion: 0.20
+Nodes (9): Buffer API, Cell model, Clipping and opacity, Color transforms, Create and destroy a buffer, Draw one cell or grapheme, Next, Renderer buffers (+1 more)
 
 ### Community 37 - "NativeImage"
 Cohesion: 0.12
 Nodes (15): Accepted sources, Encoded PNG retention, Errors and limits, Format behavior, Load and dispose an image, Load options, Metadata, NativeImage (+7 more)
 
 ### Community 38 - "SSH"
-Cohesion: 0.13
-Nodes (15): Authentication, Basic server, Builder lifecycle, Cleanup, errors, and shutdown, Host keys, Install and runtime, Logging middleware, Middleware (+7 more)
+Cohesion: 0.17
+Nodes (12): Authentication, Basic server, Builder lifecycle, Cleanup, errors, and shutdown, Host keys, Install and runtime, Logging middleware, Middleware (+4 more)
 
 ### Community 39 - "Yoga API"
 Cohesion: 0.12
 Nodes (15): Baselines and containing blocks, `Config`, Enum styles, Enums and constants, Factories and tree ownership, Imports, Layout state, Measure and dirtied callbacks (+7 more)
 
-### Community 40 - "Select"
-Cohesion: 0.13
-Nodes (14): Availability, Basic usage, Events, Example: file menu, Item selected, Keyboard navigation, Option structure, Programmatic control (+6 more)
+### Community 40 - "git-transaction-state.h"
+Cohesion: 0.26
+Nodes (23): git_state_check_baseline(), git_state_check_control_file(), git_state_delete_request(), git_state_digest(), git_state_directory_current(), git_state_discard_known(), git_state_moved_matches(), git_state_named_identity() (+15 more)
 
 ### Community 41 - "Text"
 Cohesion: 0.13
@@ -379,8 +379,8 @@ Cohesion: 0.14
 Nodes (13): Availability, Basic usage, Events, Example: tabbed interface, Item selected, Keyboard navigation, Programmatic control, Properties (+5 more)
 
 ### Community 47 - "skills-boundary.c"
-Cohesion: 0.15
-Nodes (49): ascii_name_equal(), bootstrap_file(), check_owned_entry(), checked_fingerprint(), clear_journal(), close_context(), create_owned_file(), decode_hex() (+41 more)
+Cohesion: 0.13
+Nodes (55): ascii_name_equal(), bootstrap_file(), bootstrap_file_matches(), bootstrap_state(), check_marker(), check_owned_entry(), checked_fingerprint(), cleanup_bootstrap() (+47 more)
 
 ### Community 48 - "NativeSpanFeed"
 Cohesion: 0.18
@@ -439,7 +439,7 @@ Cohesion: 0.18
 Nodes (10): Alignment, Automatic and intrinsic size, Cell rounding, Common failures, Layout, Next, Relative and absolute flow, Resize behavior (+2 more)
 
 ### Community 62 - "Renderer"
-Cohesion: 0.17
+Cohesion: 0.18
 Nodes (11): Choose a render schedule, Choose a screen mode, Create a renderer, Custom streams, Live rendering, Next, Read capability state, Renderer (+3 more)
 
 ### Community 63 - "Text and terminal cells"
@@ -535,8 +535,8 @@ Cohesion: 0.25
 Nodes (7): Colors, Create `RGBA` values, Next, Parse everyday colors, Preserve terminal palette intent, Understand packed transport, Use alpha
 
 ### Community 86 - "skills-git-boundary.c"
-Cohesion: 0.11
-Nodes (28): ascii_equal(), ascii_lower(), config_is_bare(), failure(), invalid(), main(), match_decimal_identity(), name_character() (+20 more)
+Cohesion: 0.07
+Nodes (39): skills_apply_write_boundary(), skills_apply_write_boundary_with_remote(), skills_boundary_directory(), skills_boundary_escape(), skills_boundary_null_device(), skills_boundary_path_matches(), skills_boundary_paths_match(), skills_write_boundary_profile() (+31 more)
 
 ### Community 87 - "Deploy an OpenTUI application"
 Cohesion: 0.25
@@ -547,8 +547,8 @@ Cohesion: 0.29
 Nodes (7): Choose packages, Current skill entry pages, OpenTUI Skill, Path invariant, Reading order by area, Terminal layout defaults, Working rules
 
 ### Community 89 - "TypeScript Expert"
-Cohesion: 0.06
-Nodes (35): Advanced Patterns, Advanced Type System Expertise, AI-Assisted Development, Biome vs ESLint, CLI Debugging Tools, Code Organization, Code Review Checklist, Current Best Practices (+27 more)
+Cohesion: 0.05
+Nodes (37): Advanced Patterns, Advanced Type System Expertise, AI-Assisted Development, Biome vs ESLint, CLI Debugging Tools, Code Organization, Code Review Checklist, Complex Error Patterns (+29 more)
 
 ### Community 90 - "Getting started"
 Cohesion: 0.29
@@ -579,8 +579,8 @@ Cohesion: 0.50
 Nodes (3): APIs, Components, Packages
 
 ### Community 98 - "skillsCli.ts"
-Cohesion: 0.11
-Nodes (30): skills CLI (vercel-labs), directoryIdentity(), fingerprintSkill(), fingerprintTree(), listSkillPaths(), readSkillFiles(), removeDisposableTree(), addReviewFile() (+22 more)
+Cohesion: 0.13
+Nodes (27): directoryIdentity(), fingerprintSkill(), fingerprintTree(), listSkillPaths(), readSkillFiles(), removeDisposableTree(), addReviewFile(), applyPreparedChange() (+19 more)
 
 ### Community 107 - "compilerOptions"
 Cohesion: 0.06
@@ -591,64 +591,64 @@ Cohesion: 0.22
 Nodes (8): Connection cleanup, PCM buffering and completion, PCM format and ownership, Play decoded PCM, Output streams and feeds, Borrowed callback memory, Close and destruction, Public wrapper API
 
 ### Community 109 - "ts_diagnostic.py"
-Cohesion: 0.12
-Nodes (10): check_any_usage(), check_monorepo(), check_performance(), check_tooling(), check_tsconfig(), check_type_assertions(), check_type_errors(), check_versions() (+2 more)
+Cohesion: 0.05
+Nodes (26): Availability, Basic usage, Events, Example: file menu, Item selected, Keyboard navigation, Option structure, Programmatic control (+18 more)
 
 ### Community 110 - "TypeScript Cheatsheet"
 Cohesion: 0.13
 Nodes (14): Best Practices, Branded Types, Conditional Types, Discriminated Unions, Generics, Mapped Types, Module Declarations, Template Literal Types (+6 more)
 
 ### Community 111 - "tree_check_mount_entry"
-Cohesion: 0.27
-Nodes (10): bootstrap_file_matches(), bootstrap_state(), check_marker(), cleanup_bootstrap(), open_owned_read(), owned_regular(), owned_regular_stat(), tree_check_created() (+2 more)
+Cohesion: 0.17
+Nodes (22): git_tx_empty_at(), git_tx_empty_directory(), git_tx_node_proof(), git_tx_node_snapshot(), git_tx_node_stat(), git_tx_ref_slot_read(), git_tx_root_info(), git_tx_root_list() (+14 more)
 
-### Community 112 - "gitTransaction.test.ts"
-Cohesion: 0.18
-Nodes (17): Properties, Capture operations, Complex Error Patterns, previewCommit(), baseCommit(), crashPreparedCommit(), git(), gitWithEnv() (+9 more)
+### Community 112 - "interruptedFixture"
+Cohesion: 0.32
+Nodes (12): Properties, Capture operations, Quick routing by intent, baseCommit(), git(), gitWithEnv(), incomingPull(), interruptedFixture() (+4 more)
 
-### Community 113 - "read-boundary.h"
-Cohesion: 0.23
-Nodes (23): fingerprint_skill(), boundary_identity_fd(), boundary_absolute(), boundary_check_chain(), boundary_check_parent(), boundary_cleanup_path(), boundary_content(), boundary_count_lines() (+15 more)
+### Community 113 - "tree_check_mount_fd"
+Cohesion: 0.20
+Nodes (29): fingerprint_skill(), git_tx_ref_lock_open(), boundary_identity_fd(), boundary_absolute(), boundary_check_chain(), boundary_check_parent(), boundary_cleanup_path(), boundary_content() (+21 more)
 
-### Community 114 - "boundary.test.ts"
-Cohesion: 0.11
-Nodes (12): Task 6: Update flow (restore → update → re-disable), Task 9: Git status indicator, then App wiring (navigation, filter, actions), ApprovedSkillsRoot, recoverSkills(), removeManagedSkill(), Pending, disableSkill(), enableSkill() (+4 more)
+### Community 114 - "checkUpdates.ts"
+Cohesion: 0.15
+Nodes (11): checkForUpdates(), githubRepository(), GitHubTree, GitHubTreeEntry, isGitHubTree(), skillDirectory(), TreeFetcher, UpdateCheckReport (+3 more)
 
 ### Community 115 - "git.ts"
-Cohesion: 0.14
-Nodes (28): Quick routing by intent, allowed(), allStatus(), blockingAncestor(), commitDetails(), config, currentRoots(), environment() (+20 more)
+Cohesion: 0.06
+Nodes (89): assertApprovedSkillsRoot(), addRemoteApproved(), allowed(), allStatus(), blockingAncestor(), branchRemote(), checkRef(), commitDetails() (+81 more)
 
 ### Community 116 - "gitBoundary.test.ts"
-Cohesion: 0.13
-Nodes (21): checkDirectory(), checkHelperPlatform(), checkIdentity(), ConfinedGitOptions, ConfinedGitResult, DirectoryIdentity, gitExecutable(), helper (+13 more)
+Cohesion: 0.23
+Nodes (10): entryIdentity(), fixtureGit(), identity(), launchCopy(), nativeHelper, project, reviewedBareRemote(), ReviewedRoot (+2 more)
 
-### Community 117 - "tui.ts"
-Cohesion: 0.10
-Nodes (27): Task 10: Git panel (diff, commit, push), assertApprovedSkillsRoot(), fileIdentity(), GitDiscovery, initializationGuard(), initializeSkillsRepo(), previewAddRemote(), previewFetch() (+19 more)
+### Community 117 - "createTestRenderer"
+Cohesion: 0.29
+Nodes (7): Testing, Test, Test interaction, Keyboard input, Testing strategy, Test renderer output, createTestRenderer()
 
 ### Community 118 - "git-tree-hash.h"
-Cohesion: 0.25
+Cohesion: 0.23
 Nodes (16): boundary_git_tree_hash(), git_tree_add_entry(), git_tree_check_directory(), git_tree_close(), git_tree_free(), git_tree_hash_blob(), git_tree_hash_directory(), git_tree_open_entry() (+8 more)
 
 ### Community 119 - "release-smoke.mjs"
 Cohesion: 0.14
 Nodes (18): args, browseInTerminal(), exec, externalLock, git(), home, manifest, missing() (+10 more)
 
-### Community 120 - "previewPull"
+### Community 120 - "Texture and sprite helpers"
 Cohesion: 0.29
-Nodes (17): branchRemote(), checkRef(), commitHistory(), decodeGitOutput(), digest(), discoverGit(), fetchDetails(), line() (+9 more)
+Nodes (7): Low-level canvas and Three namespace, Particles and explosions, Physics adapters, Resources and instancing, Sprite animation, Texture and sprite helpers, Textures and basic sprites
 
 ### Community 121 - "tui.test.ts"
 Cohesion: 0.25
 Nodes (7): fingerprintContents(), commitFixture(), execFileAsync, git(), initGit(), roots, savedSourceFixture()
 
 ### Community 122 - "boundary.ts"
-Cohesion: 0.18
-Nodes (19): BoundaryProcess, checkedFingerprint(), checkedName(), checkHelperPlatform(), deleteReviewedSkill(), encode(), fingerprintReviewedSkill(), fingerprintSkillContents() (+11 more)
+Cohesion: 0.09
+Nodes (33): Task 6: Update flow (restore → update → re-disable), Task 9: Git status indicator, then App wiring (navigation, filter, actions), ApprovedSkillsRoot, BoundaryProcess, checkedFingerprint(), checkedName(), checkHelperPlatform(), cleanupGitIndex() (+25 more)
 
-### Community 123 - "gitTransaction.ts"
-Cohesion: 0.43
-Nodes (7): runConfinedNodeWorker(), commitIndexTransaction(), indexFingerprint(), Operation, pullIndexWorktreeTransaction(), recoverIndexTransaction(), worker()
+### Community 123 - ".write"
+Cohesion: 0.33
+Nodes (5): Events and error actions, Attach a process, Draw VT output, Limits and failures, Session API
 
 ### Community 124 - "Engine methods"
 Cohesion: 0.50
@@ -658,9 +658,9 @@ Nodes (4): Engine methods, Events, intercepts, and resources, Extension registra
 Cohesion: 0.18
 Nodes (10): Custom renderables, Destroy the renderer, Framework roots, Keep cleanup with creation, Lifecycle and cleanup, Next, React, Signal handling (+2 more)
 
-### Community 127 - "gitTransactionState.test.ts"
-Cohesion: 0.20
-Nodes (5): driverSource, initializeState(), privateFile(), request(), Response
+### Community 127 - "Drawing inventory"
+Cohesion: 0.40
+Nodes (5): Basic drawing, Boxes and grids, Compose buffers and views, Drawing inventory, Images and numeric buffers
 
 ### Community 128 - "Hooks"
 Cohesion: 0.20
@@ -675,28 +675,32 @@ Cohesion: 0.20
 Nodes (10): Buffers, editing, animation, and effects, Components and component helpers, Images, audio, and native span output, Input and selection, Low-level native binding exports, `@opentui/core`, Plugins, console, and process services, Renderer and render tree (+2 more)
 
 ### Community 131 - "Portable open-source release plan"
-Cohesion: 0.11
-Nodes (18): Accepted decisions, Adoption and Git safety, Approved concurrency contract, Declared author and source, Git safety, Implementation verification, 2026-11-04, Latest local verification, 2026-11-04, Network and mutation policy (+10 more)
+Cohesion: 0.12
+Nodes (16): Accepted decisions, Adoption and Git safety, Approved concurrency contract, Declared author and source, Earlier candidate checks and limits, Git safety, Network and mutation policy, Plan scope (+8 more)
 
 ### Community 132 - "check-package.mjs"
 Cohesion: 0.20
 Nodes (7): directories, expected, inspectSources(), listed, manifest, requiredAssets, root
 
-### Community 133 - "containment.h"
-Cohesion: 0.09
-Nodes (10): skills_apply_write_boundary(), skills_apply_write_boundary_with_remote(), skills_boundary_directory(), skills_boundary_escape(), skills_boundary_null_device(), skills_boundary_path_matches(), skills_boundary_paths_match(), skills_write_boundary_profile() (+2 more)
+### Community 133 - "Stream and recorder members"
+Cohesion: 0.67
+Nodes (3): `AudioCaptureStream`, `AudioRecorder`, Stream and recorder members
 
 ### Community 134 - "Renderables"
 Cohesion: 0.25
 Nodes (7): Create and update, Destruction, Hide or detach, Layout properties, Next, Renderables, Tree membership
 
 ### Community 135 - "skills-manager design doc"
-Cohesion: 0.44
-Nodes (3): Decisions, skills-manager design doc, Tech stack: TypeScript, Ink, execa, gray-matter
+Cohesion: 0.33
+Nodes (4): Decisions, skills CLI (vercel-labs), skills-manager design doc, Tech stack: TypeScript, Ink, execa, gray-matter
 
 ### Community 136 - "Execution order"
 Cohesion: 0.25
 Nodes (8): Execution order, Phase 1: P0 inert parsing and filesystem boundaries, Phase 2: P0 scope upstream CLI operations, Phase 3: P0 scope Git operations, Phase 4: P1 discovery, adoption, and onboarding, Phase 5: P1 identity, ownership, and recoverable mutations, Phase 6: P1 platform behavior and offline policy, Phase 7: P1 runtime, release artifact, and public documentation
+
+### Community 137 - "React and Solid handoff"
+Cohesion: 0.67
+Nodes (3): React, React and Solid handoff, Solid
 
 ### Community 140 - "Test renderer"
 Cohesion: 0.33
@@ -738,24 +742,20 @@ Nodes (7): Git and backup, Release status, Remote actions and privacy, Report a 
 Cohesion: 0.22
 Nodes (13): cleanEnvironment(), execFileAsync, invoke(), linuxArguments(), locatePackage(), MacGit, macProfile(), PackageLocation (+5 more)
 
-### Community 153 - "withSkillsLock"
-Cohesion: 0.33
-Nodes (13): cleanupGitIndex(), inspectGitIndex(), withSkillsLock(), addRemoteApproved(), commitSelected(), fetchApproved(), frozenRemote(), leaf() (+5 more)
-
 ## Knowledge Gaps
-- **1119 isolated node(s):** `$schema`, `display`, `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride` (+1114 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1286 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **1117 isolated node(s):** `$schema`, `display`, `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride` (+1112 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1284 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
 - **12 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `createTestRenderer()` connect `Testing` to `Keyboard input`, `React keymap integration`, `Solid keymap integration`, `Other `@opentui/core` entry points`, `tui.test.ts`?**
+- **Why does `createTestRenderer()` connect `createTestRenderer` to `Keyboard input`, `React keymap integration`, `Solid keymap integration`, `Other `@opentui/core` entry points`, `tui.test.ts`?**
   _High betweenness centrality (0.050) - this node is a cross-community bridge._
-- **Why does `OpenTUI Skill` connect `OpenTUI Skill` to `git.ts`, `opentui/SKILL.md`?**
-  _High betweenness centrality (0.046) - this node is a cross-community bridge._
-- **Why does `Quick routing by intent` connect `git.ts` to `OpenTUI Skill`, `gitTransaction.test.ts`?**
-  _High betweenness centrality (0.043) - this node is a cross-community bridge._
+- **Why does `OpenTUI Skill` connect `OpenTUI Skill` to `interruptedFixture`, `opentui/SKILL.md`?**
+  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+- **Why does `Quick routing by intent` connect `interruptedFixture` to `OpenTUI Skill`, `git.ts`?**
+  _High betweenness centrality (0.044) - this node is a cross-community bridge._
 - **Are the 37 inferred relationships involving `tree_check_mount_fd()` (e.g. with `fingerprint_skill()` and `git_tx_check_mount_fd()`) actually correct?**
   _`tree_check_mount_fd()` has 37 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 30 inferred relationships involving `tree_check_mount_entry()` (e.g. with `fingerprint_skill()` and `git_tx_check_mount_entry()`) actually correct?**
@@ -763,4 +763,4 @@ _Questions this graph is uniquely positioned to answer:_
 - **Are the 31 inferred relationships involving `tree_same_snapshot()` (e.g. with `fingerprint_skill()` and `git_tx_empty_at()`) actually correct?**
   _`tree_same_snapshot()` has 31 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `$schema`, `display`, `strict` to the rest of the system?**
-  _1119 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _1117 weakly-connected nodes found - possible documentation gaps or missing edges._

@@ -11,7 +11,9 @@ On the same date, a local macOS arm64 terminal ran the [tagged `npx` command](ht
 
 The run adopted an existing `~/.agents/skills` directory and skipped Git initialization and remote backup. It displayed the skill, opened help with `?`, returned with `Esc`, and exited with `q` and code 0. The selected tree, home, XDG directories, and outside sentinels remained unchanged. This tagged test covered installation, onboarding, browsing, and help. It did not exercise in-app mutations, Git operations, or remote actions. The terminal recording is local and is not attached to the release.
 
-The later README-only [PR #3](https://github.com/ederheisler/skills-manager/pull/3) passed its required checks. Its subsequent [main workflow](https://github.com/ederheisler/skills-manager/actions/runs/41894073676) failed on Linux x64 when a Git-push integration test reached its 5,000 ms timeout. The later [release workflow](https://github.com/ederheisler/skills-manager/actions/runs/41894447710) skipped publication. This failure occurred after v0.1.0 and did not change the release tag.
+The later README-only [PR #3](https://github.com/ederheisler/skills-manager/pull/3) passed its required checks. Its subsequent [main workflow](https://github.com/ederheisler/skills-manager/actions/runs/41894073676) failed on Linux x64 when a Git-push integration test reached its 5,000 ms timeout. The test now has a 30,000 ms whole-test limit for real Git setup and five sequential waits, each retaining its 4,000 ms limit. This corrects a budget mismatch but does not establish the cause of the historical timeout or a bug in the tagged runtime. The later [release workflow](https://github.com/ederheisler/skills-manager/actions/runs/41894447710) skipped publication. This failure occurred after v0.1.0 and did not change the release tag.
+
+As a follow-up, successful Git notices remove at most one final line feed before display. Embedded control characters remain escaped.
 
 ### Earlier candidate checks and limits
 
