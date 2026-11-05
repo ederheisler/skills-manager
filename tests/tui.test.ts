@@ -147,7 +147,10 @@ afterEach(async () => {
   if (failures.length) throw new AggregateError(failures.map((result) => result.reason), "TUI shutdown failed");
 });
 
-describe("SkillsManagerTui", () => {
+// These real-renderer workflows include npm and Git subprocesses. On macOS x64
+// CI, valid Git cases took 6–13 s and the long commit preview took 31 s; the
+// default 5 s unit-test budget is too short for an entire workflow.
+describe("SkillsManagerTui", { timeout: 30_000 }, () => {
   it("browses the selected directory without network or adoption writes on startup and reload", async () => {
     const { skillsDir } = await fixture();
     const rootBefore = await lstat(skillsDir);
@@ -204,7 +207,7 @@ describe("SkillsManagerTui", () => {
       setup.renderer.destroy();
       await app.shutdown();
     }
-  }, 20_000);
+  });
 
   it("escapes terminal controls and distinguishes literal path escapes in captured frames", async () => {
     const { home, skillsDir } = await fixture();
@@ -372,7 +375,7 @@ describe("SkillsManagerTui", () => {
       setup.renderer.destroy();
       await app.shutdown();
     }
-  }, 20_000);
+  });
 
   it("requires separate explicit consent and remembers the app setting across sessions", async () => {
     const { skillsDir } = await fixture();
@@ -415,7 +418,7 @@ describe("SkillsManagerTui", () => {
       second.renderer.destroy();
       await restarted.shutdown();
     }
-  }, 20_000);
+  });
 
   it("copies a safe manual command for the newly selected directory and never updates on cancel or quit", async () => {
     const { home, skillsDir } = await fixture();
@@ -467,7 +470,7 @@ describe("SkillsManagerTui", () => {
       setup.renderer.destroy();
       await app.shutdown();
     }
-  }, 20_000);
+  });
 
   it.each(["renderer destruction", "quit"] as const)("drains an update prepared after %s instead of handing it off", async (stop) => {
     const { home, skillsDir } = await fixture();
@@ -527,7 +530,7 @@ describe("SkillsManagerTui", () => {
       await app.shutdown();
       watcher.close();
     }
-  }, 20_000);
+  });
 
   it("prepares a CLI refresh for the current directory and registry without a prior check", async () => {
     const { home, skillsDir } = await fixture();
@@ -580,7 +583,7 @@ describe("SkillsManagerTui", () => {
       await app.shutdown();
       if (prepared) await prepared.prepared.cleanup();
     }
-  }, 20_000);
+  });
 
   it("opens help from browsing and returns to the same filter and selected file with either close key", async () => {
     const { skillsDir } = await fixture();
@@ -826,7 +829,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 20_000);
+  });
 
   it("retains the selected file's total line count across rendering modes, scrolling and file changes", async () => {
     const { skillsDir } = await fixture();
@@ -1302,8 +1305,6 @@ describe("SkillsManagerTui", () => {
     }
   });
 
-  // Real Git UI workflows exceeded the default 5 s test deadline on macOS x64
-  // CI; another Git help workflow took 14.6 s on that runner.
   it("redacts a remote setup preview and leaves configuration unchanged on cancel", async () => {
     const { skillsDir } = await fixture();
     await initGit(skillsDir);
@@ -1331,7 +1332,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 20_000);
+  });
 
   it("previews fetch and pull destinations without contacting or changing them on cancel", async () => {
     const { skillsDir } = await fixture();
@@ -1367,7 +1368,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 30_000);
+  });
 
   it("previews an explicitly selected remote and branch while HEAD is detached", async () => {
     const { skillsDir } = await fixture();
@@ -1400,7 +1401,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 30_000);
+  });
 
   it("reports a containing repository and cannot commit or initialize its tracked child", async () => {
     const { home, skillsDir } = await fixture();
@@ -1474,7 +1475,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 30_000);
+  });
 
   it("identifies blocker paths separately in a directory-to-file commit preview", async () => {
     const { skillsDir } = await fixture();
@@ -1506,7 +1507,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 20_000);
+  });
 
   it("scrolls through every path in a long commit preview before cancellation", async () => {
     const { skillsDir } = await fixture();
@@ -1632,7 +1633,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 30_000); // The aggregate waits and real Git setup need more than the default whole-test budget.
+  });
 
   it("revisits installation selection without changing the old installation", async () => {
     const { home, skillsDir } = await fixture();

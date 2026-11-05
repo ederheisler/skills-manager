@@ -1,17 +1,17 @@
 # Graph Report - skill-manager  (2026-11-05)
 
 ## Corpus Check
-- 183 files · ~274,339 words
+- 183 files · ~274,520 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 11 file(s) not represented in the graph (top: (none) 9, .0 1, .template 1)
 
 ## Summary
-- 2581 nodes · 5413 edges · 150 communities (139 shown, 11 thin omitted)
-- Extraction: 93% EXTRACTED · 7% INFERRED · 0% AMBIGUOUS · INFERRED: 380 edges (avg confidence: 0.88)
+- 2581 nodes · 5417 edges · 150 communities (139 shown, 11 thin omitted)
+- Extraction: 93% EXTRACTED · 7% INFERRED · 0% AMBIGUOUS · INFERRED: 384 edges (avg confidence: 0.88)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `51223afa`
+- Built from commit: `6ec63330`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -158,9 +158,9 @@
 
 ## God Nodes (most connected - your core abstractions)
 1. `SkillsManagerTui` - 113 edges
-2. `tree_check_mount_fd()` - 43 edges
+2. `tree_check_mount_fd()` - 44 edges
 3. `tree_check_mount_entry()` - 39 edges
-4. `tree_same_snapshot()` - 36 edges
+4. `tree_same_snapshot()` - 37 edges
 5. `SoftwareUpdateService` - 35 edges
 6. `git_transaction_serve()` - 34 edges
 7. `pull()` - 31 edges
@@ -211,8 +211,8 @@ Cohesion: 0.12
 Nodes (25): Data model: reconciling three sources of truth, yaml, countSkillPathLines(), readSkillPath(), checkDocumentBudget(), checkSyntaxDepth(), FrontmatterError, ParsedSkillDocument (+17 more)
 
 ### Community 5 - "tree.h"
-Cohesion: 0.13
-Nodes (44): Graph maintenance, fingerprint_skill(), git_tx_empty_at(), git_tx_empty_directory(), git_state_digest(), boundary_git_tree_hash(), git_tree_check_directory(), git_tree_open_entry() (+36 more)
+Cohesion: 0.15
+Nodes (37): Graph maintenance, fingerprint_skill(), git_tx_empty_at(), git_tx_empty_directory(), git_state_digest(), git_tree_open_entry(), boundary_identity_fd(), open_owned_read() (+29 more)
 
 ### Community 6 - "compilerOptions"
 Cohesion: 0.15
@@ -379,8 +379,8 @@ Cohesion: 0.14
 Nodes (13): Availability, Basic usage, Events, Example: tabbed interface, Item selected, Keyboard navigation, Programmatic control, Properties (+5 more)
 
 ### Community 47 - "skills-boundary.c"
-Cohesion: 0.15
-Nodes (51): ascii_name_equal(), bootstrap_file(), check_owned_entry(), checked_fingerprint(), clear_journal(), close_context(), create_owned_file(), decode_hex() (+43 more)
+Cohesion: 0.14
+Nodes (55): ascii_name_equal(), bootstrap_file(), bootstrap_file_matches(), bootstrap_state(), check_marker(), check_owned_entry(), checked_fingerprint(), cleanup_bootstrap() (+47 more)
 
 ### Community 48 - "NativeSpanFeed"
 Cohesion: 0.11
@@ -535,8 +535,8 @@ Cohesion: 0.25
 Nodes (7): Colors, Create `RGBA` values, Next, Parse everyday colors, Preserve terminal palette intent, Understand packed transport, Use alpha
 
 ### Community 86 - "skills-git-boundary.c"
-Cohesion: 0.08
-Nodes (39): skills_apply_write_boundary(), skills_apply_write_boundary_with_remote(), skills_boundary_directory(), skills_boundary_escape(), skills_boundary_null_device(), skills_boundary_path_matches(), skills_boundary_paths_match(), skills_write_boundary_profile() (+31 more)
+Cohesion: 0.12
+Nodes (31): ascii_equal(), ascii_lower(), config_is_bare(), failure(), invalid(), main(), match_decimal_identity(), name_character() (+23 more)
 
 ### Community 87 - "Deploy an OpenTUI application"
 Cohesion: 0.25
@@ -627,8 +627,8 @@ Cohesion: 0.29
 Nodes (7): Testing, Test, Test interaction, Keyboard input, Testing strategy, Test renderer output, createTestRenderer()
 
 ### Community 118 - "git-tree-hash.h"
-Cohesion: 0.23
-Nodes (12): git_tree_add_entry(), git_tree_close(), git_tree_free(), git_tree_hash_blob(), git_tree_hash_directory(), git_tree_rotate_left(), git_tree_scan_directory(), git_tree_sha1_block() (+4 more)
+Cohesion: 0.10
+Nodes (23): skills_apply_write_boundary(), skills_apply_write_boundary_with_remote(), skills_boundary_directory(), skills_boundary_escape(), skills_boundary_null_device(), skills_boundary_path_matches(), skills_boundary_paths_match(), skills_write_boundary_profile() (+15 more)
 
 ### Community 119 - "release-smoke.mjs"
 Cohesion: 0.17
@@ -755,13 +755,13 @@ Nodes (17): cleanEnvironment(), execFileAsync, inspectSkillsRuntime(), invoke(),
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `Graph maintenance` connect `tree.h` to `Implementation slices and dependencies`, `NativeSpanFeed`, `git.ts`?**
-  _High betweenness centrality (0.203) - this node is a cross-community bridge._
-- **Why does `interruptedFixture()` connect `git.ts` to `upstreamProvenance.ts`, `tree.h`?**
-  _High betweenness centrality (0.143) - this node is a cross-community bridge._
-- **Why does `tree_check_mount_entry()` connect `tree.h` to `git-transaction-state.h`, `list-boundary.h`, `git-transaction.h`, `skills-boundary.c`, `read-boundary.h`, `git-tree-hash.h`, `skills-git-boundary.c`?**
-  _High betweenness centrality (0.127) - this node is a cross-community bridge._
-- **Are the 37 inferred relationships involving `tree_check_mount_fd()` (e.g. with `fingerprint_skill()` and `git_tx_check_mount_fd()`) actually correct?**
-  _`tree_check_mount_fd()` has 37 INFERRED edges - model-reasoned connections that need verification._
+  _High betweenness centrality (0.204) - this node is a cross-community bridge._
+- **Why does `withSkillsLock()` connect `git.ts` to `boundary.ts`, `tui.ts`, `tree.h`, `SkillsManagerTui`, `boundary.test.ts`?**
+  _High betweenness centrality (0.090) - this node is a cross-community bridge._
+- **Why does `tree_check_mount_fd()` connect `tree.h` to `git-transaction-state.h`, `list-boundary.h`, `git-transaction.h`, `skills-boundary.c`, `read-boundary.h`, `git-tree-hash.h`, `skills-git-boundary.c`?**
+  _High betweenness centrality (0.070) - this node is a cross-community bridge._
+- **Are the 38 inferred relationships involving `tree_check_mount_fd()` (e.g. with `Graph maintenance` and `fingerprint_skill()`) actually correct?**
+  _`tree_check_mount_fd()` has 38 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 31 inferred relationships involving `tree_check_mount_entry()` (e.g. with `Graph maintenance` and `fingerprint_skill()`) actually correct?**
   _`tree_check_mount_entry()` has 31 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `$schema`, `display`, `strict` to the rest of the system?**

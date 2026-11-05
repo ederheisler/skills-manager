@@ -5606,6 +5606,114 @@
       "source_location": "L26"
     },
     {
+      "id": "native_containment_skills_apply_write_boundary",
+      "label": "skills_apply_write_boundary()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "skills_apply_write_boundary()",
+      "source_file": "native/containment.h",
+      "source_location": "L276"
+    },
+    {
+      "id": "native_containment_skills_apply_write_boundary_with_remote",
+      "label": "skills_apply_write_boundary_with_remote()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "skills_apply_write_boundary_with_remote()",
+      "source_file": "native/containment.h",
+      "source_location": "L87"
+    },
+    {
+      "id": "native_containment_skills_boundary_directory",
+      "label": "skills_boundary_directory()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "skills_boundary_directory()",
+      "source_file": "native/containment.h",
+      "source_location": "L38"
+    },
+    {
+      "id": "native_containment_skills_boundary_escape",
+      "label": "skills_boundary_escape()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "skills_boundary_escape()",
+      "source_file": "native/containment.h",
+      "source_location": "L187"
+    },
+    {
+      "id": "native_containment_skills_boundary_null_device",
+      "label": "skills_boundary_null_device()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "skills_boundary_null_device()",
+      "source_file": "native/containment.h",
+      "source_location": "L19"
+    },
+    {
+      "id": "native_containment_skills_boundary_path_matches",
+      "label": "skills_boundary_path_matches()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "skills_boundary_path_matches()",
+      "source_file": "native/containment.h",
+      "source_location": "L147"
+    },
+    {
+      "id": "native_containment_skills_boundary_paths_match",
+      "label": "skills_boundary_paths_match()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "skills_boundary_paths_match()",
+      "source_file": "native/containment.h",
+      "source_location": "L176"
+    },
+    {
+      "id": "native_containment_skills_write_boundary_profile",
+      "label": "skills_write_boundary_profile()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "skills_write_boundary_profile()",
+      "source_file": "native/containment.h",
+      "source_location": "L208"
+    },
+    {
+      "id": "native_git_tree_hash_boundary_git_tree_hash",
+      "label": "boundary_git_tree_hash()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "boundary_git_tree_hash()",
+      "source_file": "native/git-tree-hash.h",
+      "source_location": "L462"
+    },
+    {
       "id": "native_git_tree_hash_git_tree_add_entry",
       "label": "git_tree_add_entry()",
       "_callable": true,
@@ -5616,6 +5724,18 @@
       "norm_label": "git_tree_add_entry()",
       "source_file": "native/git-tree-hash.h",
       "source_location": "L229"
+    },
+    {
+      "id": "native_git_tree_hash_git_tree_check_directory",
+      "label": "git_tree_check_directory()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "git_tree_check_directory()",
+      "source_file": "native/git-tree-hash.h",
+      "source_location": "L183"
     },
     {
       "id": "native_git_tree_hash_git_tree_close",
@@ -5760,6 +5880,18 @@
       "norm_label": "git_tree_sha1_update()",
       "source_file": "native/git-tree-hash.h",
       "source_location": "L84"
+    },
+    {
+      "id": "native_git_tree_hash_git_tree_verify_directory",
+      "label": "git_tree_verify_directory()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "git_tree_verify_directory()",
+      "source_file": "native/git-tree-hash.h",
+      "source_location": "L441"
     },
     {
       "id": "scripts_release_smoke_browseinterminal",
@@ -8198,6 +8330,42 @@
       "source_location": "L300"
     },
     {
+      "id": "native_skills_boundary_bootstrap_file_matches",
+      "label": "bootstrap_file_matches()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 47,
+      "community_name": "skills-boundary.c",
+      "file_type": "code",
+      "norm_label": "bootstrap_file_matches()",
+      "source_file": "native/skills-boundary.c",
+      "source_location": "L288"
+    },
+    {
+      "id": "native_skills_boundary_bootstrap_state",
+      "label": "bootstrap_state()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 47,
+      "community_name": "skills-boundary.c",
+      "file_type": "code",
+      "norm_label": "bootstrap_state()",
+      "source_file": "native/skills-boundary.c",
+      "source_location": "L321"
+    },
+    {
+      "id": "native_skills_boundary_check_marker",
+      "label": "check_marker()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 47,
+      "community_name": "skills-boundary.c",
+      "file_type": "code",
+      "norm_label": "check_marker()",
+      "source_file": "native/skills-boundary.c",
+      "source_location": "L263"
+    },
+    {
       "id": "native_skills_boundary_check_owned_entry",
       "label": "check_owned_entry()",
       "_callable": true,
@@ -8220,6 +8388,18 @@
       "norm_label": "checked_fingerprint()",
       "source_file": "native/skills-boundary.c",
       "source_location": "L681"
+    },
+    {
+      "id": "native_skills_boundary_cleanup_bootstrap",
+      "label": "cleanup_bootstrap()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 47,
+      "community_name": "skills-boundary.c",
+      "file_type": "code",
+      "norm_label": "cleanup_bootstrap()",
+      "source_file": "native/skills-boundary.c",
+      "source_location": "L307"
     },
     {
       "id": "native_skills_boundary_clear_journal",
@@ -8882,30 +9062,6 @@
       "source_location": "L191"
     },
     {
-      "id": "native_git_tree_hash_boundary_git_tree_hash",
-      "label": "boundary_git_tree_hash()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 5,
-      "community_name": "tree.h",
-      "file_type": "code",
-      "norm_label": "boundary_git_tree_hash()",
-      "source_file": "native/git-tree-hash.h",
-      "source_location": "L462"
-    },
-    {
-      "id": "native_git_tree_hash_git_tree_check_directory",
-      "label": "git_tree_check_directory()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 5,
-      "community_name": "tree.h",
-      "file_type": "code",
-      "norm_label": "git_tree_check_directory()",
-      "source_file": "native/git-tree-hash.h",
-      "source_location": "L183"
-    },
-    {
       "id": "native_git_tree_hash_git_tree_open_entry",
       "label": "git_tree_open_entry()",
       "_callable": true,
@@ -8918,18 +9074,6 @@
       "source_location": "L199"
     },
     {
-      "id": "native_git_tree_hash_git_tree_verify_directory",
-      "label": "git_tree_verify_directory()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 5,
-      "community_name": "tree.h",
-      "file_type": "code",
-      "norm_label": "git_tree_verify_directory()",
-      "source_file": "native/git-tree-hash.h",
-      "source_location": "L441"
-    },
-    {
       "id": "native_identity_boundary_identity_fd",
       "label": "boundary_identity_fd()",
       "_callable": true,
@@ -8940,54 +9084,6 @@
       "norm_label": "boundary_identity_fd()",
       "source_file": "native/identity.h",
       "source_location": "L11"
-    },
-    {
-      "id": "native_skills_boundary_bootstrap_file_matches",
-      "label": "bootstrap_file_matches()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 5,
-      "community_name": "tree.h",
-      "file_type": "code",
-      "norm_label": "bootstrap_file_matches()",
-      "source_file": "native/skills-boundary.c",
-      "source_location": "L288"
-    },
-    {
-      "id": "native_skills_boundary_bootstrap_state",
-      "label": "bootstrap_state()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 5,
-      "community_name": "tree.h",
-      "file_type": "code",
-      "norm_label": "bootstrap_state()",
-      "source_file": "native/skills-boundary.c",
-      "source_location": "L321"
-    },
-    {
-      "id": "native_skills_boundary_check_marker",
-      "label": "check_marker()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 5,
-      "community_name": "tree.h",
-      "file_type": "code",
-      "norm_label": "check_marker()",
-      "source_file": "native/skills-boundary.c",
-      "source_location": "L263"
-    },
-    {
-      "id": "native_skills_boundary_cleanup_bootstrap",
-      "label": "cleanup_bootstrap()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 5,
-      "community_name": "tree.h",
-      "file_type": "code",
-      "norm_label": "cleanup_bootstrap()",
-      "source_file": "native/skills-boundary.c",
-      "source_location": "L307"
     },
     {
       "id": "native_skills_boundary_open_owned_read",
@@ -11148,102 +11244,6 @@
       "norm_label": "git()",
       "source_file": "tests/state/gitStatus.test.ts",
       "source_location": "L12"
-    },
-    {
-      "id": "native_containment_skills_apply_write_boundary",
-      "label": "skills_apply_write_boundary()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "skills_apply_write_boundary()",
-      "source_file": "native/containment.h",
-      "source_location": "L276"
-    },
-    {
-      "id": "native_containment_skills_apply_write_boundary_with_remote",
-      "label": "skills_apply_write_boundary_with_remote()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "skills_apply_write_boundary_with_remote()",
-      "source_file": "native/containment.h",
-      "source_location": "L87"
-    },
-    {
-      "id": "native_containment_skills_boundary_directory",
-      "label": "skills_boundary_directory()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "skills_boundary_directory()",
-      "source_file": "native/containment.h",
-      "source_location": "L38"
-    },
-    {
-      "id": "native_containment_skills_boundary_escape",
-      "label": "skills_boundary_escape()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "skills_boundary_escape()",
-      "source_file": "native/containment.h",
-      "source_location": "L187"
-    },
-    {
-      "id": "native_containment_skills_boundary_null_device",
-      "label": "skills_boundary_null_device()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "skills_boundary_null_device()",
-      "source_file": "native/containment.h",
-      "source_location": "L19"
-    },
-    {
-      "id": "native_containment_skills_boundary_path_matches",
-      "label": "skills_boundary_path_matches()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "skills_boundary_path_matches()",
-      "source_file": "native/containment.h",
-      "source_location": "L147"
-    },
-    {
-      "id": "native_containment_skills_boundary_paths_match",
-      "label": "skills_boundary_paths_match()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "skills_boundary_paths_match()",
-      "source_file": "native/containment.h",
-      "source_location": "L176"
-    },
-    {
-      "id": "native_containment_skills_write_boundary_profile",
-      "label": "skills_write_boundary_profile()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "skills_write_boundary_profile()",
-      "source_file": "native/containment.h",
-      "source_location": "L208"
     },
     {
       "id": "native_skills_git_boundary_ascii_equal",
@@ -14200,6 +14200,17 @@
       "source_location": "L140"
     },
     {
+      "id": "native_containment",
+      "label": "containment.h",
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "containment.h",
+      "source_file": "native/containment.h",
+      "source_location": "L1"
+    },
+    {
       "id": "native_git_tree_hash",
       "label": "git-tree-hash.h",
       "_origin": "ast",
@@ -14208,6 +14219,17 @@
       "file_type": "code",
       "norm_label": "git-tree-hash.h",
       "source_file": "native/git-tree-hash.h",
+      "source_location": "L1"
+    },
+    {
+      "id": "native_identity",
+      "label": "identity.h",
+      "_origin": "ast",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "file_type": "code",
+      "norm_label": "identity.h",
+      "source_file": "native/identity.h",
       "source_location": "L1"
     },
     {
@@ -24196,7 +24218,7 @@
       "node_kind": "heading",
       "norm_label": "graph maintenance",
       "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
-      "source_location": "L225"
+      "source_location": "L235"
     },
     {
       "id": "agents_skills_opentui_docs_components_image",
@@ -29054,28 +29076,6 @@
       "source_location": "L61"
     },
     {
-      "id": "native_containment",
-      "label": "containment.h",
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "containment.h",
-      "source_file": "native/containment.h",
-      "source_location": "L1"
-    },
-    {
-      "id": "native_identity",
-      "label": "identity.h",
-      "_origin": "ast",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "file_type": "code",
-      "norm_label": "identity.h",
-      "source_file": "native/identity.h",
-      "source_location": "L1"
-    },
-    {
       "id": "native_skills_git_boundary",
       "label": "skills-git-boundary.c",
       "_origin": "ast",
@@ -30965,6 +30965,30 @@
       "type": "external"
     },
     {
+      "id": "errno",
+      "label": "errno",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "errno",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "fcntl",
+      "label": "fcntl",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "fcntl",
+      "source_file": "",
+      "type": "external"
+    },
+    {
       "id": "inttypes",
       "label": "inttypes",
       "_origin": "semantic",
@@ -30973,6 +30997,114 @@
       "external": true,
       "file_type": "concept",
       "norm_label": "inttypes",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "prctl",
+      "label": "prctl",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "prctl",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "stat",
+      "label": "stat",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "stat",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "stdint",
+      "label": "stdint",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "stdint",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "stdio",
+      "label": "stdio",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "stdio",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "stdlib",
+      "label": "stdlib",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "stdlib",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "string",
+      "label": "string",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "string",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "syscall",
+      "label": "syscall",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "syscall",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "sysmacros",
+      "label": "sysmacros",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "sysmacros",
+      "source_file": "",
+      "type": "external"
+    },
+    {
+      "id": "unistd",
+      "label": "unistd",
+      "_origin": "semantic",
+      "community": 118,
+      "community_name": "git-tree-hash.h",
+      "external": true,
+      "file_type": "concept",
+      "norm_label": "unistd",
       "source_file": "",
       "type": "external"
     },
@@ -31181,30 +31313,6 @@
       "type": "external"
     },
     {
-      "id": "errno",
-      "label": "errno",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "errno",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "fcntl",
-      "label": "fcntl",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "fcntl",
-      "source_file": "",
-      "type": "external"
-    },
-    {
       "id": "libproc",
       "label": "libproc",
       "_origin": "semantic",
@@ -31213,18 +31321,6 @@
       "external": true,
       "file_type": "concept",
       "norm_label": "libproc",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "prctl",
-      "label": "prctl",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "prctl",
       "source_file": "",
       "type": "external"
     },
@@ -31253,90 +31349,6 @@
       "type": "external"
     },
     {
-      "id": "stat",
-      "label": "stat",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "stat",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "stdint",
-      "label": "stdint",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "stdint",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "stdio",
-      "label": "stdio",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "stdio",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "stdlib",
-      "label": "stdlib",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "stdlib",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "string",
-      "label": "string",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "string",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "syscall",
-      "label": "syscall",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "syscall",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "sysmacros",
-      "label": "sysmacros",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "sysmacros",
-      "source_file": "",
-      "type": "external"
-    },
-    {
       "id": "un",
       "label": "un",
       "_origin": "semantic",
@@ -31345,18 +31357,6 @@
       "external": true,
       "file_type": "concept",
       "norm_label": "un",
-      "source_file": "",
-      "type": "external"
-    },
-    {
-      "id": "unistd",
-      "label": "unistd",
-      "_origin": "semantic",
-      "community": 86,
-      "community_name": "skills-git-boundary.c",
-      "external": true,
-      "file_type": "concept",
-      "norm_label": "unistd",
       "source_file": "",
       "type": "external"
     },
@@ -52671,7 +52671,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "tests/tui.test.ts",
-      "source_location": "L1654",
+      "source_location": "L1655",
       "weight": 1.0
     },
     {
@@ -78058,7 +78058,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
-      "source_location": "L225",
+      "source_location": "L235",
       "weight": 1.0
     },
     {
@@ -92753,7 +92753,7 @@
       "confidence_score": 0.95,
       "context": "StateSession",
       "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
-      "source_location": "L231",
+      "source_location": "L241",
       "weight": 1.0
     },
     {
@@ -93454,6 +93454,18 @@
     },
     {
       "source": "docs_superpowers_plans_2026_11_05_in_app_updates_graph_maintenance",
+      "target": "src_actions_git_getstatus",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "INFERRED",
+      "confidence_score": 0.95,
+      "context": "getStatus",
+      "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
+      "source_location": "L249",
+      "weight": 1.0
+    },
+    {
+      "source": "docs_superpowers_plans_2026_11_05_in_app_updates_graph_maintenance",
       "target": "tests_actions_gittransaction_test_interruptedfixture",
       "relation": "references",
       "_origin": "ast",
@@ -93461,7 +93473,7 @@
       "confidence_score": 0.95,
       "context": "interruptedFixture",
       "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
-      "source_location": "L232",
+      "source_location": "L242",
       "weight": 1.0
     },
     {
@@ -93653,7 +93665,31 @@
       "confidence_score": 0.95,
       "context": "tree_check_mount_entry",
       "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
-      "source_location": "L232",
+      "source_location": "L242",
+      "weight": 1.0
+    },
+    {
+      "source": "docs_superpowers_plans_2026_11_05_in_app_updates_graph_maintenance",
+      "target": "native_tree_tree_check_mount_fd",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "INFERRED",
+      "confidence_score": 0.95,
+      "context": "tree_check_mount_fd",
+      "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
+      "source_location": "L250",
+      "weight": 1.0
+    },
+    {
+      "source": "docs_superpowers_plans_2026_11_05_in_app_updates_graph_maintenance",
+      "target": "native_tree_tree_same_snapshot",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "INFERRED",
+      "confidence_score": 0.95,
+      "context": "tree_same_snapshot",
+      "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
+      "source_location": "L250",
       "weight": 1.0
     },
     {
@@ -93665,7 +93701,19 @@
       "confidence_score": 0.95,
       "context": "tree_walk_entry",
       "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
-      "source_location": "L232",
+      "source_location": "L242",
+      "weight": 1.0
+    },
+    {
+      "source": "docs_superpowers_plans_2026_11_05_in_app_updates_graph_maintenance",
+      "target": "src_actions_boundary_withskillslock",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "INFERRED",
+      "confidence_score": 0.95,
+      "context": "withSkillsLock",
+      "source_file": "docs/superpowers/plans/2026-11-05-in-app-updates.md",
+      "source_location": "L250",
       "weight": 1.0
     },
     {
@@ -94137,5 +94185,5 @@
       "source_file": "docs/superpowers/specs/2026-09-16-skills-manager-design.md"
     }
   ],
-  "built_at_commit": "51223afa3602a461339d3904752cc396a90c66af"
+  "built_at_commit": "6ec633305d371ff382a81b3ae4ed724d028069c1"
 }

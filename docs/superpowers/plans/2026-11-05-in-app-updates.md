@@ -224,8 +224,14 @@ A real CLI-only refresh rebuilt that commit, selected `skills` 1.7.6 from its pr
 The original cache and outside sentinel stayed unchanged; the helper workspace was removed.
 The terminal smoke now reconstructs the real character screen with the development-only `@xterm/headless` 6.0.0 dependency.
 
-Canonical cold and warm main proof, a combined main restart, the real transport-failure path, and all three CI platform gates remain pending.
-The CI gates are Linux arm64, Linux x64, and macOS x64.
+A separately approved refresh against a closed local registry produced a real npm `ECONNREFUSED` and exit 1, printed manual recovery, and restored the terminal exactly.
+It did not restart the app. The original cache, skills, and outside sentinels stayed unchanged.
+The update workspace was absent and the npm process group was gone after exit; this probe did not independently observe their removal order.
+
+Both Linux CI jobs passed at feature head `6ec633305d371ff382a81b3ae4ed724d028069c1`, including installed-package refresh and restart.
+The remaining macOS x64 failures were four whole-workflow 5-second test deadlines, not failed behavior assertions.
+The real-TUI suite now allows 30 seconds for each complete workflow, while keeping 4-second frame deadlines, explicit phase waits, and the 60-second long-preview exception.
+Canonical cold and warm main proof, a combined main restart, and the macOS x64 gate remain pending.
 
 ### Graph maintenance
 
@@ -243,3 +249,5 @@ The corrective test-harness commit needed a second, separately guarded AST refre
 - `.command`, `.registry`, `React plugin slots`, `Select`, `appUpdateHandoff.test.ts`
 - `getStatus`, `git.test.ts`, `gitBoundary.ts`, `gitTransaction.test.ts`, `release-smoke-pty.py`
 - `repo.ts`, `tree_check_mount_fd`, `tree_same_snapshot`, `types.ts`, `withSkillsLock`
+
+The next test-only AST refresh reported 4 hub renames. No community names disappeared.
