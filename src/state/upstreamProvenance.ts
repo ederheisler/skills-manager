@@ -1,6 +1,6 @@
 import { lstat, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
-import { approveSkillsRoot, assertApprovedSkillsRoot, fingerprintContents, fingerprintSkillContents, gitTreeHash, readManagedMetadata, readParentSkillLock, type ApprovedSkillsRoot } from "../actions/boundary.js";
+import { approveSkillsRoot, assertApprovedSkillsRoot, fingerprintSkillContents, readManagedMetadata, readParentSkillLock, type ApprovedSkillsRoot } from "../actions/boundary.js";
 import type { LockEntry } from "./types.js";
 import { isLockEntry, isRecord, parseSkillLockFile } from "./validation.js";
 
@@ -46,18 +46,27 @@ async function directSkill(skillsDir: string, skillPath: string, name: string): 
   const spelledDisabled = path.resolve(skillsDir, ".disabled_skills", name);
   if (target !== active && target !== disabled && target !== spelledActive && target !== spelledDisabled) return null;
   const isDisabled = target === disabled || target === spelledDisabled;
-  if (isDisabled) {
+  let disabledPresent = false;
+  try {
     const parent = await lstat(disabledDir);
     if (!parent.isDirectory() || parent.isSymbolicLink()) return null;
+    disabledPresent = true;
+  } catch (error) {
+    if (!isRecord(error) || error.code !== "ENOENT") throw error;
+    if (isDisabled) return null;
   }
   const actual = isDisabled ? disabled : active;
   const stat = await lstat(actual);
   if (!stat.isDirectory() || stat.isSymbolicLink() || await realpath(actual) !== actual) return null;
-  try {
-    await lstat(isDisabled ? active : disabled);
-    return null; // A name-only record cannot distinguish two installed paths.
-  } catch (error) {
-    if (!isRecord(error) || error.code !== "ENOENT") throw error;
+  const document = await lstat(path.join(actual, "SKILL.md"));
+  if (!document.isFile() || document.isSymbolicLink()) return null;
+  if (isDisabled || disabledPresent) {
+    try {
+      await lstat(isDisabled ? active : disabled);
+      return null; // A name-only record cannot distinguish two installed paths.
+    } catch (error) {
+      if (!isRecord(error) || error.code !== "ENOENT") throw error;
+    }
   }
   return { root, target: actual };
 }
@@ -119,9 +128,10 @@ async function readReceipt(root: string, name: string, approved: ApprovedSkillsR
 export async function matchUpstreamReceipt(skillsDir: string, skillPath: string, name: string, approved?: ApprovedSkillsRoot): Promise<SourceAssociation | null> {
   if (approved) {
     if (path.resolve(skillsDir) !== approved.path) throw new Error("Source association root does not match the approved directory.");
-    const fingerprint = await fingerprintSkillContents(approved, name, skillPath);
     const receipt = await readReceipt(approved.path, name, approved);
-    return receipt && fingerprint === receipt.fingerprint
+    if (!receipt) return null;
+    const fingerprint = await fingerprintSkillContents(approved, name, skillPath);
+    return fingerprint === receipt.fingerprint
       ? { entry: receipt.entry, historicalBaseline: receipt.historicalBaseline }
       : null;
   }
@@ -186,12 +196,16 @@ export async function listOrphanedReceipts(skillsDir: string): Promise<Array<{ n
   return orphans;
 }
 
-/** External v3 lock data is an unverified source claim, even if its tree matches. */
-export async function readExternalClaim(skillsDir: string, skillPath: string, name: string): Promise<LockEntry | null> {
+/** External v3 lock data records an unverified source, not the state of local files. */
+export async function readExternalClaim(skillsDir: string, skillPath: string, name: string, approved?: ApprovedSkillsRoot): Promise<LockEntry | null> {
+  if (approved) {
+    if (path.resolve(skillsDir) !== approved.path) throw new Error("Source association root does not match the approved directory.");
+    await assertApprovedSkillsRoot(approved);
+  }
   const selected = await selectedSkill(skillsDir, skillPath, name);
   if (!selected || await realpath(path.dirname(path.resolve(skillsDir))) !== path.dirname(selected.root)) return null;
   let text: string | null;
-  try { text = await readParentSkillLock(selected.root); }
+  try { text = await readParentSkillLock(selected.root, approved); }
   catch (error) {
     if (isRecord(error) && error.code === "EFBIG") return null;
     throw error;
@@ -201,9 +215,20 @@ export async function readExternalClaim(skillsDir: string, skillPath: string, na
   try { raw = JSON.parse(text); } catch { return null; }
   const lock = parseSkillLockFile(raw);
   const entry = lock?.version === 3 ? lock.skills[name] : undefined;
-  if (!entry || entry.sourceType !== "github" || !validSourceEntry(entry) || !/^[a-f0-9]{40}$/i.test(entry.skillFolderHash)) return null;
-  const before = await fingerprintContents(selected.target);
-  const hash = await gitTreeHash(selected.target);
-  const after = await fingerprintContents(selected.target);
-  return before === after && hash.toLowerCase() === entry.skillFolderHash.toLowerCase() ? entry : null;
+  if (!entry || entry.sourceType !== "github" || !validSourceEntry(entry) || !/^[a-f0-9]{40}$/i.test(entry.skillFolderHash)
+    || !entry.skillPath || path.win32.isAbsolute(entry.skillPath) || entry.skillPath.includes("\\")
+    || entry.skillPath.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  return entry;
+}
+
+/** Read the current saved source; neither a receipt nor an external record proves origin. */
+export async function readInstalledSource(skillsDir: string, skillPath: string, name: string, approved?: ApprovedSkillsRoot): Promise<LockEntry | null> {
+  if (approved) {
+    if (path.resolve(skillsDir) !== approved.path) throw new Error("Source association root does not match the approved directory.");
+    await assertApprovedSkillsRoot(approved);
+    if (!await selectedSkill(skillsDir, skillPath, name)) return null;
+  }
+  const receipt = await matchUpstreamReceipt(skillsDir, skillPath, name, approved);
+  if (receipt) return receipt.entry;
+  return readExternalClaim(skillsDir, skillPath, name, approved);
 }

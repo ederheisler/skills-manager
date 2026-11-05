@@ -3,11 +3,11 @@ import { spawnSync } from "node:child_process";
 import { helpText, parseCliOptions, runtimeError } from "../src/cliOptions.js";
 
 describe("CLI options", () => {
-  it("uses the default directory unless --skills-dir selects a path directly", () => {
+  it("leaves selection to startup unless --skills-dir selects a path directly", () => {
     expect(parseCliOptions([])).toEqual({ help: false });
     expect(parseCliOptions(["--skills-dir", "./project/skills"])).toEqual({ help: false, skillsDir: "./project/skills" });
     expect(parseCliOptions(["--skills-dir=-unusual"])).toEqual({ help: false, skillsDir: "-unusual" });
-    expect(helpText).toContain("~/.agents/skills");
+    expect(helpText).toContain("Reuse saved setup for an unchanged directory; otherwise choose a directory.");
     expect(helpText).not.toContain("--agent-root");
   });
 

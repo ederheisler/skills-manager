@@ -2,6 +2,7 @@ import { lstat, readlink, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { approveSkillsRoot, type ApprovedSkillsRoot } from "./actions/boundary.js";
+import { readSavedSetup, writeSavedSetup, type SavedSetup } from "./state/config.js";
 import { escapeTerminalSingleLine, quoteTerminalPath } from "./terminalText.js";
 
 export interface OnboardingIO {
@@ -128,8 +129,12 @@ export async function inspectSelectedSkillsDirectory(selectedPath: string): Prom
   return { selectedPath: absolutePath, skillsDir: resolved, missing: false, linkTarget };
 }
 
-/** Selects a directory without scanning its contents or writing any state. */
-export async function selectSkillsDirectory(io: OnboardingIO, options: DirectorySelectionOptions = {}): Promise<SkillsOnboardingResult | null> {
+interface CompletedSelection {
+  selectedPath: string;
+  result: SkillsOnboardingResult;
+}
+
+async function chooseSkillsDirectory(io: OnboardingIO, options: DirectorySelectionOptions): Promise<CompletedSelection | null> {
   const home = options.home ?? homedir();
   const cwd = options.cwd ?? process.cwd();
   const candidates = documentedSkillsDirectories(home);
@@ -197,8 +202,10 @@ export async function selectSkillsDirectory(io: OnboardingIO, options: Directory
     const reviewBackup = ["y", "yes"].includes(backup.trim().toLowerCase());
     if (approval !== null) {
       try {
+        const selectedAgain = await inspectSelectedSkillsDirectory(inspection.selectedPath);
         const current = await approveSkillsRoot(inspection.skillsDir);
-        if (current.path !== approval.path || current.identity !== approval.identity) {
+        if (selectedAgain.missing || selectedAgain.skillsDir !== inspection.skillsDir
+          || current.path !== approval.path || current.identity !== approval.identity) {
           io.write("The selected directory changed during approval. Select it again before making changes.\n");
           continue;
         }
@@ -206,8 +213,86 @@ export async function selectSkillsDirectory(io: OnboardingIO, options: Directory
         io.write(`Cannot recheck the selected directory: ${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}\n`);
         continue;
       }
-      return { root: approval, reviewInitialize, reviewBackup };
+      return { selectedPath: inspection.selectedPath, result: { root: approval, reviewInitialize, reviewBackup } };
     }
-    return { root: { path: inspection.skillsDir, identity: null }, reviewInitialize, reviewBackup };
+    return {
+      selectedPath: inspection.selectedPath,
+      result: { root: { path: inspection.skillsDir, identity: null }, reviewInitialize, reviewBackup },
+    };
   }
+}
+
+/** Selects a directory without scanning its contents or writing any state. */
+export async function selectSkillsDirectory(io: OnboardingIO, options: DirectorySelectionOptions = {}): Promise<SkillsOnboardingResult | null> {
+  return (await chooseSkillsDirectory(io, options))?.result ?? null;
+}
+
+async function reusableSetup(saved: SavedSetup, explicitPath: string | undefined): Promise<SkillsOnboardingResult | null> {
+  if (saved.identity === null) return null;
+  try {
+    const selected = await inspectSelectedSkillsDirectory(saved.selectedPath);
+    if (selected.missing || selected.skillsDir !== saved.canonicalRoot) return null;
+    const root = await approveSkillsRoot(selected.skillsDir);
+    if (root.path !== saved.canonicalRoot || root.identity !== saved.identity) return null;
+
+    // The saved path may include a link. Check it again after capturing the
+    // live identity, and also resolve the explicit path the caller supplied.
+    const rechecked = await inspectSelectedSkillsDirectory(saved.selectedPath);
+    if (rechecked.missing || rechecked.skillsDir !== root.path) return null;
+    if (explicitPath !== undefined) {
+      const explicit = await inspectSelectedSkillsDirectory(explicitPath);
+      if (explicit.missing || explicit.skillsDir !== root.path) return null;
+    }
+    return { root, reviewInitialize: false, reviewBackup: false };
+  } catch {
+    return null;
+  }
+}
+
+/** Reuses an unchanged completed selection only after resolving it afresh. */
+export async function selectSavedSkillsDirectory(io: OnboardingIO, options: DirectorySelectionOptions = {}): Promise<SkillsOnboardingResult | null> {
+  const home = options.home ?? homedir();
+  const cwd = options.cwd ?? process.cwd();
+  const explicit = options.explicitSkillsDir === undefined
+    ? undefined : resolveSkillsDirectory(options.explicitSkillsDir, home, cwd);
+  const roots = [
+    ...(explicit === undefined ? [] : [explicit]),
+    ...(options.currentSkillsDir === undefined ? [] : [options.currentSkillsDir]),
+  ];
+  let saved: SavedSetup | null = null;
+  try {
+    saved = await readSavedSetup(home, roots);
+  } catch (error) {
+    io.write(`Warning: saved setup could not be read safely; select a directory again (${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}).\n`);
+  }
+  if (options.currentSkillsDir === undefined && saved !== null) {
+    const reused = await reusableSetup(saved, explicit);
+    if (reused !== null) return reused;
+  }
+
+  const chosen = await chooseSkillsDirectory(io, options);
+  if (chosen === null) return null;
+  try {
+    const root = chosen.result.root;
+    await writeSavedSetup(home, {
+      kind: "skills-manager-setup", version: 1, selectedPath: chosen.selectedPath,
+      canonicalRoot: root.path, identity: root.identity,
+    }, roots, async () => {
+      // Check again at the storage commit boundary; a failed recheck must
+      // leave any previously valid selection untouched.
+      const selected = await inspectSelectedSkillsDirectory(chosen.selectedPath);
+      if (selected.skillsDir !== root.path || selected.missing !== (root.identity === null)) {
+        throw new Error("Selected directory changed before setup could be saved");
+      }
+      if (root.identity !== null) {
+        const current = await approveSkillsRoot(selected.skillsDir);
+        if (current.path !== root.path || current.identity !== root.identity) {
+          throw new Error("Selected directory changed before setup could be saved");
+        }
+      }
+    });
+  } catch (error) {
+    io.write(`Warning: this setup could not be saved safely and may need to be selected again (${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}).\n`);
+  }
+  return chosen.result;
 }

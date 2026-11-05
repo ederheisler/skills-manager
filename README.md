@@ -56,7 +56,11 @@ Run `npm test` before opening a pull request. Merged version bumps are released 
 
 ## Using the app safely
 
-Onboarding lets you choose an existing skills directory. It does not merge or move skills, create Git state, or rewrite installer locks. Git initialization and backup are optional and default to skip. Review paths and destinations before approving changes. Press `?` in the browse or Git view to open keyboard help. Review dialogs default to cancellation.
+Onboarding lets you choose an existing skills directory. Completed setup is saved in `$XDG_CONFIG_HOME/skills-manager/config.json` when `XDG_CONFIG_HOME` is absolute. Otherwise, the path is `~/.config/skills-manager/config.json`. Later launches reuse setup for an unchanged root. A new or changed root requires setup again.
+
+Onboarding does not merge or move skills, create Git state, or rewrite installer locks. Git initialization and backup are optional and default to skip. Review paths and destinations before approving changes. Review dialogs default to cancellation.
+
+Existing Vercel installer records provide source tracking and update checks without skills-manager receipts. Press `?` for help in the current view. Git controls and repository status appear in Git view, not the browse footer. Shortcuts use Option on macOS and Alt on Linux.
 
 Local browsing works without network access. Automatic update checks require the separate opt-ins described above. Search, remote preparation, fetch, pull, and push require explicit actions. Remote preparation runs behind an operating-system boundary, not a general-purpose hostile-code sandbox. Do not edit or move files, or run Git commands, concurrently with an app action.
 

@@ -53,7 +53,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const [{ createInterface }, { selectSkillsDirectory }] = await Promise.all([
+  const [{ createInterface }, { selectSavedSkillsDirectory }] = await Promise.all([
     import("node:readline/promises"),
     import("./onboarding.js"),
   ]);
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
       },
     };
     try {
-      return await selectSkillsDirectory(io, selection);
+      return await selectSavedSkillsDirectory(io, selection);
     } finally {
       reader.close();
     }

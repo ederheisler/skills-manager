@@ -2,6 +2,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   BoxRenderable,
   CodeRenderable,
@@ -42,6 +43,7 @@ import type { SkillScope, SkillState } from "./state/filter.js";
 import { filterSkills } from "./state/filter.js";
 import { countSkillFileLines, listSkillFiles, readSkillFile, readSkillSource, readSkillText, scanSkills } from "./state/repo.js";
 import type { Skill, SkillFile } from "./state/types.js";
+import { readInstalledSource } from "./state/upstreamProvenance.js";
 import { checkForUpdates } from "./actions/checkUpdates.js";
 import { SoftwareUpdateService, type SoftwareUpdateCheck, type UpdateComponent } from "./actions/softwareUpdates.js";
 import { prepareUpdateHandoff, type PreparedUpdateHandoff, type UpdateTarget } from "./actions/appUpdateHandoff.js";
@@ -853,7 +855,7 @@ export class SkillsManagerTui {
     this.#confirm({
       title: target === "all" ? "Update and restart both" : switchToMain ? "Refresh CLI: switch to main" : "Refresh Vercel skills CLI",
       lines: [
-        `Current skills directory: ${quoteTerminalPath(skillsDir)}. The new session repeats onboarding and approval.`,
+        `Current skills directory: ${quoteTerminalPath(skillsDir)}. The new session validates it again and reuses saved setup if unchanged.`,
         target === "all"
           ? "Start a new session from GitHub main and refresh the Vercel skills CLI. Main may advance beyond the last checked SHA."
           : switchToMain
@@ -912,7 +914,7 @@ export class SkillsManagerTui {
         "Run this command in a terminal to request the app from GitHub main:",
         command,
         "This app recovery command does not guarantee a fresh Vercel skills CLI. Use the CLI refresh action for that.",
-        "Press c to copy the exact command. The selected directory will be reviewed again during onboarding.",
+        "Press c to copy the exact command. The new session validates the selected directory again and reuses saved setup if unchanged.",
       ],
       returnMode: "software-updates",
       informational: true,
@@ -1059,6 +1061,7 @@ export class SkillsManagerTui {
     this.#confirm({
       title: "Update check",
       lines: [
+        "Checks upstream changes, not your local edits.",
         report.updated.length ? `Updates available: ${report.updated.map((id) => this.#skills.find((skill) => skill.id === id)?.name ?? id).join(", ")}` : report.unavailable.length ? "No updates identified; some checks were unavailable." : "No updates found.",
         ...report.unavailable.map(({ name, reason }) => `${name}: unavailable - ${reason}`),
       ],
@@ -1267,14 +1270,14 @@ export class SkillsManagerTui {
     const revision = this.#revision;
     const snapshots = skills.map((skill) => ({
       ...skill,
-      lockEntry: skill.lockEntry ? { ...skill.lockEntry } : null,
+      lockEntry: skill.lockEntry ? structuredClone(skill.lockEntry) : null,
       provenance: { ...skill.provenance },
     }));
     this.#confirm({
       title: "Review saved sources",
       lines: [
         `Installation: ${quoteTerminalPath(root.path)}`,
-        "Saved source associations are not authenticated. Approval permits contacting these sources.",
+        "These saved sources have not been verified. Review the URLs before continuing.",
         ...snapshots.flatMap((skill) => skill.lockEntry && skill.provenance.kind === "source" ? [
           `Skill: ${quoteTerminalPath(skill.path)}`,
           `Source: ${quoteTerminalPath(skill.lockEntry.source)}`,
@@ -1298,7 +1301,15 @@ export class SkillsManagerTui {
       await this.#runExclusive(() => this.#checkForUpdates(skills));
       return;
     }
-    this.#reviewSources(skills, async (_root, snapshots) => this.#checkForUpdates(snapshots));
+    this.#reviewSources(skills, async (root, snapshots) => {
+      for (const skill of snapshots) {
+        if (!skill.lockEntry || skill.provenance.kind !== "source") continue;
+        const current = await readInstalledSource(root.path, skill.path, skill.name, root);
+        if (!isDeepStrictEqual(current, skill.lockEntry)) throw new Error("The saved source changed since approval.");
+      }
+      await assertApprovedSkillsRoot(root);
+      await this.#checkForUpdates(snapshots);
+    });
   }
 
   async #updateSelected(): Promise<void> {
@@ -1996,7 +2007,7 @@ export class SkillsManagerTui {
     });
     footer.add(this.#noticeText);
     footer.add(new TextRenderable(this.renderer, {
-      content: `Directory: ${quoteTerminalPath(this.#skillsDir)} | ${escapeTerminalSingleLine(this.#gitStatus || "Git: checking...")}`,
+      content: `Directory: ${quoteTerminalPath(this.#skillsDir)}${this.#isGitMode ? ` | ${escapeTerminalSingleLine(this.#gitStatus || "Git: checking...")}` : ""}`,
       fg: colors.muted,
       height: 1,
       wrapMode: "none",
@@ -2492,43 +2503,47 @@ export class SkillsManagerTui {
       });
     }
     content.add(new TextRenderable(this.renderer, {
-      content: [
-        "Navigation",
-        "Up/down or j/k   Select a skill, Git file or search result",
-        "[ / ] or Ctrl+p/n   Select previous/next skill file",
-        "Alt+up/down   Select previous/next skill file",
-        ", or .   Scroll skill metadata",
-        "PgUp/PgDn   Scroll the file or Git diff",
-        "?   Open help from browsing or Git",
-        "",
+      content: (this.#helpReturnMode === "browse" ? [
         "Browsing",
-        "/   Filter skills; Enter applies, Esc clears",
-        "s   Cycle source scope     e   Cycle enabled state",
-        "t   Toggle Markdown/raw    o   Open selected file",
-        "Space   Review enable/disable     d or Delete   Review removal",
-        "u   Update selected        p   Update all",
-        "v   Review update check    a   Search and add skills",
-        "r   Refresh                i   Select installation, if available",
-        "x   Application updates",
-        "g   Open Git               q   Quit",
-        "",
+        "Up/down, j/k      Select skill",
+        "[/], Ctrl+p/n     Select previous/next file",
+        `${`${process.platform === "darwin" ? "Option" : "Alt"}+↑/↓`.padEnd(18)}Select previous/next file`,
+        ",/.               Scroll metadata",
+        "PgUp/PgDn         Scroll file",
+        "g                 Open Git",
+        "x                 Application updates",
+        "/                 Filter skills",
+        "s                 Cycle scope",
+        "e                 Cycle enabled state",
+        "t                 Toggle Markdown/raw",
+        "o                 Open selected file",
+        "Space             Review enable/disable",
+        "d/Delete          Review removal",
+        "u                 Update selected",
+        "p                 Update all",
+        "v                 Review update check",
+        "a                 Search and add skills",
+        "r                 Refresh",
+        ...(this.options.selectSkillsDir ? ["i                 Select installation"] : []),
+        "q                 Quit",
+        "Esc               Clear filter",
+        "Context menu: Up/down or j/k select; Enter acts",
+      ] : [
         "Git",
-        "s   Cycle status filter    t   Toggle full diff context",
-        "r   Refresh                i   Initialize repository",
-        "n   Add remote             c   Review commit",
-        "f   Fetch                  l   Pull",
-        "p   Push                   Esc   Return to browsing",
+        "Up/down, j/k      Select Git file",
+        "PgUp/PgDn         Scroll diff",
+        "Esc               Return to browsing",
+        "s                 Cycle status filter",
+        "t                 Toggle full diff context",
+        "r                 Refresh",
+        "i                 Initialize repository",
+        "n                 Add remote",
+        "c                 Review commit",
+        "f                 Fetch",
+        "l                 Pull",
+        "p                 Push",
         "Git actions depend on repository state and require review.",
-        "",
-        "Reviews and prompts",
-        "Up/down or PgUp/PgDn   Scroll review",
-        "Left/right or Tab   Select Cancel/Approve",
-        "y   Approve     n or Esc   Cancel     Enter   Use selection",
-        "Informational reviews: Enter or Esc closes",
-        "Search results: Up/down or j/k select, Enter prepares, o opens repo",
-        "Text prompts: ? is literal, Enter submits, Esc cancels",
-        "Context menu: Up/down or j/k select, Enter acts; Esc clears filter or closes",
-      ].join("\n"),
+      ]).join("\n"),
       width: "100%",
       height: "auto",
       fg: colors.text,

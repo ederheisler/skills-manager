@@ -83,7 +83,7 @@ Update build inputs, copied-source fixtures, package tests, and artifact tests t
 After identity exists, add configuration and checkers for the two components, separate from skill updates.
 Use absolute `XDG_CONFIG_HOME`, or the home configuration fallback, for explicit consent.
 Use absolute `XDG_CACHE_HOME`, or the home cache fallback, for authorized check metadata.
-Do not create configuration on startup. Persist only explicit consent and authorized check metadata.
+Do not create update-consent configuration on startup. For this feature, persist only explicit consent and authorized check metadata.
 Reject unsafe symlinks and overlap with any skills root. Never write to a selected skills directory for this feature.
 Missing consent means off. Invalid, unreadable, or unwritable consent fails closed and is reported.
 
@@ -112,7 +112,9 @@ Block handoff while an action is busy or a prepared review, Git operation, edito
 Do not discard changes or finish a review on the user's behalf.
 Capture the current resolved absolute skills directory at approval, not the original command-line argument.
 Pass it as a separate `--skills-dir` argument without a shell or unknown forwarded arguments.
-The new app must repeat onboarding and revalidate directory identity. Old approval is not new authorization.
+The original approval required the new app to repeat onboarding and revalidate directory identity. This prevented an old approval from becoming new authorization.
+
+Amendment, 2026-11-05: The user superseded repeated onboarding with persisted completed setup. Every launch, including the update child, must freshly validate the physical root. Reuse completed setup for an unchanged root. Prompt for a new or changed root. Saved setup does not authorize future writes or Git actions. Update-host consent remains independent in `app.json` and `cli.json`, and startup network rules do not change. See [persisted setup](../../decisions/2026-11-03-open-source-portability.md#persisted-setup-and-existing-installer-tracking).
 
 Before implementing handoff, prove [Node 26 `process.execve`](https://nodejs.org/docs/latest-v26.x/api/process.html#processexecvefile-args-env) in real macOS and Linux terminals.
 It is experimental, replaces the process image, skips exit and cleanup handlers, and throws on failure.
@@ -193,7 +195,7 @@ Use disposable homes, caches, skills roots, and outside sentinels. Do not use a 
 - Exercise equal, unequal, unknown, and dirty identity. Exercise timeout, offline, 403, 429, server errors, invalid data, cancellation, and stale-result suppression.
   Complete checks during help, confirmations, busy actions, and shutdown without changing focus or replacing a dialog.
 - Exercise cancel, busy refusal, unresolved reviews, ordinary quit, signals, and Ctrl-C. None can launch an update without explicit approval.
-  Test current switched roots, spaces, quotes, leading hyphens, changed symlinks, and renewed onboarding in the child.
+  Test current switched roots, spaces, quotes, leading hyphens, changed symlinks, physical-root validation, and persisted setup reuse in the child. A new or changed root must prompt.
 - With fake tools and real terminal fixtures, inspect exact argv, environment, private project cwd and cache, process replacement, and cleanup order.
   Exercise missing tools, download and build errors, lifecycle script policy, aborts, exec failure, child failure, and interrupted workspace cleanup.
   Make sure checkout, active installation, skills trees, lockfiles, outside sentinels, and other instances' caches remain unchanged.
@@ -232,6 +234,18 @@ The merged commit also passed [main checks](https://github.com/ederheisler/skill
 The real-TUI suite allows 30 seconds for each complete workflow, retaining 4-second frame deadlines, explicit phase waits, and the 60-second long-preview exception.
 
 The public verification record is attached to [implementation PR #8](https://github.com/ederheisler/skills-manager/pull/8).
+
+### Local regression verification
+
+`npm run build` passed. The 28 non-TUI test files passed. After correcting an obsolete browse-view Git expectation, all 60 TUI tests passed. The total was 610 passed and 11 skipped across 29 files. `npm audit` reported zero vulnerabilities.
+
+On macOS, a native Node terminal fixture persisted the first setup. A second ordinary launch asked no setup questions and left the configuration bytes unchanged. Both CLI runs exited with status zero. An existing Vercel source association was recognized despite different local content. After explicit source approval, a real GitHub check reported `No updates found`.
+
+Browse help showed Option+↑/↓ without Git operations. Git help showed commit, fetch, pull, and push. Containing-repository information appeared only in Git view. The fixture skills, installer lock, outside sentinel, cache, and working directory stayed unchanged.
+
+A read-only scan of the installed skills found 40 entries, including 20 tracked entries and the `crit-cli` source. The installer lock, skill files, and root entries stayed unchanged. The scan created no manager state.
+
+SCB reviewed 17 changed files. Complexity thresholds and similar guard shapes remained because validation and lifecycle operations differ. The review found no established correctness defect. Startup traffic was not independently instrumented for this regression, and current-head Linux CI was not observed in this local run.
 
 ### Graph maintenance
 

@@ -38,6 +38,7 @@
     "dist/actions/update.js",
     "dist/state/appBuild.js",
     "dist/state/buildIdentity.json",
+    "dist/state/config.js",
     "dist/state/filter.js",
     "dist/state/format.js",
     "dist/state/frontmatter.js",
