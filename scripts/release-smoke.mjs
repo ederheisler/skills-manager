@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import xterm from '@xterm/headless';
 import { promisify, stripVTControlCharacters } from 'node:util';
 
 const exec = promisify(execFile);
@@ -104,10 +105,13 @@ async function browseInTerminal(skillsDir, refresh = false) {
   let stageStart = 0;
   let failure;
   let updateWorkspace;
+  const terminal = new xterm.Terminal({ cols: 140, rows: 40, allowProposedApi: true });
+  let pending = Promise.resolve();
   const child = spawn('python3', [relay, cli, '--skills-dir', skillsDir], {
     cwd: work, env: process.env, stdio: ['pipe', 'pipe', 'pipe'],
   });
   child.stdin.on('error', () => {});
+  terminal.onData((data) => child.stdin.write(data));
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.on('error', (error) => { failure = error; });
@@ -116,7 +120,7 @@ async function browseInTerminal(skillsDir, refresh = false) {
     child.kill('SIGTERM');
   }, refresh ? 900_000 : 90_000);
   child.stderr.on('data', (chunk) => { stderr += chunk; });
-  child.stdout.on('data', (chunk) => {
+  const processOutput = (chunk) => {
     transcript += chunk;
     if (transcript.length > 4 * 1024 * 1024) {
       failure = new Error('Terminal output exceeded the smoke limit');
@@ -124,6 +128,11 @@ async function browseInTerminal(skillsDir, refresh = false) {
       return;
     }
     const text = stripVTControlCharacters(transcript.slice(stageStart));
+    const buffer = terminal.buffer.active;
+    const screen = Array.from({ length: terminal.rows }, (_, row) =>
+      buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? '').join('\n');
+    const browse = screen.includes('x app updates') && !screen.includes('Keyboard help')
+      && !screen.includes('Application updates');
     if (step === 0 && text.includes('Review optional local Git initialization? [y/N]')) {
       step = 1;
       child.stdin.write('\n');
@@ -132,29 +141,31 @@ async function browseInTerminal(skillsDir, refresh = false) {
       step = 2;
       child.stdin.write('\n');
     }
-    if (step === 2 && /Skills\s+1\s+shown/.test(text)) {
+    if (step === 2 && /Skills\s+1\s+shown/.test(screen) && browse) {
       step = 3;
       stageStart = transcript.length;
       child.stdin.write('?');
-    } else if (step === 3 && text.includes('Keyboard help') && /x\s+Application updates/.test(text)) {
+    } else if (step === 3 && screen.includes('Keyboard help') && /x\s+Application updates/.test(screen)) {
       step = 4;
       stageStart = transcript.length;
-      child.stdin.write('\x1b');
-    } else if (step === 4 && /Skills\s+1\s+shown/.test(text)) {
+      child.stdin.write('?');
+    } else if (step === 4 && browse) {
       step = 5;
       stageStart = transcript.length;
       child.stdin.write('x');
-    } else if (step === 5 && text.includes('Application updates')
-      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(text)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(text)) {
+    } else if (step === 5 && screen.includes('Application updates')
+      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
+      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)
+      && screen.includes('f refresh CLI only · m manual recovery · Esc close')) {
       step = 6;
       stageStart = transcript.length;
       child.stdin.write(refresh ? 'f' : '\x1b');
-    } else if (step === 6 && !refresh && /Skills\s+1\s+shown/.test(text)) {
+    } else if (step === 6 && !refresh && browse) {
       step = 7;
       child.stdin.write('q');
-    } else if (step === 6 && refresh && text.includes('Refresh Vercel skills CLI')
-      && text.includes(`Rebuild the same app commit ${previousEnv.RELEASE_EXPECTED_COMMIT}`)) {
+    } else if (step === 6 && refresh && screen.includes('Refresh Vercel skills CLI')
+      && screen.includes(`Rebuild the same app commit ${previousEnv.RELEASE_EXPECTED_COMMIT}`)
+      && screen.includes('[y] Approve')) {
       step = 8;
       stageStart = transcript.length;
       child.stdin.write('y');
@@ -185,7 +196,7 @@ async function browseInTerminal(skillsDir, refresh = false) {
       step = 11;
       stageStart = transcript.length;
       child.stdin.write('\n');
-    } else if (step === 11 && /Skills\s+1\s+shown/.test(text)) {
+    } else if (step === 11 && /Skills\s+1\s+shown/.test(screen) && browse) {
       step = 12;
       void inspectRefreshedSession(updateWorkspace).then(() => {
         step = 13;
@@ -195,29 +206,44 @@ async function browseInTerminal(skillsDir, refresh = false) {
         failure = error;
         child.kill('SIGTERM');
       });
-    } else if (step === 13 && text.includes('Keyboard help') && /x\s+Application updates/.test(text)) {
+    } else if (step === 13 && screen.includes('Keyboard help') && /x\s+Application updates/.test(screen)) {
       step = 14;
       stageStart = transcript.length;
-      child.stdin.write('\x1b');
-    } else if (step === 14 && /Skills\s+1\s+shown/.test(text)) {
+      child.stdin.write('?');
+    } else if (step === 14 && browse) {
       step = 15;
       stageStart = transcript.length;
       child.stdin.write('x');
-    } else if (step === 15 && text.includes('Application updates')
-      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(text)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(text)) {
+    } else if (step === 15 && screen.includes('Application updates')
+      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
+      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)
+      && screen.includes('f refresh CLI only · m manual recovery · Esc close')) {
       step = 16;
       stageStart = transcript.length;
       child.stdin.write('\x1b');
-    } else if (step === 16 && /Skills\s+1\s+shown/.test(text)) {
+    } else if (step === 16 && browse) {
       step = 17;
       child.stdin.write('q');
     }
+  };
+  child.stdout.on('data', (chunk) => {
+    pending = pending.then(() => new Promise((resolve) => {
+      terminal.write(chunk, () => {
+        try { processOutput(chunk); }
+        catch (error) { failure = error; child.kill('SIGTERM'); }
+        resolve();
+      });
+    }));
   });
   const result = await new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
+  await pending;
+  const finalBuffer = terminal.buffer.active;
+  const finalScreen = Array.from({ length: terminal.rows }, (_, row) =>
+    finalBuffer.getLine(finalBuffer.viewportY + row)?.translateToString(true) ?? '').join('\n');
+  terminal.dispose();
   clearTimeout(timer);
   const evidence = stripVTControlCharacters(transcript).slice(-12000);
-  const diagnostic = `PTY exit=${result.code} signal=${result.signal}\nstderr:\n${stderr}\nterminal:\n${evidence}`;
+  const diagnostic = `PTY step=${step} exit=${result.code} signal=${result.signal}\nstderr:\n${stderr}\nscreen:\n${finalScreen}\nterminal transcript:\n${evidence}`;
   if (failure) throw new Error(`${failure.message}\n${diagnostic}`);
   assert.equal(result.signal, null, diagnostic);
   assert.equal(result.code, 0, `${diagnostic}\nThe approved commit ${previousEnv.RELEASE_EXPECTED_COMMIT ?? '(not applicable)'} must be fetchable from the canonical GitHub repository for the real refresh.`);

@@ -14,9 +14,18 @@ import { SkillsManagerTui, type ApplicationUpdateHandoff } from "../src/tui.js";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
+const applications: SkillsManagerTui[] = [];
+const renderers: Array<Awaited<ReturnType<typeof createOpenTuiTestRenderer>>["renderer"]> = [];
+
+function createTrackedTui(...args: ConstructorParameters<typeof SkillsManagerTui>): SkillsManagerTui {
+  const app = new SkillsManagerTui(...args);
+  applications.push(app);
+  return app;
+}
 
 async function createTestRenderer(options: Parameters<typeof createOpenTuiTestRenderer>[0]) {
   const setup = await createOpenTuiTestRenderer(options);
+  renderers.push(setup.renderer);
   return {
     ...setup,
     async waitFor(predicate: () => boolean | Promise<boolean>, timeout = 4_000): Promise<void> {
@@ -125,9 +134,17 @@ function cliRefreshTitle(frame: string): string | null {
 }
 
 afterEach(async () => {
+  for (const renderer of renderers.splice(0)) {
+    if (!renderer.isDestroyed) renderer.destroy();
+  }
+  // Renderer destruction starts shutdown asynchronously; drain it before the
+  // fixture environment and directories can be reused by the next test.
+  const shutdowns = await Promise.allSettled(applications.splice(0).map((app) => app.shutdown()));
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  const failures = shutdowns.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failures.length) throw new AggregateError(failures.map((result) => result.reason), "TUI shutdown failed");
 });
 
 describe("SkillsManagerTui", () => {
@@ -138,7 +155,7 @@ describe("SkillsManagerTui", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      const app = new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir));
+      const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir));
       await app.start();
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
@@ -171,7 +188,7 @@ describe("SkillsManagerTui", () => {
     const before = (await readdir(home)).sort();
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
-    const app = new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir));
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir));
     try {
       await app.start();
       await setup.mockInput.typeText("x");
@@ -200,7 +217,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(backslashRoot, "gamma", "SKILL.md"), "---\nname: gamma\n---\n\nOther root.\n");
     const setup = await createTestRenderer({ width: 200, height: 40 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(newlineRoot), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(newlineRoot), {
         selectSkillsDir: async () => ({ root: await approveSkillsRoot(backslashRoot), reviewInitialize: false, reviewBackup: false }),
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("BODY\\x07"));
@@ -229,7 +246,7 @@ describe("SkillsManagerTui", () => {
     vi.stubEnv("PATH", path.join(skillsDir, "missing-executables"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, approved).start();
+      await createTrackedTui(setup.renderer, approved).start();
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
       expect(frame).toContain("Git unavailable");
@@ -247,7 +264,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
       expect(frame).toContain("x app updates · open");
@@ -290,7 +307,7 @@ describe("SkillsManagerTui", () => {
     const another = Promise.withResolvers<Response>();
     const fetch = vi.spyOn(globalThis, "fetch").mockReturnValue(response.promise);
     const setup = await createTestRenderer({ width: 180, height: 30 });
-    const app = new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir));
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir));
     try {
       await app.start();
       await setup.mockInput.typeText("x");
@@ -361,7 +378,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200 }));
     const first = await createTestRenderer({ width: 180, height: 30 });
-    const app = new SkillsManagerTui(first.renderer, await approveSkillsRoot(skillsDir));
+    const app = createTrackedTui(first.renderer, await approveSkillsRoot(skillsDir));
     try {
       await app.start();
       await first.mockInput.typeText("x");
@@ -386,7 +403,7 @@ describe("SkillsManagerTui", () => {
       await app.shutdown();
     }
     const second = await createTestRenderer({ width: 180, height: 30 });
-    const restarted = new SkillsManagerTui(second.renderer, await approveSkillsRoot(skillsDir));
+    const restarted = createTrackedTui(second.renderer, await approveSkillsRoot(skillsDir));
     try {
       await restarted.start();
       await second.mockInput.typeText("x");
@@ -413,7 +430,7 @@ describe("SkillsManagerTui", () => {
       dispose: async () => {},
     } as unknown as ClipboardService;
     const setup = await createTestRenderer({ width: 180, height: 30 });
-    const app = new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
       clipboard,
       selectSkillsDir: async () => ({ root: await approveSkillsRoot(switched), reviewInitialize: false, reviewBackup: false }),
     });
@@ -475,7 +492,7 @@ describe("SkillsManagerTui", () => {
     ].join("\n"), { mode: 0o700 });
     await chmod(npm, 0o700);
     const setup = await createTestRenderer({ width: 180, height: 30 });
-    const app = new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir));
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir));
     const events: string[] = [];
     const watcher = watch(temporary, (_event, filename) => { if (filename) events.push(filename.toString()); });
     try {
@@ -522,7 +539,7 @@ describe("SkillsManagerTui", () => {
     await mkdir(temporary);
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
-    const app = new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
       selectSkillsDir: async () => ({ root: await approveSkillsRoot(switched), reviewInitialize: false, reviewBackup: false }),
     });
     let prepared: ApplicationUpdateHandoff | null = null;
@@ -571,7 +588,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(skillsDir, "alpha", "notes.txt"), `${notes.join("\n")}\n`);
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("quit · ? help");
       const controls = setup.captureSpans().lines.find((line) =>
@@ -625,7 +642,7 @@ describe("SkillsManagerTui", () => {
     const betaBefore = await readFile(beta, "utf8");
     const setup = await createTestRenderer({ width: 140, height: 24 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       const rows = setup.captureCharFrame().split("\n");
       const betaRow = rows.findIndex((row) => row.includes("[off] [unknown] beta"));
@@ -658,7 +675,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 60, height: 10 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("?");
       await setup.waitFor(() => setup.captureCharFrame().includes("Keyboard help"));
       expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).toContain("Navigation");
@@ -718,7 +735,7 @@ describe("SkillsManagerTui", () => {
     const statusBefore = await git(skillsDir, "status", "--porcelain");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       expect(setup.captureCharFrame()).toContain("? help");
@@ -817,7 +834,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), `---\nname: alpha\n---\n${body}\n`);
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("48 lines"));
       await setup.mockInput.typeText("t");
       await setup.waitFor(() => setup.captureCharFrame().includes("Raw · toggle rendering"));
@@ -844,7 +861,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), `---\nname: alpha\nmetadata:\n${metadata}\n---\n\nBody.\n`);
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Skill details · ,/. scroll"));
       await setup.mockInput.typeText(".".repeat(50));
       await setup.waitFor(() => setup.captureCharFrame().includes("Key44: value-44"));
@@ -860,7 +877,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(skillsDir, "invalid", "SKILL.md"), "---js\nthrow new Error('not data')\n---\n");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("[off] [unknown] beta"));
       let rows = setup.captureCharFrame().split("\n");
       let row = rows.findIndex((line) => line.includes("[on] [unknown] broken"));
@@ -886,7 +903,7 @@ describe("SkillsManagerTui", () => {
     const disabled = path.join(skillsDir, ".disabled_skills", "alpha", "SKILL.md");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText(" ");
       await setup.waitFor(() => setup.captureCharFrame().includes("Disable skill"));
       expect(confirmationText(setup.captureCharFrame(), "Disable skill")).toContain(`From: "${path.join(skillsDir, "alpha")}"`);
@@ -911,7 +928,7 @@ describe("SkillsManagerTui", () => {
     const file = path.join(skillsDir, "alpha", "SKILL.md");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("d");
       await setup.waitFor(() => setup.captureCharFrame().includes("Remove skill"));
       expect(confirmationText(setup.captureCharFrame(), "Remove skill")).toContain(`Path: "${path.dirname(file)}"`);
@@ -933,7 +950,7 @@ describe("SkillsManagerTui", () => {
     const displaced = path.join(home, "original-skills");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, approved).start();
+      await createTrackedTui(setup.renderer, approved).start();
       await rename(skillsDir, displaced);
       await mkdir(path.join(skillsDir, "alpha"), { recursive: true });
       const replacement = path.join(skillsDir, "alpha", "SKILL.md");
@@ -955,7 +972,7 @@ describe("SkillsManagerTui", () => {
     const displaced = path.join(home, "approved-skills");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, approved).start();
+      await createTrackedTui(setup.renderer, approved).start();
       await setup.mockInput.typeText("d");
       await setup.waitFor(() => setup.captureCharFrame().includes("Remove skill"));
       await rename(skillsDir, displaced);
@@ -981,7 +998,7 @@ describe("SkillsManagerTui", () => {
     await symlink(outside, path.join(skillsDir, "linked"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       let rows = setup.captureCharFrame().split("\n");
       let row = rows.findIndex((line) => line.includes("[on] [unknown] linked"));
@@ -1006,7 +1023,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("u");
       await setup.waitFor(() => setup.captureCharFrame().includes("Replacement source for alpha:"));
       await setup.mockInput.typeText("owner/repository@alpha");
@@ -1027,7 +1044,7 @@ describe("SkillsManagerTui", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText(key);
       await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
       const review = confirmationText(setup.captureCharFrame(), "Review saved sources");
@@ -1048,7 +1065,7 @@ describe("SkillsManagerTui", () => {
     const { file, receipt } = await savedSourceFixture(skillsDir);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText(key);
       await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
       await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, ref: "changed-ref" } }));
@@ -1067,7 +1084,7 @@ describe("SkillsManagerTui", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ sha: "a".repeat(40), tree: [] }), { status: 200 }));
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("v");
       await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
       await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, source: "other/project", sourceUrl: "https://github.com/other/project", ref: "other" } }));
@@ -1098,7 +1115,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, source: url, sourceUrl: url, sourceType: "git" } }));
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText(key);
       await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
       expect(confirmationText(setup.captureCharFrame(), "Review saved sources")).toContain(`URL: "${url}"`);
@@ -1118,7 +1135,7 @@ describe("SkillsManagerTui", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("v");
       await setup.waitFor(() => setup.captureCharFrame().includes("Update check"));
       expect(setup.captureCharFrame()).toContain("some checks were unavailable");
@@ -1133,7 +1150,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("i");
@@ -1152,7 +1169,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: true, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Initialize Git"));
@@ -1175,7 +1192,7 @@ describe("SkillsManagerTui", () => {
     const { home, skillsDir } = await fixture(directoryName);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: true, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Initialize Git"));
@@ -1210,7 +1227,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", "https://person:secret-token@example.invalid/private/repo.git");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: false, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Review push"));
@@ -1236,7 +1253,7 @@ describe("SkillsManagerTui", () => {
     const before = await git(skillsDir, "rev-parse", "HEAD");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: false, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Backup review unavailable:"));
@@ -1256,7 +1273,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", "https://example.invalid/private/repo.git");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: false, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Backup review unavailable:"));
@@ -1273,7 +1290,7 @@ describe("SkillsManagerTui", () => {
     const missing = path.join(home, "missing-skills");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, { path: missing, identity: null }, {
+      await createTrackedTui(setup.renderer, { path: missing, identity: null }, {
         initialOnboarding: { reviewInitialize: true, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Git setup and backup are unavailable"));
@@ -1285,12 +1302,14 @@ describe("SkillsManagerTui", () => {
     }
   });
 
+  // Real Git UI workflows exceeded the default 5 s test deadline on macOS x64
+  // CI; another Git help workflow took 14.6 s on that runner.
   it("redacts a remote setup preview and leaves configuration unchanged on cancel", async () => {
     const { skillsDir } = await fixture();
     await initGit(skillsDir);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("n");
@@ -1312,7 +1331,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  });
+  }, 20_000);
 
   it("previews fetch and pull destinations without contacting or changing them on cancel", async () => {
     const { skillsDir } = await fixture();
@@ -1325,7 +1344,7 @@ describe("SkillsManagerTui", () => {
     const before = await git(skillsDir, "rev-parse", "HEAD");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("f");
@@ -1348,7 +1367,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  });
+  }, 30_000);
 
   it("previews an explicitly selected remote and branch while HEAD is detached", async () => {
     const { skillsDir } = await fixture();
@@ -1359,7 +1378,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", "https://example.invalid/backup.git");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("f");
@@ -1381,7 +1400,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  });
+  }, 30_000);
 
   it("reports a containing repository and cannot commit or initialize its tracked child", async () => {
     const { home, skillsDir } = await fixture();
@@ -1391,7 +1410,7 @@ describe("SkillsManagerTui", () => {
     const staged = await git(home, "diff", "--cached", "--name-only");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("Containing repository:");
       await setup.mockInput.typeText("g");
@@ -1417,7 +1436,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "add", "--", "unrelated.txt");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("(unborn)");
       await setup.mockInput.typeText("g");
@@ -1443,7 +1462,7 @@ describe("SkillsManagerTui", () => {
       setup.mockInput.pressEnter();
       await setup.waitFor(() => setup.captureCharFrame().includes("Review commit"));
       await setup.mockInput.typeText("y");
-      await setup.waitFor(() => !setup.captureCharFrame().includes("Review commit"));
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Review commit"), 15_000);
       await setup.waitFor(async () => {
         try { await git(skillsDir, "rev-parse", "--verify", "HEAD"); return true; } catch { return false; }
       });
@@ -1455,7 +1474,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 20_000);
+  }, 30_000);
 
   it("identifies blocker paths separately in a directory-to-file commit preview", async () => {
     const { skillsDir } = await fixture();
@@ -1466,7 +1485,7 @@ describe("SkillsManagerTui", () => {
     const before = await git(skillsDir, "rev-parse", "HEAD");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("c");
@@ -1487,7 +1506,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  });
+  }, 20_000);
 
   it("scrolls through every path in a long commit preview before cancellation", async () => {
     const { skillsDir } = await fixture();
@@ -1499,7 +1518,7 @@ describe("SkillsManagerTui", () => {
     await initGit(skillsDir);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"), 30_000);
       await setup.mockInput.typeText("c");
@@ -1528,7 +1547,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), "---\nname: alpha\n---\n\nChanged diff body.\n");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree · all · status") && setup.captureCharFrame().includes("alpha/SKILL.md"));
       const rows = setup.captureCharFrame().split("\n");
@@ -1562,7 +1581,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", "https://person:secret-token@example.invalid/private/repo.git");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("p");
@@ -1594,7 +1613,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", bare);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("p");
@@ -1624,7 +1643,7 @@ describe("SkillsManagerTui", () => {
     const { promise: pending, resolve: finish } = Promise.withResolvers<ApprovedSkillsRoot | null>();
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         selectSkillsDir: async () => {
           const root = await pending;
           return root ? { root, reviewInitialize: false, reviewBackup: false } : null;
@@ -1641,6 +1660,7 @@ describe("SkillsManagerTui", () => {
       expect(await exists(path.join(skillsDir, ".skills-manager"))).toBe(false);
       expect(await exists(path.join(other, ".skills-manager"))).toBe(false);
     } finally {
+      finish(null);
       setup.renderer.destroy();
     }
   });
@@ -1650,7 +1670,7 @@ describe("SkillsManagerTui", () => {
     const root = await approveSkillsRoot(skillsDir);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, root, {
+      await createTrackedTui(setup.renderer, root, {
         selectSkillsDir: async () => ({ root, reviewInitialize: true, reviewBackup: false }),
       }).start();
       await setup.mockInput.typeText("i");
@@ -1675,7 +1695,7 @@ describe("SkillsManagerTui", () => {
     const opener = vi.fn(async () => promise);
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         fileOpener: opener,
         selectSkillsDir: async () => ({ root: next, reviewInitialize: false, reviewBackup: false }),
       }).start();
@@ -1699,7 +1719,7 @@ describe("SkillsManagerTui", () => {
     const missing = path.join(home, "future-skills");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, { path: missing, identity: null }, {
+      await createTrackedTui(setup.renderer, { path: missing, identity: null }, {
         selectSkillsDir: async () => ({ root: await approveSkillsRoot(missing), reviewInitialize: false, reviewBackup: false }),
       }).start();
       await setup.renderOnce();
@@ -1732,7 +1752,7 @@ describe("SkillsManagerTui", () => {
     } as unknown as ClipboardService;
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), { clipboard }).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), { clipboard }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Local content for selection."));
       const rows = setup.captureCharFrame().split("\n");
       const row = rows.findIndex((line) => line.includes("Local content for selection."));

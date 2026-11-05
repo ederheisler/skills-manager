@@ -219,7 +219,12 @@ It covered independent persistent consent and revocation, loopback cancellation,
 The user sentinel and cache remained unchanged.
 Live HTTP checks returned GitHub main starting with `2084680` and the npm `skills` latest tag at 1.7.6.
 
-Public cold and warm source-SHA proof, the approved helper handoff, and all three CI platform gates remain pending.
+A public GitHub install at `51223afa3602a461339d3904752cc396a90c66af` ran prepare and reported that exact clean archive SHA at version 0.1.0.
+A real CLI-only refresh rebuilt that commit, selected `skills` 1.7.6 from its private root `latest` dependency, repeated onboarding, and reached browse, help, and quit.
+The original cache and outside sentinel stayed unchanged; the helper workspace was removed.
+The terminal smoke now reconstructs the real character screen with the development-only `@xterm/headless` 6.0.0 dependency.
+
+Canonical cold and warm main proof, a combined main restart, the real transport-failure path, and all three CI platform gates remain pending.
 The CI gates are Linux arm64, Linux x64, and macOS x64.
 
 ### Graph maintenance
@@ -232,3 +237,9 @@ The Graphify AST refresh reported 54 hub renames and 20 disappeared names:
 - `interruptedFixture`, `list-boundary.h`, `skillsCli.ts`, `tree_check_mount_entry`, `tree_walk_entry`
 
 The graph includes the final handoff test. Its manifest and file modification times both matched `1793889714.8341844`.
+
+The corrective test-harness commit needed a second, separately guarded AST refresh. It reported 48 hub renames and 15 disappeared names:
+
+- `.command`, `.registry`, `React plugin slots`, `Select`, `appUpdateHandoff.test.ts`
+- `getStatus`, `git.test.ts`, `gitBoundary.ts`, `gitTransaction.test.ts`, `release-smoke-pty.py`
+- `repo.ts`, `tree_check_mount_fd`, `tree_same_snapshot`, `types.ts`, `withSkillsLock`
