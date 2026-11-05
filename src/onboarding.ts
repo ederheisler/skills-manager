@@ -2,6 +2,7 @@ import { lstat, readlink, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { approveSkillsRoot, type ApprovedSkillsRoot } from "./actions/boundary.js";
+import { discoverGit } from "./actions/git.js";
 import { readSavedSetup, writeSavedSetup, type SavedSetup } from "./state/config.js";
 import { escapeTerminalSingleLine, quoteTerminalPath } from "./terminalText.js";
 
@@ -27,7 +28,6 @@ export type SkillsRootSelection = ApprovedSkillsRoot | { path: string; identity:
 export interface SkillsOnboardingResult {
   root: SkillsRootSelection;
   reviewInitialize: boolean;
-  reviewBackup: boolean;
 }
 
 export interface InspectedSkillsDirectory {
@@ -194,12 +194,12 @@ async function chooseSkillsDirectory(io: OnboardingIO, options: DirectorySelecti
 
     io.write(`Selected skills directory: ${quoteTerminalPath(inspection.skillsDir)}\n`);
     if (inspection.missing) io.write("The directory does not exist yet; browsing will not create it. Create it yourself and reselect it before making changes.\n");
-    const initialize = await io.ask("Review optional local Git initialization? [y/N] (q to cancel): ");
-    if (initialize === null || initialize.trim().toLowerCase() === "q") return null;
-    const backup = await io.ask("Review optional remote backup? [y/N] (q to cancel): ");
-    if (backup === null || backup.trim().toLowerCase() === "q") return null;
-    const reviewInitialize = ["y", "yes"].includes(initialize.trim().toLowerCase());
-    const reviewBackup = ["y", "yes"].includes(backup.trim().toLowerCase());
+    let reviewInitialize = false;
+    if (approval !== null && (await discoverGit(inspection.skillsDir)).kind === "none") {
+      const initialize = await io.ask("Review optional local Git initialization? [y/N] (q to cancel): ");
+      if (initialize === null || initialize.trim().toLowerCase() === "q") return null;
+      reviewInitialize = ["y", "yes"].includes(initialize.trim().toLowerCase());
+    }
     if (approval !== null) {
       try {
         const selectedAgain = await inspectSelectedSkillsDirectory(inspection.selectedPath);
@@ -213,11 +213,11 @@ async function chooseSkillsDirectory(io: OnboardingIO, options: DirectorySelecti
         io.write(`Cannot recheck the selected directory: ${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}\n`);
         continue;
       }
-      return { selectedPath: inspection.selectedPath, result: { root: approval, reviewInitialize, reviewBackup } };
+      return { selectedPath: inspection.selectedPath, result: { root: approval, reviewInitialize } };
     }
     return {
       selectedPath: inspection.selectedPath,
-      result: { root: { path: inspection.skillsDir, identity: null }, reviewInitialize, reviewBackup },
+      result: { root: { path: inspection.skillsDir, identity: null }, reviewInitialize },
     };
   }
 }
@@ -243,7 +243,7 @@ async function reusableSetup(saved: SavedSetup, explicitPath: string | undefined
       const explicit = await inspectSelectedSkillsDirectory(explicitPath);
       if (explicit.missing || explicit.skillsDir !== root.path) return null;
     }
-    return { root, reviewInitialize: false, reviewBackup: false };
+    return { root, reviewInitialize: false };
   } catch {
     return null;
   }

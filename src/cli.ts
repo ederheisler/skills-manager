@@ -96,7 +96,7 @@ async function main(): Promise<void> {
   let app: InstanceType<typeof SkillsManagerTui> | undefined;
   try {
     app = new SkillsManagerTui(renderer, onboarding.root, {
-      initialOnboarding: { reviewInitialize: onboarding.reviewInitialize, reviewBackup: onboarding.reviewBackup },
+      initialOnboarding: { reviewInitialize: onboarding.reviewInitialize },
       selectSkillsDir: (currentSkillsDir) => select({ currentSkillsDir }),
     });
     await app.start();
@@ -134,7 +134,7 @@ async function main(): Promise<void> {
       process.exitCode = 1;
     }
     if (handoffFailure) {
-      process.stderr.write(`skills-manager: Application update could not start: ${errorText(handoffFailure.error)}\nManual recovery: ${escapeTerminalSingleLine(outcome.recoveryCommand)}\n`);
+      process.stderr.write(`skills-manager: Application update could not start: ${errorText(handoffFailure.error)}\nTo start the app again, run:\n${escapeTerminalSingleLine(outcome.recoveryCommand)}\n`);
       process.exitCode = 1;
     }
   } catch (error) {

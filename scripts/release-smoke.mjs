@@ -97,13 +97,13 @@ async function inspectRefreshedSession(workspace) {
   assert.ok(runtime.executable.startsWith(`${skillsRoot}${path.sep}`));
 }
 const localGitPrompt = 'Review optional local Git initialization? [y/N] (q to cancel): ';
-const remoteGitPrompt = 'Review optional remote backup? [y/N] (q to cancel): ';
-const startupQuestions = ['Review optional local Git initialization?', 'Review optional remote backup?'];
+const startupQuestions = ['Review optional local Git initialization?'];
 const startupPromptMarkers = [
   'Choose a skills directory.',
   'Choose [',
   'Skills directory path',
   'Manage this resolved target?',
+  'Review optional remote backup?',
   ...startupQuestions,
 ];
 
@@ -154,6 +154,10 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
       buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? '').join('\n');
     const browse = screen.includes('x app updates') && !screen.includes('Keyboard help')
       && !screen.includes('Application updates');
+    const updatesReady = screen.includes('Application updates')
+      && screen.includes('skills-manager (app)') && screen.includes('Vercel skills CLI')
+      && (screen.match(/Automatic checks:\s*off/g) ?? []).length === 2
+      && !screen.includes('Checking...');
     if (step <= 2) {
       const prompts = startupPrompts(text);
       const expected = saved ? [] : startupQuestions;
@@ -163,10 +167,7 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
     if (!saved && step === 0 && text.includes(localGitPrompt)) {
       step = 1;
       child.stdin.write('\n');
-    } else if (!saved && step === 1 && text.includes(remoteGitPrompt)) {
-      step = 2;
-      child.stdin.write('\n');
-    } else if (((saved && step === 0) || (!saved && step === 2)) && /Skills\s+1\s+shown/.test(screen) && browse) {
+    } else if (((saved && step === 0) || (!saved && step === 1)) && /Skills\s+1\s+shown/.test(screen) && browse) {
       assert.deepEqual(startupPrompts(text), saved ? [] : startupQuestions, 'Incorrect startup questions before browsing');
       if (!saved) assert.ok(text.includes('Selected skills directory:'), 'The first launch must show its selected directory');
       step = 3;
@@ -180,18 +181,15 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
       step = 5;
       stageStart = transcript.length;
       child.stdin.write('x');
-    } else if (step === 5 && screen.includes('Application updates')
-      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)) {
+    } else if (step === 5 && updatesReady) {
       step = 6;
       stageStart = transcript.length;
       child.stdin.write(refresh ? 'f' : '\x1b');
     } else if (step === 6 && !refresh && browse) {
       step = 7;
       child.stdin.write('q');
-    } else if (step === 6 && refresh && screen.includes('Refresh Vercel skills CLI')
-      && screen.includes(`Rebuild the same app commit ${previousEnv.RELEASE_EXPECTED_COMMIT}`)
-      && screen.includes('[y] Approve')) {
+    } else if (step === 6 && refresh && screen.includes('Update Vercel skills CLI')
+      && /y\s+update/.test(screen)) {
       step = 8;
       stageStart = transcript.length;
       child.stdin.write('y');
@@ -226,9 +224,7 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
       step = 15;
       stageStart = transcript.length;
       child.stdin.write('x');
-    } else if (step === 15 && screen.includes('Application updates')
-      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)) {
+    } else if (step === 15 && updatesReady) {
       step = 16;
       stageStart = transcript.length;
       child.stdin.write('\x1b');
@@ -270,6 +266,19 @@ async function run() {
   await writeFile(externalLock, 'outside lock must remain unchanged\n');
   const outsideBefore = await snapshot(outside);
   const lockBefore = await readFile(externalLock);
+  // Keep the UI's one-shot update checks offline; npm's approved refresh still
+  // installs the real packages in the private update workspace.
+  const fetchStub = path.join(work, 'offline-update-checks.mjs');
+  await put(fetchStub, [
+    "import path from 'node:path';",
+    "const entry = process.argv[1];",
+    `const installedCli = ${JSON.stringify(cli)};`,
+    "const freshSuffix = path.join('node_modules', 'skills-manager', 'dist', 'cli.js');",
+    "if (entry === installedCli || entry?.endsWith(path.sep + freshSuffix)) {",
+    "  globalThis.fetch = async () => new Response(null, { status: 503 });",
+    "}",
+    "",
+  ].join('\n'));
 
   // Do not inherit the invoking user's home, credentials, sockets, or Git/Node configuration.
   for (const key of Object.keys(process.env)) delete process.env[key];
@@ -278,6 +287,11 @@ async function run() {
     HOME: home, TMPDIR: temporary, TERM: 'xterm-256color', LANG: 'C.UTF-8',
     XDG_CONFIG_HOME: path.join(work, 'config'), XDG_CACHE_HOME: path.join(work, 'cache'),
     XDG_DATA_HOME: path.join(work, 'data'), XDG_STATE_HOME: path.join(work, 'state'),
+    npm_config_registry: 'https://registry.npmjs.org/',
+    npm_config_userconfig: path.join(work, 'user.npmrc'),
+    npm_config_globalconfig: path.join(work, 'global.npmrc'),
+    npm_config_cache: path.join(temporary, 'npm-cache'),
+    NODE_OPTIONS: `--import=${pathToFileURL(fetchStub).href}`,
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0',
     DISABLE_TELEMETRY: '1', DO_NOT_TRACK: '1', NODE_DISABLE_COMPILE_CACHE: '1', PYTHONDONTWRITEBYTECODE: '1',
   });
@@ -338,7 +352,20 @@ async function run() {
     assert.deepEqual(await snapshot(browseRoot), browseBefore);
     assert.deepEqual(await readdir(home), []);
     assert.deepEqual(await snapshot(configDirectory), expectedConfig);
-    for (const name of ['cache', 'data', 'state']) assert.deepEqual(await readdir(path.join(work, name)), []);
+    const cacheRoot = path.join(work, 'cache');
+    assert.deepEqual(await readdir(cacheRoot), ['skills-manager']);
+    const results = await readdir(path.join(cacheRoot, 'skills-manager'));
+    assert.ok(results.length >= 2, 'Opening updates must record the isolated check results');
+    const components = new Set();
+    for (const file of results) {
+      assert.match(file, /^result-(app|cli)-[a-f0-9-]+\.json$/);
+      const result = JSON.parse(await readFile(path.join(cacheRoot, 'skills-manager', file), 'utf8'));
+      assert.equal(result.kind, 'skills-manager-update-result');
+      assert.ok(result.component === 'app' || result.component === 'cli');
+      components.add(result.component);
+    }
+    assert.deepEqual(components, new Set(['app', 'cli']));
+    for (const name of ['data', 'state']) assert.deepEqual(await readdir(path.join(work, name)), []);
     await missing(path.join(browseRoot, '.git'));
     await missing(path.join(browseRoot, '.skills-manager'));
     assert.deepEqual(await snapshot(outside), outsideBefore);

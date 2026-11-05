@@ -176,6 +176,54 @@ static int verify_named_directory(int fd, const char *path)
     return result;
 }
 
+/* Prove that the selected directory is the reviewed worktree root or is
+ * reachable beneath it through pinned, non-symlink directory entries. A
+ * nested .git would make Git discover a different repository. */
+static int verify_selected_relationship(int root, const char *root_path,
+                                        int repository, const char *repository_path)
+{
+    size_t length = strlen(repository_path);
+    char *copy = NULL, *part, *cursor;
+    int current = -1, result = -1, saved;
+    struct stat entry;
+
+    if (strncmp(root_path, repository_path, length) ||
+        (root_path[length] != '\0' && root_path[length] != '/')) {
+        errno = ESTALE;
+        return -1;
+    }
+    if (!root_path[length]) return same_fd_identity(root, repository);
+
+    copy = strdup(root_path + length + 1);
+    if (!copy) return -1;
+    current = fcntl(repository, F_DUPFD_CLOEXEC, 3);
+    if (current < 0) goto done;
+    cursor = copy;
+    while ((part = strsep(&cursor, "/")) != NULL) {
+        int next;
+        if (!*part || !strcmp(part, ".") || !strcmp(part, "..")) {
+            errno = EINVAL;
+            goto done;
+        }
+        next = openat(current, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0) goto done;
+        close(current);
+        current = next;
+        if (fstatat(current, ".git", &entry, AT_SYMLINK_NOFOLLOW) == 0) {
+            errno = ESTALE;
+            goto done;
+        }
+        if (errno != ENOENT) goto done;
+    }
+    result = same_fd_identity(root, current);
+done:
+    saved = errno;
+    if (current >= 0) close(current);
+    free(copy);
+    if (result < 0) errno = saved;
+    return result;
+}
+
 /* Git's relative gitdir and commondir files may legitimately contain "..".
  * Resolve those using pinned directory descriptors, never symbolic links. */
 static int open_reference(int base, const char *path, int directory)
@@ -281,18 +329,18 @@ static char *single_line(char *text)
 }
 
 /* A linked worktree must be a child of common/worktrees and have Git's
- * reciprocal gitdir file pointing back to the selected root's .git file. */
-static int verify_git_relationship(int root, int gitdir, int common,
+ * reciprocal gitdir file pointing back to the repository root's .git file. */
+static int verify_git_relationship(int repository, int gitdir, int common,
                                    const struct stat *git_entry)
 {
     struct stat current, opened;
     char *gitfile = NULL, *commonfile = NULL, *backfile = NULL, *reference;
     int dot = -1, resolved = -1, worktrees = -1, parent = -1, result = -1, saved;
 
-    if (fstatat(root, ".git", &current, AT_SYMLINK_NOFOLLOW) < 0) goto done;
+    if (fstatat(repository, ".git", &current, AT_SYMLINK_NOFOLLOW) < 0) goto done;
     if (!tree_same_snapshot(git_entry, &current)) { errno = ESTALE; goto done; }
     if (S_ISDIR(current.st_mode)) {
-        dot = openat(root, ".git", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        dot = openat(repository, ".git", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (dot < 0 || same_fd_identity(dot, gitdir) < 0 ||
             same_fd_identity(gitdir, common) < 0) goto done;
         if (fstatat(gitdir, "commondir", &opened, AT_SYMLINK_NOFOLLOW) == 0) {
@@ -304,13 +352,13 @@ static int verify_git_relationship(int root, int gitdir, int common,
         goto done;
     }
     if (!S_ISREG(current.st_mode)) { errno = EPERM; goto done; }
-    if (read_regular_at(root, ".git", MAX_METADATA_SIZE, &gitfile, &opened) < 0)
+    if (read_regular_at(repository, ".git", MAX_METADATA_SIZE, &gitfile, &opened) < 0)
         goto done;
     if (!tree_same_snapshot(git_entry, &opened) ||
         strncmp(gitfile, "gitdir: ", 8) != 0) { errno = ESTALE; goto done; }
     reference = single_line(gitfile + 8);
     if (!reference) goto done;
-    resolved = open_reference(root, reference, 1);
+    resolved = open_reference(repository, reference, 1);
     if (resolved < 0 || same_fd_identity(resolved, gitdir) < 0) goto done;
     close(resolved);
     resolved = -1;
@@ -771,54 +819,54 @@ static int protect_inherited(int first, int close_now)
 #endif
 }
 
-static int publish_directory_fds(int root, int gitdir, int common)
+static int publish_directory_fds(int root, int gitdir, int common, int repository)
 {
-    int original[3] = { root, gitdir, common };
-    int pinned[3] = { -1, -1, -1 };
+    int original[4] = { root, gitdir, common, repository };
+    int target[4] = { 3, 4, 5, 7 };
+    int pinned[4] = { -1, -1, -1, -1 };
     int saved;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         if (original[i] < 0) continue;
-        pinned[i] = fcntl(original[i], F_DUPFD_CLOEXEC, 6);
+        pinned[i] = fcntl(original[i], F_DUPFD_CLOEXEC, 8);
         if (pinned[i] < 0) goto fail;
     }
     if (protect_inherited(3, 0) < 0) goto fail;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         if (pinned[i] >= 0) {
-            if (dup2(pinned[i], i + 3) < 0) goto fail;
-        } else if (close(i + 3) < 0 && errno != EBADF) {
+            if (dup2(pinned[i], target[i]) < 0) goto fail;
+        } else if (close(target[i]) < 0 && errno != EBADF) {
             goto fail;
         }
     }
-    for (int i = 0; i < 3; ++i) {
+    /* FD 6 is reserved for the private transaction bridge. */
+    if (close(6) < 0 && errno != EBADF) goto fail;
+    for (int i = 0; i < 4; ++i) {
         if (pinned[i] >= 0) { close(pinned[i]); pinned[i] = -1; }
     }
-    return protect_inherited(6, 1);
+    return protect_inherited(8, 1);
 fail:
     saved = errno;
-    for (int i = 0; i < 3; ++i) if (pinned[i] >= 0) close(pinned[i]);
+    for (int i = 0; i < 4; ++i) if (pinned[i] >= 0) close(pinned[i]);
     errno = saved;
     return -1;
 }
 
-static int set_git_environment(const char *root_path, const char *git_path,
+static int set_git_environment(const char *repository_path, const char *git_path,
                                const char *common_path, int transaction_worker)
 {
-    const char *work_tree = ".";
+    const char *work_tree = repository_path;
     if (!git_path) {
         if (unsetenv("GIT_DIR") < 0 || unsetenv("GIT_COMMON_DIR") < 0 ||
             unsetenv("GIT_WORK_TREE") < 0) return -1;
         return 0;
     }
 #if defined(__linux__)
-    (void)root_path;
+    (void)transaction_worker;
     git_path = "/proc/self/fd/4";
     common_path = "/proc/self/fd/5";
-    if (transaction_worker) work_tree = "/proc/self/fd/3";
+    work_tree = "/proc/self/fd/7";
 #else
-    if (transaction_worker) {
-        git_path = ".";
-        work_tree = root_path;
-    }
+    if (transaction_worker) git_path = ".";
 #endif
     if (setenv("GIT_DIR", git_path, 1) < 0 ||
         setenv("GIT_COMMON_DIR", common_path, 1) < 0 ||
@@ -829,12 +877,13 @@ static int set_git_environment(const char *root_path, const char *git_path,
 #if defined(__linux__)
 static int verify_proc_descriptors(int transaction_worker)
 {
-    const char *paths[3] = { "/proc/self/fd/3", "/proc/self/fd/4", "/proc/self/fd/5" };
-    for (int i = transaction_worker ? 0 : 1; i < 3; ++i) {
+    const char *paths[4] = { "/proc/self/fd/3", "/proc/self/fd/4", "/proc/self/fd/5", "/proc/self/fd/7" };
+    const int originals[4] = { 3, 4, 5, 7 };
+    for (int i = transaction_worker ? 0 : 1; i < 4; ++i) {
         int fd = open(paths[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         int saved, match;
         if (fd < 0) return -1;
-        match = same_fd_identity(fd, i + 3);
+        match = same_fd_identity(fd, originals[i]);
         saved = errno;
         close(fd);
         if (match < 0) { errno = saved; return -1; }
@@ -929,14 +978,15 @@ static int run_transaction_worker(int command, char **argv)
 
 int main(int argc, char **argv)
 {
-    const char *root_path, *git_path = NULL, *common_path = NULL, *remote_path = NULL;
+    const char *root_path, *repository_path = NULL, *git_path = NULL, *common_path = NULL, *remote_path = NULL;
+    const char *repository_dev = NULL, *repository_ino = NULL;
     const char *git_dev = NULL, *git_ino = NULL, *common_dev = NULL, *common_ino = NULL;
     const char *entry_dev = NULL, *entry_ino = NULL, *remote_dev = NULL, *remote_ino = NULL;
     const char *reason = "cannot safely inspect writable directory";
     struct stat entry, root_identity, common_identity, remote_identity;
     char identity[65];
-    int root = -1, gitdir = -1, common = -1, remote = -1;
-    int argument, command, has_entry, transaction_worker = 0;
+    int root = -1, repository = -1, gitdir = -1, common = -1, remote = -1;
+    int argument, command, has_entry, metadata_root, transaction_worker = 0;
 #if defined(__APPLE__)
     char *profile;
     char **sandbox_argv;
@@ -954,6 +1004,13 @@ int main(int argc, char **argv)
         return invalid("expected --root ROOT DEV INO TOKEN and a Git command");
     root_path = argv[2];
     argument = 6;
+    if (argument < argc && !strcmp(argv[argument], "--repository-root")) {
+        if (argument + 3 >= argc) return invalid("expected --repository-root PATH DEV INO");
+        repository_path = argv[argument + 1];
+        repository_dev = argv[argument + 2];
+        repository_ino = argv[argument + 3];
+        argument += 4;
+    }
     if (argument < argc && !strcmp(argv[argument], "--git-entry")) {
         if (argument + 10 >= argc || strcmp(argv[argument + 3], "--git-dir") ||
             strcmp(argv[argument + 7], "--common-dir"))
@@ -968,6 +1025,8 @@ int main(int argc, char **argv)
         common_ino = argv[argument + 10];
         argument += 11;
     }
+    if ((repository_path == NULL) != (git_path == NULL))
+        return invalid("repository root and Git metadata must be bound together");
     if (argument < argc && !strcmp(argv[argument], "--remote-dir")) {
         if (argument + 3 >= argc) return invalid("expected --remote-dir PATH DEV INO");
         remote_path = argv[argument + 1];
@@ -994,11 +1053,18 @@ int main(int argc, char **argv)
         return failure("selected root identity mismatch");
     }
 
-    has_entry = fstatat(root, ".git", &entry, AT_SYMLINK_NOFOLLOW) == 0;
-    if (!has_entry && errno != ENOENT) return failure("cannot inspect root Git entry");
+    if (repository_path) {
+        repository = open_verified_directory(repository_path, repository_dev, repository_ino);
+        if (repository < 0) return failure("repository root identity mismatch or unsafe path");
+        if (verify_selected_relationship(root, root_path, repository, repository_path) < 0)
+            return failure("selected root and repository root relationship is invalid");
+    }
+    metadata_root = repository >= 0 ? repository : root;
+    has_entry = fstatat(metadata_root, ".git", &entry, AT_SYMLINK_NOFOLLOW) == 0;
+    if (!has_entry && errno != ENOENT) return failure("cannot inspect repository Git entry");
     if ((has_entry && !git_path) || (!has_entry && git_path)) {
         errno = ESTALE;
-        return failure("Git metadata identity arguments do not match root .git");
+        return failure("Git metadata identity arguments do not match repository .git");
     }
     if (has_entry) {
         if ((!S_ISDIR(entry.st_mode) && !S_ISREG(entry.st_mode)) ||
@@ -1010,7 +1076,7 @@ int main(int argc, char **argv)
         if (gitdir < 0) return failure("Git directory identity mismatch or unsafe path");
         common = open_verified_directory(common_path, common_dev, common_ino);
         if (common < 0) return failure("Git common directory identity mismatch or unsafe path");
-        if (verify_git_relationship(root, gitdir, common, &entry) < 0)
+        if (verify_git_relationship(repository, gitdir, common, &entry) < 0)
             return failure(errno == EMLINK ? "hardlinked file or link in writable tree is unsafe" :
                            "Git metadata relationship is invalid");
     }
@@ -1026,17 +1092,19 @@ int main(int argc, char **argv)
         (common >= 0 && fstat(common, &common_identity) < 0) ||
         (remote >= 0 && fstat(remote, &remote_identity) < 0))
         return failure("cannot inspect approved writable directory identities");
-    /* A directory .git is already covered, as metadata, by the root scan. */
+    /* Only a leaf repository's directory .git is covered by the root scan. */
     if (scan_writable_tree(root, 0, remote >= 0 ? &remote_identity : NULL, NULL,
                            transaction_worker ? gitdir : -1, &reason) < 0 ||
-        (common >= 0 && !S_ISDIR(entry.st_mode) && scan_writable_tree(common, 1, &root_identity,
+        (common >= 0 && (!S_ISDIR(entry.st_mode) || strcmp(root_path, repository_path)) &&
+         scan_writable_tree(common, 1, &root_identity,
                                            remote >= 0 ? &remote_identity : NULL,
                                            transaction_worker ? gitdir : -1, &reason) < 0) ||
         (remote >= 0 && scan_writable_tree(remote, 1, &root_identity,
                                            common >= 0 ? &common_identity : NULL, -1, &reason) < 0))
         return failure(reason);
     if (has_entry) {
-        if (verify_git_relationship(root, gitdir, common, &entry) < 0)
+        if (verify_selected_relationship(root, root_path, repository, repository_path) < 0 ||
+            verify_git_relationship(repository, gitdir, common, &entry) < 0)
             return failure(errno == EMLINK ? "hardlinked file or link in writable tree is unsafe" :
                            "Git metadata relationship is invalid");
     } else if (fstatat(root, ".git", &entry, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) {
@@ -1047,11 +1115,12 @@ int main(int argc, char **argv)
         return failure(errno == EMLINK ? "hardlinked file or link in writable tree is unsafe" :
                        "approved remote is not a safely verified bare Git repository");
     if (verify_named_directory(root, root_path) < 0 ||
+        (repository >= 0 && verify_named_directory(repository, repository_path) < 0) ||
         (gitdir >= 0 && verify_named_directory(gitdir, git_path) < 0) ||
         (common >= 0 && verify_named_directory(common, common_path) < 0) ||
         (remote >= 0 && verify_named_directory(remote, remote_path) < 0))
         return failure("approved directory path changed while preparing the boundary");
-    if (set_git_environment(root_path, git_path, common_path, transaction_worker) < 0)
+    if (set_git_environment(repository_path, git_path, common_path, transaction_worker) < 0)
         return failure("cannot set pinned Git directory environment");
 
 #if defined(__linux__)
@@ -1060,7 +1129,14 @@ int main(int argc, char **argv)
         return failure("cannot install required write boundary");
     if (fchdir(transaction_worker ? gitdir : root) < 0)
         return failure("cannot enter pinned working directory");
-    if (publish_directory_fds(root, gitdir, common) < 0)
+    if (repository >= 0 &&
+        (verify_named_directory(root, root_path) < 0 ||
+         verify_named_directory(repository, repository_path) < 0 ||
+         verify_named_directory(gitdir, git_path) < 0 ||
+         verify_selected_relationship(root, root_path, repository, repository_path) < 0 ||
+         verify_git_relationship(repository, gitdir, common, &entry) < 0))
+        return failure("Git repository binding changed before execution");
+    if (publish_directory_fds(root, gitdir, common, repository) < 0)
         return failure("cannot isolate and publish directory descriptors");
     if (has_entry && verify_proc_descriptors(transaction_worker) < 0)
         return failure("pinned Git descriptor paths are unavailable or mismatched");
@@ -1076,7 +1152,12 @@ int main(int argc, char **argv)
         if (skills_boundary_paths_match(root, root_path, common, common_path,
                                         remote, remote_path) < 0)
             return failure("approved directory path changed before transaction");
-        if (publish_directory_fds(root, gitdir, common) < 0)
+        if (verify_named_directory(repository, repository_path) < 0 ||
+            verify_named_directory(gitdir, git_path) < 0 ||
+            verify_selected_relationship(root, root_path, repository, repository_path) < 0 ||
+            verify_git_relationship(repository, gitdir, common, &entry) < 0)
+            return failure("Git repository binding changed before transaction");
+        if (publish_directory_fds(root, gitdir, common, repository) < 0)
             return failure("cannot isolate and publish directory descriptors");
         return run_transaction_worker(command, argv);
     }
@@ -1093,7 +1174,13 @@ int main(int argc, char **argv)
     if (skills_boundary_paths_match(root, root_path, common, common_path,
                                     remote, remote_path) < 0)
         return failure("approved directory path changed before sandbox execution");
-    if (publish_directory_fds(root, gitdir, common) < 0)
+    if (repository >= 0 &&
+        (verify_named_directory(repository, repository_path) < 0 ||
+         verify_named_directory(gitdir, git_path) < 0 ||
+         verify_selected_relationship(root, root_path, repository, repository_path) < 0 ||
+         verify_git_relationship(repository, gitdir, common, &entry) < 0))
+        return failure("Git repository binding changed before execution");
+    if (publish_directory_fds(root, gitdir, common, repository) < 0)
         return failure("cannot isolate and publish directory descriptors");
     execv(sandbox_argv[0], sandbox_argv);
     return failure("cannot execute sandbox-exec");

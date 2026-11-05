@@ -5,6 +5,8 @@
 
 ## Release completion
 
+On 2026-11-05, local macOS arm64 checks with Node 26.13.0 passed the build and 707 tests. Eleven operating-system-specific tests were skipped. The dependency audit reported zero vulnerabilities. Terminal checks covered help, update controls, and foreground checks at wide and narrow sizes. Public GitHub and npm checks returned valid results without changing automatic-check consent. An isolated containing-repository fixture exercised scoped commit, push to a local bare remote, and refusal of an outside-scope pull. Unrelated staged and unstaged files, configuration, and exclusions remained intact. Scoped source-security review found no actionable boundary issue. SCB complexity and duplication findings were reviewed; explicit validation and transaction ordering were retained rather than refactored solely to reduce metrics. These local results do not establish Linux runtime results.
+
 On 2026-11-04, [Native portability](https://github.com/ederheisler/skills-manager/actions/runs/41889510435) passed on `main` at commit `a5a547c66f44b80c0228acef9b6b23f050c82e32`. Its Linux arm64, Linux x64, and macOS x64 jobs installed a tarball and exercised the app in a terminal. The [release workflow](https://github.com/ederheisler/skills-manager/actions/runs/41889841054) then published [v0.1.0](https://github.com/ederheisler/skills-manager/releases/tag/v0.1.0) at 18:42:55 UTC.
 
 On the same date, a local macOS arm64 terminal ran the [tagged `npx` command](https://github.com/ederheisler/skills-manager/blob/v0.1.0/README.md#quick-start) with a cold npm cache, Node 26.13.0, and npm 11.20.0. Its isolated path contained neither Bun nor a global `skills` CLI. npm built the tagged project and resolved `skills@1.7.6`.
@@ -35,6 +37,8 @@ The blockers, recommendations, phases, and acceptance criteria below describe th
 
 For current behavior and installation, see the [README](../../../README.md). Pre-implementation code descriptions and line numbers refer to the old snapshot, not the current source.
 
+The later [existing repository choice](../../decisions/2026-11-03-open-source-portability.md#existing-repository-choice) supersedes the leaf-only Git and onboarding push requirements below. The original requirements and evidence remain here as history. The earlier checks do not verify the later choice.
+
 <a id="release-blockers"></a>
 
 ## Pre-implementation release blockers
@@ -62,6 +66,8 @@ The review identified the following blockers before implementation. The first th
 
 These decisions describe the product choices, not proof of their implementation.
 
+The Git root and onboarding push choices above are superseded by the [existing repository choice](../../decisions/2026-11-03-open-source-portability.md#existing-repository-choice).
+
 Changes must reach `main` through pull requests. GitHub Actions creates releases.
 
 ### Approved concurrency contract
@@ -72,7 +78,7 @@ This does not relax inert parsing, link-safe operations, outside-target protecti
 
 ## Skills directory and harness paths
 
-The skills directory contains active skill entries. By default, `example` is at `~/.agents/skills/example`. Its disabled entry is at `~/.agents/skills/.disabled_skills/example`. The selected skills directory itself is the optional Git root, not its parent.
+The skills directory contains active skill entries. By default, `example` is at `~/.agents/skills/example`. Its disabled entry is at `~/.agents/skills/.disabled_skills/example`. The original plan made the selected directory the optional Git root, not its parent. The later [existing repository choice](../../decisions/2026-11-03-open-source-portability.md#existing-repository-choice) supersedes that restriction.
 
 At review, the path resolver placed disabled entries at `~/.agents/.disabled_skills`. The implementation now uses the selected directory and its `.disabled_skills` child as described above.
 
@@ -120,6 +126,8 @@ At review, the classifier treated an incomplete or missing catalog entry as `loc
 The [earlier design](../specs/2026-09-16-skills-manager-design.md#provenance) treated a missing lock and author as "local (mine)". That was a guess, not evidence of authorship, and is superseded.
 
 ### Git safety
+
+The following procedure records the original leaf-only design. It is not current setup guidance. The [existing repository choice](../../decisions/2026-11-03-open-source-portability.md#existing-repository-choice) replaces the containing-repository refusal and onboarding push offer.
 
 Git allows a repository inside another repository, but that does not isolate the parent automatically. Git actions are enabled only when the real Git top-level is the selected skills directory. A verified worktree whose top-level is that directory also qualifies. If only a containing repository exists, local skills remain available and app Git actions are disabled. The app must never stage, commit, pull, push, or initialize the containing repository.
 
@@ -248,6 +256,8 @@ Original acceptance:
 
 ### Phase 3: P0 scope Git operations
 
+The leaf-only restrictions and related acceptance criteria in this historical phase are superseded by the [existing repository choice](../../decisions/2026-11-03-open-source-portability.md#existing-repository-choice). Preservation of unrelated staged and unstaged files remains required.
+
 Affected files: `src/actions/git.ts`, `src/state/gitStatus.ts`, `src/tui.ts`, `tests/actions/git.test.ts`, `tests/state/gitStatus.test.ts`, and `tests/tui.test.ts`.
 
 Original work:
@@ -274,6 +284,8 @@ Original acceptance:
 - Use a local bare remote for an approved backup and cancellation. Simulate missing authentication and network failure without real credentials or external network access. Failed or cancelled remote configuration and pushes leave local skills usable. No push uses force. Redacted previews and logs contain no test credentials.
 
 ### Phase 4: P1 discovery, adoption, and onboarding
+
+The Git setup and push offers in this historical phase are superseded by the [existing repository choice](../../decisions/2026-11-03-open-source-portability.md#existing-repository-choice).
 
 Affected files: `src/cli.ts`, `src/state/repo.ts`, `src/state/types.ts`, `src/tui.ts`, `tests/state/repo.test.ts`, and `tests/tui.test.ts`.
 

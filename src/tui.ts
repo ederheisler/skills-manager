@@ -14,6 +14,7 @@ import {
   InputRenderableEvents,
   RGBA,
   ScrollBoxRenderable,
+  StyledText,
   SyntaxStyle,
   TextAttributes,
   TextRenderable,
@@ -73,7 +74,7 @@ const markdownStyle = SyntaxStyle.fromStyles({
 
 export interface SkillsManagerTuiOptions {
   selectSkillsDir?: (currentSkillsDir: string) => Promise<SkillsOnboardingResult | null>;
-  initialOnboarding?: Pick<SkillsOnboardingResult, "reviewInitialize" | "reviewBackup">;
+  initialOnboarding?: Pick<SkillsOnboardingResult, "reviewInitialize">;
   fileOpener?: (file: string) => Promise<void>;
   clipboard?: ClipboardService;
 }
@@ -112,11 +113,14 @@ function shortDate(timestamp: number): string {
 }
 
 function checkSummary(check: SoftwareUpdateCheck | undefined, component: UpdateComponent, attempted: boolean): string {
-  if (!check) return attempted ? "No saved result" : "Not checked";
-  const state = check.status === "match" ? "Current"
-    : check.status === "different" ? component === "app" ? "Different build" : "Different version"
-      : check.status === "unknown" ? "Cannot compare" : "Error";
-  return `${state} · ${shortDate(check.checkedAt)}${check.status === "unavailable" && check.message ? ` · ${check.message}` : ""}`;
+  if (!check) return attempted ? "Check result unavailable" : "Not checked";
+  if (check.status === "match") return "Up-to-date";
+  if (check.status === "different") {
+    const state = component === "app" ? "Different from main" : "Different version";
+    const latest = component === "app" ? check.available?.slice(0, 7) : check.available;
+    return `${state}${latest ? ` · Latest: ${latest}` : ""}`;
+  }
+  return `${check.status === "unknown" ? "Cannot compare" : "Check failed"}${check.message ? `: ${check.message}` : ""}`;
 }
 
 interface FrontmatterItem {
@@ -143,6 +147,7 @@ function formatFrontmatter(skill: Skill | null | undefined): FrontmatterItem[] {
   ];
 }
 
+
 type Mode = "browse" | "search" | "add" | "replace-source" | "search-results" | "git" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch" | "confirm" | "help" | "software-updates";
 type DetailRendering = "markdown" | "raw";
 
@@ -159,13 +164,23 @@ interface Confirmation {
   cancel?: () => Promise<void>;
   after?: () => Promise<void>;
   informational?: boolean;
+  approveLabel?: string;
   explicitKeyApproval?: boolean;
-  copyText?: string;
 }
 
 export interface ApplicationUpdateHandoff {
   prepared: PreparedUpdateHandoff;
   recoveryCommand: string;
+}
+
+class MeasuredTextRenderable extends TextRenderable {
+  rowsAt(width: number): number {
+    return Math.max(1, this.textBufferView.measureForDimensions(Math.max(1, width), 10_000)?.lineCount ?? this.lineCount);
+  }
+
+  columns(): number {
+    return this.textBufferView.measureForDimensions(0, 10_000)?.widthColsMax ?? 0;
+  }
 }
 
 
@@ -176,7 +191,17 @@ export class SkillsManagerTui {
   #helpReturnMode: "browse" | "git" = "browse";
   #helpOverlay: BoxRenderable | null = null;
   #helpContent: ScrollBoxRenderable | null = null;
+  #helpDialog: BoxRenderable | null = null;
+  #helpLayout: BoxRenderable | null = null;
+  #helpColumns: BoxRenderable[] = [];
+  #helpColumnRows: number[] = [];
+  #helpFooter: TextRenderable | null = null;
+  #helpDetailScrollTop = 0;
+  #helpMetadataScrollTop = 0;
   #screen: BoxRenderable | null = null;
+  #headerLabel: MeasuredTextRenderable | null = null;
+  #headerShortcuts: BoxRenderable | null = null;
+  #headerShortcutText: TextRenderable | null = null;
   #input = "";
   #scope: SkillScope = "all";
   #state: SkillState = "all";
@@ -231,10 +256,10 @@ export class SkillsManagerTui {
   #selection: SkillsRootSelection;
   #softwareUpdates: SoftwareUpdateService;
   #softwareUpdateSelection: UpdateComponent = "app";
-  #softwareChecks = new Set<UpdateComponent>();
+  #softwareChecks = new Map<UpdateComponent, symbol>();
+  #softwareCheckErrors: Partial<Record<UpdateComponent, string>> = {};
   #softwareBadge: TextRenderable | null = null;
   #softwareContent: ScrollBoxRenderable | null = null;
-  #copyNotice: TextRenderable | null = null;
   #preparingHandoff = false;
   #handoffPending = false;
   #pendingActions = new Set<Promise<void>>();
@@ -267,6 +292,7 @@ export class SkillsManagerTui {
     renderer.root.add(this.#root);
     renderer.keyInput.on("keypress", this.#onKeyPress);
     renderer.on("selection", this.#onSelection);
+    renderer.on("resize", this.#onResize);
     renderer.once("destroy", () => {
       this.#exit.resolve(null);
       void this.shutdown().catch((error) => {
@@ -321,6 +347,7 @@ export class SkillsManagerTui {
     this.#updateRevision++;
     this.renderer.keyInput.off("keypress", this.#onKeyPress);
     this.renderer.off("selection", this.#onSelection);
+    this.renderer.off("resize", this.#onResize);
     clearTimeout(this.#transientMessageTimer);
     clearTimeout(this.#searchDebounceTimer);
     const cancel = this.#confirmation?.cancel;
@@ -402,6 +429,22 @@ export class SkillsManagerTui {
     this.#track(this.#handleKey(key));
   };
 
+  #onResize = (): void => {
+    if (this.#destroyed) return;
+    this.#resizeHeaderShortcuts();
+    if (this.#mode === "help") this.#resizeHelpDialog();
+    else if (this.#mode === "software-updates" || this.#mode === "confirm") this.#render();
+  };
+
+  #resizeHeaderShortcuts(): void {
+    if (!this.#headerLabel || !this.#headerShortcuts || !this.#headerShortcutText) return;
+    const space = this.renderer.width - this.#headerLabel.columns() - 1;
+    this.#headerShortcuts.visible = space >= "scope · enabled".length;
+    this.#headerShortcutText.content = space >= "up/down navigate · space select · / search · scope · enabled".length
+      ? t`up/down navigate · space select · / search · ${fg(colors.accent)(bold("s"))}cope · ${fg(colors.accent)(bold("e"))}nabled`
+      : t`${fg(colors.accent)(bold("s"))}cope · ${fg(colors.accent)(bold("e"))}nabled`;
+  }
+
   #onSelection = (selection: Selection): void => {
     if (this.#mode === "help") return;
     const text = selection.getSelectedText();
@@ -462,6 +505,13 @@ export class SkillsManagerTui {
         this.#helpOverlay?.destroyRecursively();
         this.#helpOverlay = null;
         this.#helpContent = null;
+        this.#helpDialog = null;
+        this.#helpLayout = null;
+        this.#helpColumns = [];
+        this.#helpColumnRows = [];
+        this.#helpFooter = null;
+        this.#detailContent?.scrollTo(this.#helpDetailScrollTop);
+        this.#metadataContent?.scrollTo(this.#helpMetadataScrollTop);
         if (this.#screen) this.#screen.opacity = 1;
         this.#syncSoftwareBadge();
       } else if (key.name === "pageup" || key.name === "pagedown") {
@@ -472,9 +522,7 @@ export class SkillsManagerTui {
       return;
     }
     if (this.#mode === "confirm") {
-      if (key.name === "c" && this.#confirmation?.copyText) {
-        await this.#copyManualCommand(this.#confirmation.copyText);
-      } else if (key.name === "pageup" || key.name === "pagedown") {
+      if (key.name === "pageup" || key.name === "pagedown") {
         this.#confirmationContent?.scrollBy(key.name === "pageup" ? -1 : 1, "viewport");
       } else if (key.name === "up" || key.name === "down") {
         this.#confirmationContent?.scrollBy(key.name === "up" ? -1 : 1);
@@ -492,7 +540,7 @@ export class SkillsManagerTui {
         }
       } else if (key.name === "y" || (key.name === "return" && !this.#confirmation?.explicitKeyApproval && this.#confirmationSelection === "approve")) {
         await this.#finishConfirmation(true);
-      } else if (key.name === "n" || key.name === "escape" || (key.name === "return" && !this.#confirmation?.explicitKeyApproval)) {
+      } else if (key.name === "escape" || (key.name === "return" && !this.#confirmation?.explicitKeyApproval)) {
         await this.#finishConfirmation(false);
       }
       return;
@@ -509,11 +557,13 @@ export class SkillsManagerTui {
         this.#render();
       } else if (key.name === "pageup" || key.name === "pagedown") {
         this.#softwareContent?.scrollBy(key.name === "pageup" ? -1 : 1, "viewport");
-      } else if (key.name === "c") this.#reviewSoftwareCheck(this.#softwareUpdateSelection);
-      else if (key.name === "a") await this.#toggleSoftwareAutomatic(this.#softwareUpdateSelection);
+      } else if (key.name === "c") {
+        this.#message = "";
+        this.#startSoftwareCheck(this.#softwareUpdateSelection);
+        this.#render();
+      } else if (key.name === "return") await this.#toggleSoftwareAutomatic(this.#softwareUpdateSelection);
       else if (key.name === "r") await this.#reviewSoftwareHandoff("all");
       else if (key.name === "f") await this.#reviewSoftwareHandoff("cli");
-      else if (key.name === "m") this.#showManualRecovery();
       return;
     }
     if (key.name === "q" && this.#mode === "browse") {
@@ -548,6 +598,8 @@ export class SkillsManagerTui {
     if ((this.#mode === "browse" || this.#mode === "git") && (key.name === "?" || key.sequence === "?")) {
       key.stopPropagation();
       this.#helpReturnMode = this.#mode;
+      this.#helpDetailScrollTop = this.#detailContent?.scrollTop ?? 0;
+      this.#helpMetadataScrollTop = this.#metadataContent?.scrollTop ?? 0;
       this.#mode = "help";
       if (this.#screen) this.#screen.opacity = 0.1;
       this.#helpOverlay = this.#createHelpDialog();
@@ -579,8 +631,8 @@ export class SkillsManagerTui {
       else if (key.name === "s") await this.#cycleGitStatus();
       else if (key.name === "t") await this.#toggleGitFullContext();
       else if (key.name === "r") await this.#refreshGit();
-      else if (key.name === "i") await this.#prepareInit();
-      else if (key.name === "n") this.#beginEntry("remote-name");
+      else if (key.name === "i" && this.#git?.kind === "none") await this.#prepareInit();
+      else if (key.name === "n" && (this.#git?.kind === "leaf" || this.#git?.kind === "parent") && this.#git.remotes.length === 0) this.#beginEntry("remote-name");
       else if (key.name === "c") this.#beginEntry("commit-message");
       else if (key.name === "f") await this.#beginFetch();
       else if (key.name === "p") await this.#preparePush();
@@ -610,6 +662,9 @@ export class SkillsManagerTui {
     else if (key.name === "v") await this.#reviewUpdateCheck();
     else if (key.name === "x") {
       this.#mode = "software-updates";
+      this.#message = "";
+      this.#startSoftwareCheck("app");
+      this.#startSoftwareCheck("cli");
       this.#render();
     }
     else if (key.name === "r") await this.#reload();
@@ -664,8 +719,9 @@ export class SkillsManagerTui {
   }
 
   #beginEntry(mode: "search" | "add" | "replace-source" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch"): void {
-    if ((mode === "commit-message" || mode === "remote-name" || mode === "remote-url" || mode === "fetch-remote" || mode === "fetch-branch") && this.#git?.kind !== "leaf") {
-      this.#showError("Git actions require the selected directory to be the Git top-level.");
+    if ((mode === "commit-message" || mode === "remote-name" || mode === "remote-url" || mode === "fetch-remote" || mode === "fetch-branch")
+      && this.#git?.kind !== "leaf" && this.#git?.kind !== "parent") {
+      this.#showError("Git actions require an available repository.");
       return;
     }
     this.#mode = mode;
@@ -698,7 +754,8 @@ export class SkillsManagerTui {
 
   #leavePrompt(): void {
     clearTimeout(this.#searchDebounceTimer);
-    this.#mode = this.#mode === "commit-message" || this.#mode === "remote-name" || this.#mode === "remote-url" ? "git" : "browse";
+    this.#mode = this.#mode === "commit-message" || this.#mode === "remote-name" || this.#mode === "remote-url"
+      || this.#mode === "fetch-remote" || this.#mode === "fetch-branch" ? "git" : "browse";
     this.#input = "";
     this.#render();
   }
@@ -765,32 +822,27 @@ export class SkillsManagerTui {
     if (this.#softwareBadge) this.#softwareBadge.content = this.#softwareBadgeText();
   }
 
-  #reviewSoftwareCheck(component: UpdateComponent): void {
-    const label = component === "app" ? "skills-manager" : "Vercel skills CLI";
-    const registry = component === "cli" ? this.#softwareUpdates.registry : undefined;
-    const host = component === "app" ? "https://api.github.com" : registryOrigin(registry ?? "");
-    if (host === "unknown") {
-      this.#softwareNotice("The npm registry could not be established. No CLI check or refresh will run until it is known.");
-      return;
-    }
-    this.#confirm({
-      title: `Check ${label} now`,
-      lines: [
-        `Contact ${host} once for ${component === "app" ? "the current main commit" : "the latest skills CLI tag"}.`,
-        "The host can see your IP address. This one-shot check does not enable automatic checks.",
-      ],
-      returnMode: "software-updates",
-      approve: async () => this.#startSoftwareCheck(component, registry),
-    });
-  }
 
-  #startSoftwareCheck(component: UpdateComponent, expectedRegistry?: string): void {
+  #startSoftwareCheck(component: UpdateComponent): void {
     if (this.#softwareChecks.has(component)) return;
-    this.#softwareChecks.add(component);
-    this.#track(this.#softwareUpdates.check(component, expectedRegistry).catch((error) => {
-      this.#message = `Update check failed: ${redactGitUrl(errorMessage(error))}`;
+    delete this.#softwareCheckErrors[component];
+    const token = Symbol();
+    const revision = this.#revision;
+    this.#softwareChecks.set(component, token);
+    this.#track((async () => {
+      if (component === "cli") {
+        await this.#softwareUpdates.refreshRegistry();
+        if (this.#destroyed || revision !== this.#revision) return;
+        const registry = this.#softwareUpdates.registry;
+        if (registryOrigin(registry) === "unknown") throw new Error("npm registry unavailable.");
+        await this.#softwareUpdates.check(component, registry);
+      } else {
+        await this.#softwareUpdates.check(component);
+      }
+    })().catch((error) => {
+      if (!this.#destroyed && revision === this.#revision) this.#softwareCheckErrors[component] = `Check failed: ${redactGitUrl(errorMessage(error))}`;
     }).finally(() => {
-      this.#softwareChecks.delete(component);
+      if (this.#softwareChecks.get(component) === token) this.#softwareChecks.delete(component);
       this.#softwareUpdatesChanged();
     }));
   }
@@ -812,9 +864,9 @@ export class SkillsManagerTui {
       lines: [
         `Check ${label} now and at most once a day.`,
         `Connects to ${host}; the server sees your IP address.`,
-        "In this menu, press a to turn checks off.",
       ],
       explicitKeyApproval: true,
+      approveLabel: "enable",
       returnMode: "software-updates",
       approve: async () => this.#softwareUpdates.setAutomatic(component, true, registry),
     });
@@ -848,7 +900,7 @@ export class SkillsManagerTui {
     const registry = this.#softwareUpdates.registry;
     const origin = registryOrigin(registry);
     if (origin === "unknown") {
-      this.#softwareNotice("The npm registry could not be established. Use the manual app recovery command instead.");
+      this.#softwareNotice("The npm registry could not be established. The update cannot start.");
       return;
     }
     const build = { ...this.#softwareUpdates.build };
@@ -858,21 +910,17 @@ export class SkillsManagerTui {
     const skillsDir = this.#skillsDir;
     const recoveryCommand = manualRecoveryCommand(skillsDir);
     this.#confirm({
-      title: target === "all" ? "Update and restart both" : switchToMain ? "Refresh CLI: switch to main" : "Refresh Vercel skills CLI",
+      title: target === "all" ? "Update app and CLI" : switchToMain ? "Update Vercel skills CLI · switch to main" : "Update Vercel skills CLI",
+      approveLabel: "update",
       lines: [
-        `Current skills directory: ${quoteTerminalPath(skillsDir)}. The new session validates it again and reuses saved setup if unchanged.`,
         target === "all"
-          ? "Start a new session from GitHub main and refresh the Vercel skills CLI. Main may advance beyond the last checked SHA."
+          ? "Updates the app to GitHub main and the Vercel skills CLI, then restarts."
           : switchToMain
-            ? "The running app has no reproducible clean SHA. Approving explicitly switches the new session to GitHub main."
-            : `Rebuild the same app commit ${build.commit} and refresh the Vercel skills CLI.`,
-        ...(target === "cli" && !switchToMain ? ["The running commit may not exist on GitHub; if it cannot be fetched, use manual recovery."] : []),
-        "This creates a separate temporary session; it does not convert or overwrite the current installation or a checkout.",
-        `It contacts GitHub and the npm registry at ${origin}. Your IP address is visible to those hosts.`,
-        "Node, npm, Git and a C compiler are required. Repository and dependency scripts run with normal user permissions.",
-        "The private project and cache are kept until the new session exits successfully.",
-        "The workspace path is printed before downloads; failed, interrupted, or hard-killed sessions may require manual cleanup.",
-        "After terminal shutdown, failures print a manual recovery command; the old interface cannot be restored automatically.",
+            ? "Switches the app to GitHub main and updates the Vercel skills CLI, then restarts."
+            : `Keeps the current app version${build.commit ? ` (${build.commit.slice(0, 7)})` : ""}, updates the Vercel skills CLI, then restarts.`,
+        `Skills directory: ${quoteTerminalPath(skillsDir)}`,
+        `Downloads from GitHub and ${origin}.`,
+        "Install scripts have your user permissions.",
       ],
       returnMode: "software-updates",
       approve: async () => {
@@ -911,37 +959,6 @@ export class SkillsManagerTui {
     });
   }
 
-  #showManualRecovery(): void {
-    const command = manualRecoveryCommand(this.#skillsDir);
-    this.#confirm({
-      title: "Manual app recovery",
-      lines: [
-        "Run this command in a terminal to request the app from GitHub main:",
-        command,
-        "This app recovery command does not guarantee a fresh Vercel skills CLI. Use the CLI refresh action for that.",
-        "Press c to copy the exact command. The new session validates the selected directory again and reuses saved setup if unchanged.",
-      ],
-      returnMode: "software-updates",
-      informational: true,
-      copyText: command,
-      approve: async () => {},
-    });
-  }
-
-  async #copyManualCommand(command: string): Promise<void> {
-    let notice = "Clipboard unavailable; select and copy the displayed command.";
-    try {
-      const result = await this.#clipboard?.writeText(command, { destination: "best-available" });
-      if (result?.host.status === "written") notice = "Command copied to the host clipboard.";
-      else if (result?.terminal.status === "attempted") notice = "Command sent to terminal clipboard; acceptance is not confirmed.";
-      else if ((!result || result.terminal.status === "not-attempted") && this.renderer.copyToClipboardOSC52(command)) {
-        notice = "Command sent to terminal clipboard; acceptance is not confirmed.";
-      }
-    } catch {
-      // The command remains visible and selectable when clipboard access fails.
-    }
-    if (!this.#destroyed && this.#confirmation?.copyText === command && this.#copyNotice) this.#copyNotice.content = notice;
-  }
 
   async #chooseSkillsDir(): Promise<void> {
     if (!this.options.selectSkillsDir) return;
@@ -962,6 +979,8 @@ export class SkillsManagerTui {
         outcome.result = null;
         throw error;
       }
+      this.#softwareChecks.clear();
+      this.#softwareCheckErrors = {};
       this.#revision++;
       this.#fileRevision++;
       this.#updateRevision++;
@@ -1013,7 +1032,7 @@ export class SkillsManagerTui {
 
 
   async #cycleScope(): Promise<void> {
-    this.#scope = this.#scope === "all" ? "source" : this.#scope === "source" ? "local" : this.#scope === "local" ? "unknown" : "all";
+    this.#scope = this.#scope === "all" ? "source" : this.#scope === "source" ? "local" : "all";
     this.#selectedIndex = 0;
     await this.#loadSelectedText();
     this.#render();
@@ -1208,6 +1227,7 @@ export class SkillsManagerTui {
         : path.join(root.path, skill.name);
       this.#confirm({
         title: skill.enabled ? "Disable skill" : "Enable skill",
+        approveLabel: skill.enabled ? "disable" : "enable",
         lines: [
           `From: ${quoteTerminalPath(skill.path)}`,
           `To: ${quoteTerminalPath(destination)}`,
@@ -1238,6 +1258,7 @@ export class SkillsManagerTui {
       await assertApprovedSkillsRoot(root);
       this.#confirm({
         title: "Remove skill",
+        approveLabel: "remove",
         lines: [
           `Path: ${quoteTerminalPath(skill.path)}`,
           `Entry: ${skill.entryKind}${skill.linkTarget !== null ? ` -> ${quoteTerminalPath(skill.linkTarget)}` : ""}`,
@@ -1279,6 +1300,7 @@ export class SkillsManagerTui {
     }));
     this.#confirm({
       title: "Review saved sources",
+      approveLabel: "continue",
       lines: [
         `Installation: ${quoteTerminalPath(root.path)}`,
         "These saved sources have not been verified. Review the URLs before continuing.",
@@ -1389,6 +1411,7 @@ export class SkillsManagerTui {
     const root = this.#approvedRoot();
     this.#confirm({
       title: "Review prepared skill changes",
+      approveLabel: "apply changes",
       lines: [
         `Installation: ${quoteTerminalPath(root.path)}`,
         "Ownership and local-edit baseline may be unknown. No change is made without approval.",
@@ -1521,16 +1544,14 @@ export class SkillsManagerTui {
     const root = this.#skillsDir;
     try {
       const discovery = await discoverGit(root);
-      const files = discovery.kind === "leaf" ? await getStatus(root) : [];
+      const files = discovery.kind === "leaf" || discovery.kind === "parent" ? await getStatus(root) : [];
       if (revision !== this.#revision || this.#destroyed) return;
       this.#git = discovery;
       this.#gitFiles = files;
-      this.#gitStatus = discovery.kind === "leaf"
-        ? `Git: leaf · branch ${discovery.branch ?? "detached"}${discovery.head ? "" : " (unborn)"} · upstream ${discovery.upstream ?? "none"} · ${files.length} changed skill path${files.length === 1 ? "" : "s"}`
-        : discovery.kind === "parent"
-          ? `Containing repository: ${discovery.topLevel}. Git actions require a separate leaf repository.`
-          : discovery.kind === "none" ? "No Git repository at selected directory."
-            : `Git ${discovery.kind}: ${discovery.error ?? "unavailable"}`;
+      this.#gitStatus = discovery.kind === "leaf" || discovery.kind === "parent"
+        ? `Git: ${discovery.kind} · root ${quoteTerminalPath(discovery.topLevel ?? root)} · branch ${discovery.branch ?? "detached"}${discovery.head ? "" : " (unborn)"} · upstream ${discovery.upstream ?? "none"} · ${files.length} changed skill path${files.length === 1 ? "" : "s"}`
+        : discovery.kind === "none" ? "No Git repository at selected directory."
+          : `Git ${discovery.kind}: ${discovery.error ?? "unavailable"}`;
       if (!this.#gitStatusFilters.includes(this.#gitStatusFilter)) this.#gitStatusFilter = "all";
       this.#gitSelectedIndex = Math.min(this.#gitSelectedIndex, Math.max(0, this.#visibleGitFiles.length - 1));
       await this.#loadGitDiff();
@@ -1561,21 +1582,11 @@ export class SkillsManagerTui {
     }
   }
 
-  #parentInitializationLines(parent: string | null, tracked: boolean | undefined, excluded: boolean | undefined, exclusionFile: string | null | undefined): string[] {
-    if (!parent) return [];
-    const relative = path.relative(parent, this.#skillsDir).split(path.sep).join("/");
-    const commandsSafe = [parent, relative].every((value) => escapeTerminalSingleLine(value) === value);
+
+  #gitRepositoryLines(root: string, binding: { repositoryRoot: string }): string[] {
     return [
-      `Containing repository: ${quoteTerminalPath(parent)}`,
-      `Parent tracks selected paths: ${tracked === undefined ? "unknown" : tracked ? "yes" : "no"}`,
-      `Parent excludes selected path: ${excluded === undefined ? "unknown" : excluded ? "yes" : "no"}`,
-      `Parent exclusion file: ${exclusionFile ? quoteTerminalPath(exclusionFile) : "unavailable"}`,
-      ...(commandsSafe ? [
-        `Inspect tracked paths: git -C ${shellQuote(parent)} --literal-pathspecs ls-files -- ${shellQuote(relative)}`,
-        `Inspect exclusion: git -C ${shellQuote(parent)} check-ignore -v -- ${shellQuote(`${relative}/`)}`,
-      ] : ["The paths contain terminal controls; inspect tracked files and exclusions with a tool that accepts the exact paths."]),
-      "Do not untrack parent files. If appropriate, manually add a directory-wide exclusion in the parent's exclusion file, escaping Git pattern characters; then verify it.",
-      "A parent can still force-add an embedded repository as a Git link; it is not a submodule.",
+      `Repository: ${quoteTerminalPath(binding.repositoryRoot)}`,
+      ...(binding.repositoryRoot === root ? [] : [`Skills directory: ${quoteTerminalPath(root)}`]),
     ];
   }
 
@@ -1592,80 +1603,34 @@ export class SkillsManagerTui {
       : [];
   }
 
-  async #presentOnboardingIntents(intents: Pick<SkillsOnboardingResult, "reviewInitialize" | "reviewBackup">): Promise<void> {
-    if (!intents.reviewInitialize && !intents.reviewBackup) return;
-    if (this.#selection.identity === null) {
-      this.#showError("Git setup and backup are unavailable: create the selected directory and reselect it first.");
-      return;
-    }
+  async #presentOnboardingIntents(intents: Pick<SkillsOnboardingResult, "reviewInitialize">): Promise<void> {
+    if (!intents.reviewInitialize || this.#selection.identity === null) return;
     const revision = this.#revision;
-    await this.#runExclusive(async () => {
-      this.#mode = "git";
-      await this.#refreshGit();
-    });
-    if (this.#destroyed || revision !== this.#revision) return;
-    if (intents.reviewInitialize) {
-      const opened = await this.#prepareInit(
-        intents.reviewBackup ? () => this.#presentOnboardingBackup(revision) : undefined,
-      );
-      if (opened || this.#destroyed || revision !== this.#revision) return;
-    }
-    if (intents.reviewBackup) await this.#presentOnboardingBackup(revision);
-  }
-
-  async #presentOnboardingBackup(revision: number): Promise<void> {
-    if (this.#destroyed || revision !== this.#revision) return;
-    const git = this.#git;
-    if (!git || git.kind !== "leaf") {
-      this.#showError(`Backup unavailable: initialize the selected leaf repository first. ${this.#gitStatus}`);
-      return;
-    }
-    if (git.remotes.length === 0) {
-      this.#beginEntry("remote-name");
-      return;
-    }
-    await this.#preparePush();
-    if (!this.#destroyed && revision === this.#revision && this.#mode !== "confirm") {
-      this.#showError(`Backup review unavailable: ${this.#message} Create a first commit and configure an unambiguous branch remote or upstream, then press p to review the push.`);
+    await this.#runExclusive(() => this.#refreshGit());
+    if (this.#destroyed || revision !== this.#revision || this.#git?.kind !== "none") return;
+    this.#mode = "git";
+    const opened = await this.#prepareInit();
+    if (!opened && !this.#destroyed && revision === this.#revision) {
+      this.#mode = "browse";
+      this.#render();
     }
   }
 
-  async #prepareInit(after?: () => Promise<void>): Promise<boolean> {
-    const git = this.#git;
-    if (!git || git.kind === "error" || git.kind === "unavailable") {
-      this.#showError(this.#gitStatus || "Git discovery is unavailable.");
-      return false;
-    }
-    if (git.kind === "leaf") {
-      this.#showError("The selected directory is already a Git repository.");
-      return false;
-    }
-    const blocked = git.kind === "parent" && (git.parentTracked !== false || git.parentExcluded !== true);
-    if (blocked) {
-      this.#confirm({
-        title: "Git initialization blocked",
-        lines: [`Selected directory: ${quoteTerminalPath(this.#skillsDir)}`, ...this.#parentInitializationLines(git.topLevel, git.parentTracked, git.parentExcluded, git.exclusionFile)],
-        returnMode: "git",
-        informational: true,
-        approve: async () => {},
-        after,
-      });
-      return true;
-    }
+  async #prepareInit(): Promise<boolean> {
+    if (this.#git?.kind !== "none") return false;
     let opened = false;
     await this.#runExclusive(async () => {
       const root = this.#approvedRoot();
       const preview = await previewInitialize(root);
       this.#confirm({
         title: "Initialize Git",
+        approveLabel: "initialize",
         lines: [
           `Selected directory: ${quoteTerminalPath(preview.root)}`,
-          ...this.#parentInitializationLines(preview.parent, preview.parentTracked, preview.parentExcluded, preview.exclusionFile),
           "Only the selected directory will be initialized. No commit or remote is created.",
         ],
         returnMode: "git",
         approve: async () => this.#completeGitAction(() => initializeSkillsRepo(root, preview)),
-        after,
       });
       opened = true;
     });
@@ -1677,21 +1642,22 @@ export class SkillsManagerTui {
     const name = this.#remoteName;
     this.#input = "";
     if (!url) return;
-    if (this.#git?.kind !== "leaf" || this.#git.remotes.length > 0) {
+    if ((this.#git?.kind !== "leaf" && this.#git?.kind !== "parent") || this.#git.remotes.length > 0) {
       this.#mode = "git";
-      this.#showError("A remote can only be added to a leaf repository without an existing remote.");
+      this.#showError("A remote can only be added to a repository without an existing remote.");
       return;
     }
     await this.#runExclusive(async () => {
       const root = this.#approvedRoot();
       const preview = await previewAddRemote(root, name, url);
       this.#confirm({
-        title: "Add backup remote",
+        title: "Add remote",
+        approveLabel: "add remote",
         lines: [
-          `Repository: ${quoteTerminalPath(preview.root)}`,
+          ...this.#gitRepositoryLines(preview.root, preview.binding),
           `Remote: ${preview.name}`,
           `URL: ${preview.url}`,
-          ...this.#gitMetadataLines(preview.root, preview),
+          ...this.#gitMetadataLines(preview.root, preview.binding),
           "Create a private destination on your provider first. This does not create or change provider visibility.",
         ],
         returnMode: "git",
@@ -1710,8 +1676,9 @@ export class SkillsManagerTui {
       this.#input = "";
       this.#confirm({
         title: "Review commit",
+        approveLabel: "commit",
         lines: [
-          `Repository: ${quoteTerminalPath(preview.root)}`,
+          ...this.#gitRepositoryLines(preview.root, preview.binding),
           ...this.#gitMetadataLines(preview.root, preview.binding),
           `Branch: ${preview.branch ?? "detached/unborn"}`,
           `Current commit: ${preview.head ?? "none (first commit)"}`,
@@ -1731,9 +1698,9 @@ export class SkillsManagerTui {
 
   async #beginFetch(): Promise<void> {
     this.#fetchRemote = "";
-    if (this.#git?.kind === "leaf" && this.#git.remotes.length > 1) {
+    if ((this.#git?.kind === "leaf" || this.#git?.kind === "parent") && this.#git.remotes.length > 1) {
       this.#beginEntry("fetch-remote");
-    } else if (this.#git?.kind === "leaf" && this.#git.remotes.length === 1 && !this.#git.branch) {
+    } else if ((this.#git?.kind === "leaf" || this.#git?.kind === "parent") && this.#git.remotes.length === 1 && !this.#git.branch) {
       this.#beginEntry("fetch-branch");
     } else {
       await this.#prepareFetch();
@@ -1748,8 +1715,9 @@ export class SkillsManagerTui {
       const preview = await previewFetch(root, remote, branch);
       this.#confirm({
         title: "Review fetch",
+        approveLabel: "fetch",
         lines: [
-          `Repository: ${quoteTerminalPath(preview.root)}`, `Remote: ${preview.remote}`, `Fetch URL: ${preview.fetchUrl}`,
+          ...this.#gitRepositoryLines(preview.root, preview.binding), `Remote: ${preview.remote}`, `Fetch URL: ${preview.fetchUrl}`,
           ...this.#gitMetadataLines(preview.root, preview.binding),
           `Branch: ${preview.branch}`, `Destination: ${preview.destination}`,
           "Fetching contacts the remote and updates its local tracking reference.",
@@ -1764,8 +1732,10 @@ export class SkillsManagerTui {
     await this.#runExclusive(async () => {
       const root = this.#approvedRoot();
       const preview = await previewPush(root, []);
+      const containingRepository = preview.binding.repositoryRoot !== preview.root;
       const lines = [
-        `Repository: ${quoteTerminalPath(preview.root)}`, `Remote: ${preview.remote}`, `Push URL: ${preview.pushUrl}`,
+        ...this.#gitRepositoryLines(preview.root, preview.binding), `Remote: ${preview.remote}`, `Push URL: ${preview.pushUrl}`,
+        ...(containingRepository ? ["Push sends the whole branch history, including paths outside the selected skills directory."] : []),
         ...this.#gitMetadataLines(preview.root, preview.binding),
         `Branch: ${preview.branch}`, `Upstream: ${preview.upstream ?? "none"}`, `Destination: ${preview.destination}`,
         ...(preview.localRemote ? [
@@ -1773,21 +1743,25 @@ export class SkillsManagerTui {
           `Local destination identity: device ${preview.localRemote.identity.dev}, inode ${preview.localRemote.identity.ino}`,
           "Local receiver hooks are disabled for this push.",
         ] : []),
-        "Outgoing commits and paths:",
+        containingRepository ? "Outgoing commits and paths (repository-relative):" : "Outgoing commits and paths:",
         ...preview.outgoing.flatMap((commit) => [`${commit.id} ${commit.subject}`, ...commit.paths.map((file) => `  ${quoteTerminalPath(file)}`)]),
         preview.warning,
-        "Git cannot determine provider privacy. The destination determines who can read this backup.",
+        "Git cannot determine provider privacy. The destination determines who can read this push.",
       ];
       this.#confirm({
         title: "Review push",
+        approveLabel: "continue",
         lines,
         returnMode: "git",
         approve: async () => {
           this.#confirm({
             title: "Check provider access",
+            approveLabel: "push",
             lines: [
+              ...this.#gitRepositoryLines(preview.root, preview.binding),
               `Destination: ${preview.pushUrl}`,
-              "Have you checked on the provider who can read this backup?",
+              ...(containingRepository ? ["This push sends the whole branch history, including paths outside the selected skills directory."] : []),
+              "Have you checked on the provider who can read this push?",
               "Approve only after checking provider access. This approval is separate from the commit and remote setup.",
             ],
             returnMode: "git",
@@ -1804,14 +1778,15 @@ export class SkillsManagerTui {
       const preview = await previewPull(root, []);
       this.#confirm({
         title: "Review pull",
+        approveLabel: "pull",
         lines: [
-          `Repository: ${quoteTerminalPath(preview.root)}`, `Remote: ${preview.remote}`, `Fetch URL: ${preview.fetchUrl}`,
+          ...this.#gitRepositoryLines(preview.root, preview.binding), `Remote: ${preview.remote}`, `Fetch URL: ${preview.fetchUrl}`,
           ...this.#gitMetadataLines(preview.root, preview.binding),
           `Branch: ${preview.branch}`, `Upstream: ${preview.upstream}`, `Destination: ${preview.destination}`,
           `Current: ${preview.head}`, `Target: ${preview.target}`,
           "Incoming commits and paths:",
           ...preview.commits.flatMap((commit) => [`${commit.id} ${commit.subject}`, ...commit.paths.map((file) => `  ${quoteTerminalPath(file)}`)]),
-          "Pull is fast-forward only and affects the repository, not just one skill.",
+          "Pull is fast-forward only; incoming worktree changes must stay within the selected skills directory.",
         ],
         returnMode: "git",
         approve: async () => this.#completeGitAction(() => pullApproved(root, preview)),
@@ -1844,11 +1819,18 @@ export class SkillsManagerTui {
     const helpScrollTop = this.#helpContent?.scrollTop ?? 0;
     this.#helpContent = null;
     this.#helpOverlay = null;
+    this.#helpDialog = null;
+    this.#helpLayout = null;
+    this.#helpColumns = [];
+    this.#helpColumnRows = [];
+    this.#helpFooter = null;
+    this.#headerLabel = null;
+    this.#headerShortcuts = null;
+    this.#headerShortcutText = null;
     this.#detailContent = null;
     this.#metadataContent = null;
     this.#confirmationContent = null;
     this.#softwareContent = null;
-    this.#copyNotice = null;
     this.#softwareBadge = null;
     this.#confirmCancelButton = null;
     this.#confirmApproveButton = null;
@@ -1877,30 +1859,34 @@ export class SkillsManagerTui {
       flexDirection: "row",
       overflow: "hidden",
     });
-    header.add(new TextRenderable(this.renderer, {
-      content: escapeTerminalSingleLine(isGitMode
-        ? `Git · ${this.#git?.kind ?? "error"} · ${this.#visibleGitFiles.length}/${this.#gitFiles.length} files · status: ${this.#gitStatusFilter}`
-        : `Skills ${this.#visibleSkills.length} shown · scope: ${this.#scope} · state: ${this.#state}${this.#searchFilter === "" ? "" : ` · filter: ${this.#searchFilter} (Esc to clear)`}`),
+    const headerText = escapeTerminalSingleLine(isGitMode
+      ? `Git · ${this.#git?.kind ?? "error"} · ${this.#visibleGitFiles.length}/${this.#gitFiles.length} files · status: ${this.#gitStatusFilter}`
+      : `Skills ${this.#visibleSkills.length} shown · scope: ${this.#scope === "source" ? "From a repo" : this.#scope === "local" ? "Local" : "All"} · state: ${this.#state}${this.#searchFilter === "" ? "" : ` · filter: ${this.#searchFilter} (Esc to clear)`}`);
+    const headerLabel = new MeasuredTextRenderable(this.renderer, {
+      content: headerText,
       fg: colors.accent,
       attributes: TextAttributes.BOLD,
       height: 1,
       wrapMode: "none",
       selectable: false,
-    }));
+    });
+    header.add(headerLabel);
     if (!isGitMode) {
       const shortcuts = new BoxRenderable(this.renderer, {
         height: 1,
         marginLeft: "auto",
+        paddingLeft: 1,
         flexDirection: "row",
         overflow: "hidden",
       });
-      shortcuts.add(new TextRenderable(this.renderer, {
-        content: t`up/down navigate · space select · / search · ${fg(colors.accent)(bold("s"))}cope · ${fg(colors.accent)(bold("e"))}nabled`,
-        fg: colors.muted,
-        height: 1,
-        wrapMode: "none",
-        selectable: false,
-      }));
+      const shortcutText = new TextRenderable(this.renderer, {
+        content: "", fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
+      });
+      shortcuts.add(shortcutText);
+      this.#headerLabel = headerLabel;
+      this.#headerShortcuts = shortcuts;
+      this.#headerShortcutText = shortcutText;
+      this.#resizeHeaderShortcuts();
       header.add(shortcuts);
     }
     screen.add(header);
@@ -2011,7 +1997,7 @@ export class SkillsManagerTui {
     });
     footer.add(this.#noticeText);
     footer.add(new TextRenderable(this.renderer, {
-      content: `Directory: ${quoteTerminalPath(this.#skillsDir)}${this.#isGitMode ? ` | ${escapeTerminalSingleLine(this.#gitStatus || "Git: checking...")}` : ""}`,
+      content: this.#isGitMode ? escapeTerminalSingleLine(this.#gitStatus || "Git: checking...") : `Directory: ${quoteTerminalPath(this.#skillsDir)}`,
       fg: colors.muted,
       height: 1,
       wrapMode: "none",
@@ -2023,7 +2009,7 @@ export class SkillsManagerTui {
   #skillListWidth(): number {
     let longest = 0;
     for (const skill of this.#visibleSkills) {
-      const label = escapeTerminalSingleLine(`${skill.enabled ? "[on]" : "[off]"} [${skill.provenance.kind}] ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`);
+      const label = escapeTerminalSingleLine(`${skill.enabled ? "[on]" : "[off]"} [${skill.provenance.kind === "source" ? "repo" : "local"}] ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`);
       longest = Math.max(longest, label.length);
     }
     return Math.min(40, Math.max(24, longest + 3));
@@ -2055,7 +2041,7 @@ export class SkillsManagerTui {
         backgroundColor: selected ? colors.selection : colors.panel,
       });
       row.add(new TextRenderable(this.renderer, {
-        content: escapeTerminalSingleLine(`${skill.enabled ? "[on]" : "[off]"} [${skill.provenance.kind}] ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`),
+        content: escapeTerminalSingleLine(`${skill.enabled ? "[on]" : "[off]"} [${skill.provenance.kind === "source" ? "repo" : "local"}] ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`),
         fg: skill.orphaned ? colors.warning : skill.enabled ? colors.enabled : colors.disabled,
         attributes: selected ? TextAttributes.BOLD : 0,
         onMouseDown: (event) => {
@@ -2200,7 +2186,7 @@ export class SkillsManagerTui {
     const files = this.#visibleGitFiles;
     if (files.length === 0) {
       list.add(new TextRenderable(this.renderer, {
-        content: escapeTerminalSingleLine(this.#gitFiles.length === 0 ? this.#gitStatus || "Git status unavailable." : `No ${this.#gitStatusFilter} files.`),
+        content: escapeTerminalSingleLine(this.#gitFiles.length === 0 ? "No changed skill paths." : `No ${this.#gitStatusFilter} files.`),
         fg: colors.muted,
         selectable: false,
       }));
@@ -2276,7 +2262,7 @@ export class SkillsManagerTui {
         }));
       } else {
         diff.add(new TextRenderable(this.renderer, {
-          content: escapeTerminalMultiline(this.#gitDiff || (this.#gitFiles.length === 0 ? this.#gitStatus : "No diff available.")),
+          content: escapeTerminalMultiline(this.#gitDiff || (this.#gitFiles.length === 0 ? "No changes to display." : "No diff available.")),
           fg: colors.text,
           wrapMode: "none",
           selectable: false,
@@ -2305,9 +2291,7 @@ export class SkillsManagerTui {
         .map((item) => `${item.key.charAt(0).toUpperCase()}${item.key.slice(1)}: ${item.value}`);
       const facts = skill ? [
         skill.name,
-        skill.provenance.kind === "source"
-          ? `Source: ${skill.provenance.source} · ${skill.provenance.sourceUrl}`
-          : formatSkillSource(skill),
+        formatSkillSource(skill),
         skill.authors.length ? `Author: ${skill.authors.join(", ")}` : "Author not listed",
         `Entry: ${skill.entryKind}${skill.linkTarget !== null ? ` -> ${quoteTerminalPath(skill.linkTarget)}` : ""}`,
         ...(skill.recordedSource && (skill.provenance.kind !== "source" || !isDeepStrictEqual(skill.recordedSource, skill.lockEntry))
@@ -2416,9 +2400,33 @@ export class SkillsManagerTui {
       justifyContent: "center", alignItems: "center", paddingX: 1, paddingY: 1,
       onMouse: (event) => event.stopPropagation(),
     });
+    const updates = this.#softwareUpdates;
+    const activity = updates.activity();
+    const app = updates.results.app;
+    const cli = updates.results.cli;
+    const build = updates.build;
+    const lines = [
+      ...(this.#preparingHandoff ? ["Preparing update session; q quits without starting it.", ""] : []),
+      `${this.#softwareUpdateSelection === "app" ? ">" : " "} skills-manager (app) · ${build.version === "unknown" ? "version unavailable" : `installed ${build.version}`}${build.commit ? ` · ${build.commit.slice(0, 7)}` : ""}${build.dirty ? " · modified" : ""}`,
+      `  ${activity.app.checking || this.#softwareChecks.has("app") ? "Checking..." : this.#softwareCheckErrors.app ?? checkSummary(app, "app", activity.app.lastAttemptAt !== null)}`,
+      `  Automatic checks: ${updates.preferences.app ? "on" : "off"}${app ? ` · Last checked: ${shortDate(app.checkedAt)}` : ""}`,
+      "",
+      `${this.#softwareUpdateSelection === "cli" ? ">" : " "} Vercel skills CLI · ${updates.cliVersion ? `installed ${updates.cliVersion}` : "version unavailable"}`,
+      `  ${activity.cli.checking || this.#softwareChecks.has("cli") ? "Checking..." : this.#softwareCheckErrors.cli ?? checkSummary(cli, "cli", activity.cli.lastAttemptAt !== null)}`,
+      `  Automatic checks: ${updates.preferences.cli ? "on" : "off"}${cli ? ` · Last checked: ${shortDate(cli.checkedAt)}` : ""}`,
+      ...updates.errors.map((error) => `Update settings: ${error}`),
+      ...(this.#message ? [this.#message] : []),
+    ];
+    const width = Math.max(10, Math.min(110, this.renderer.width - 2));
+    const text = new MeasuredTextRenderable(this.renderer, {
+      content: lines.map(escapeTerminalSingleLine).join("\n"),
+      height: "auto", flexShrink: 0, fg: colors.text, wrapMode: "word",
+    });
+    const contentRows = text.rowsAt(width - 4);
+    const height = Math.max(5, Math.min(this.renderer.height - 2, contentRows + 4));
+    const overflow = contentRows > height - 4;
     const dialog = new BoxRenderable(this.renderer, {
-      width: "100%", height: "100%", minWidth: 1, minHeight: 1, maxWidth: 110, maxHeight: 24,
-      flexDirection: "column", border: true, borderColor: colors.accent,
+      width, height, flexDirection: "column", border: true, borderColor: colors.accent,
       title: "Application updates", titleColor: colors.accent, backgroundColor: colors.panel,
     });
     const content = new ScrollBoxRenderable(this.renderer, {
@@ -2427,147 +2435,169 @@ export class SkillsManagerTui {
       viewportOptions: { backgroundColor: colors.panel },
       scrollbarOptions: { trackOptions: { foregroundColor: colors.accent, backgroundColor: colors.panel } },
     });
+    content.horizontalScrollbarOptions = { visible: false };
+    content.verticalScrollbarOptions = { visible: overflow };
     this.#softwareContent = content;
-    const updates = this.#softwareUpdates;
-    const activity = updates.activity();
-    const app = updates.results.app;
-    const cli = updates.results.cli;
-    const build = updates.build;
-    const lines = [
-      ...(this.#preparingHandoff ? ["Preparing update session; q quits without starting it.", ""] : []),
-      `${this.#softwareUpdateSelection === "app" ? ">" : " "} skills-manager (app) · automatic: ${updates.preferences.app ? "on" : "off"}`,
-      `  ${build.version === "unknown" ? "Installed version unavailable" : `Running: ${build.version}`}${build.commit ? ` · ${build.commit.slice(0, 7)}` : ""}${build.dirty ? " · modified" : ""}`,
-      ...(app?.available ? [`  Latest build: ${app.available.slice(0, 7)}`] : []),
-      `  Check: ${activity.app.checking ? "checking..." : checkSummary(app, "app", activity.app.lastAttemptAt !== null)}`,
-      ...(!app && activity.app.lastAttemptAt ? [`  Last attempt: ${shortDate(activity.app.lastAttemptAt)}`] : []),
-      ...(updates.preferences.app && activity.app.nextCheckAt ? [`  Next check: ${shortDate(activity.app.nextCheckAt)}`] : []),
-      "",
-      `${this.#softwareUpdateSelection === "cli" ? ">" : " "} Vercel skills CLI · automatic: ${updates.preferences.cli ? "on" : "off"}`,
-      ...(updates.cliVersion ? [`  Running version: ${updates.cliVersion}`] : []),
-      ...(cli?.available ? [`  registry latest: ${cli.available}`] : []),
-      `  Check: ${activity.cli.checking ? "checking..." : checkSummary(cli, "cli", activity.cli.lastAttemptAt !== null)}`,
-      ...(!cli && activity.cli.lastAttemptAt ? [`  Last attempt: ${shortDate(activity.cli.lastAttemptAt)}`] : []),
-      ...(updates.preferences.cli && activity.cli.nextCheckAt ? [`  Next check: ${shortDate(activity.cli.nextCheckAt)}`] : []),
-      "",
-      ...updates.errors.map((error) => `Update settings: ${error}`),
-      ...(this.#message ? [`Notice: ${this.#message}`] : []),
-    ];
-    content.add(new TextRenderable(this.renderer, {
-      content: lines.map(escapeTerminalSingleLine).join("\n"),
-      width: "100%", height: "auto", fg: colors.text, wrapMode: "word",
-    }));
+    content.add(text);
     dialog.add(content);
     dialog.add(new TextRenderable(this.renderer, {
-      content: t` Up/down select · ${fg(colors.accent)(bold("c"))} check selected · ${fg(colors.accent)(bold("a"))} automatic on/off · PgUp/PgDn scroll`,
+      content: t` Up/down select · ${fg(colors.accent)(bold("Enter"))} automatic checks · ${fg(colors.accent)(bold("c"))} check now`,
       fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
     }));
     dialog.add(new TextRenderable(this.renderer, {
-      content: t` ${fg(colors.accent)(bold("r"))} update app + CLI · ${fg(colors.accent)(bold("f"))} refresh CLI · ${fg(colors.accent)(bold("m"))} recovery command · Esc close`,
+      content: t` ${fg(colors.accent)(bold("r"))} update app + CLI · ${fg(colors.accent)(bold("f"))} update CLI · ${fg(colors.accent)(bold("Esc"))} close`,
       fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
     }));
+    if (overflow) {
+      dialog.add(new TextRenderable(this.renderer, {
+        content: " PgUp/PgDn scroll", fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
+      }));
+    }
     overlay.add(dialog);
     return overlay;
   }
 
   #createHelpDialog(scrollTop = 0): BoxRenderable {
+    type Group = { title: string; rows: Array<[string, string]> };
+    const browseGroups: Group[][] = [
+      [
+        { title: "Browse files", rows: [
+          ["↑/↓, j/k", "Select skill"],
+          [`[ ], ${process.platform === "darwin" ? "Option" : "Alt"}+↑/↓`, "Choose file"],
+          ["PgUp/PgDn", "Scroll preview"],
+          [",/.", "Scroll metadata"],
+          ["o", "Open file"],
+          ["t", "Markdown/raw"],
+        ] },
+        { title: "Filter list", rows: [
+          ["/", "Search"],
+          ["s", "Cycle scope"],
+          ["e", "Cycle enabled state"],
+          ["Esc", "Clear filter"],
+        ] },
+      ],
+      [
+        { title: "Manage skills", rows: [
+          ["Space", "Enable/disable"],
+          ["a", "Find/add skills"],
+          ["d", "Remove skill"],
+          ["v", "Check for updates"],
+          ["u", "Update selected"],
+          ["p", "Update all"],
+        ] },
+        { title: "Application", rows: [
+          ["g", "Open Git"],
+          ["x", "Application updates"],
+          ["r", "Refresh"],
+          ...(this.options.selectSkillsDir ? [["i", "Select directory"] as [string, string]] : []),
+          ["q", "Quit"],
+        ] },
+      ],
+    ];
+    const hasRepository = this.#git?.kind === "leaf" || this.#git?.kind === "parent";
+    const gitGroups: Group[][] = [
+      [{ title: "Inspect changes", rows: [
+        ["↑/↓, j/k", "Select Git file"],
+        ["PgUp/PgDn", "Scroll diff"],
+        ["s", "Cycle status"],
+        ["t", "Full context"],
+        ["r", "Refresh"],
+      ] }],
+      [
+        ...(hasRepository ? [
+          { title: "Commit", rows: [["c", "Commit changes"]] as Array<[string, string]> },
+          { title: "Remotes", rows: [
+            ["f", "Fetch"],
+            ["l", "Pull"],
+            ["p", "Push"],
+            ...(this.#git?.remotes.length ? [] : [["n", "Add remote"] as [string, string]]),
+          ] as Array<[string, string]> },
+        ] : this.#git?.kind === "none" ? [
+          { title: "Initialize", rows: [["i", "Initialize repository"]] as Array<[string, string]> },
+        ] : []),
+      ],
+    ];
+    const groups = this.#helpReturnMode === "browse" ? browseGroups : gitGroups;
+    const groupRows = (column: Group[]) => column.reduce((total, group) => total + 1 + group.rows.length, 0) + Math.max(0, column.length - 1);
+    this.#helpColumnRows = groups.map(groupRows);
     const overlay = new BoxRenderable(this.renderer, {
-      position: "absolute",
-      width: "100%",
-      height: "100%",
-      flexDirection: "column",
-      justifyContent: "center",
-      alignItems: "center",
-      paddingX: 1,
-      paddingY: 1,
+      position: "absolute", width: "100%", height: "100%", flexDirection: "column",
+      justifyContent: "center", alignItems: "center", paddingX: 1, paddingY: 1,
       onMouse: (event) => event.stopPropagation(),
     });
     const dialog = new BoxRenderable(this.renderer, {
-      width: "100%",
-      height: "100%",
-      minWidth: 1,
-      minHeight: 1,
-      maxWidth: 82,
-      maxHeight: 22,
-      flexDirection: "column",
-      border: true,
-      borderColor: colors.accent,
-      title: "Keyboard help",
-      titleColor: colors.accent,
-      backgroundColor: colors.panel,
+      width: 10, height: 5,
+      flexDirection: "column", border: true, borderColor: colors.accent,
+      title: `Keyboard help · ${this.#helpReturnMode === "browse" ? "Skills" : "Git"}`,
+      titleColor: colors.accent, backgroundColor: colors.panel,
     });
     const content = new ScrollBoxRenderable(this.renderer, {
-      width: "100%",
-      flexGrow: 1,
-      flexBasis: 0,
-      minHeight: 0,
+      width: "100%", flexGrow: 1, flexBasis: 0, minHeight: 0,
       contentOptions: { backgroundColor: colors.panel, paddingX: 1 },
       viewportOptions: { backgroundColor: colors.panel },
       scrollbarOptions: { trackOptions: { foregroundColor: colors.accent, backgroundColor: colors.panel } },
     });
+    content.horizontalScrollbarOptions = { visible: false };
     this.#helpContent = content;
     if (scrollTop) {
       this.renderer.once("frame", () => {
         if (this.#helpContent === content && !content.isDestroyed) content.scrollTo(scrollTop);
       });
     }
-    content.add(new TextRenderable(this.renderer, {
-      content: (this.#helpReturnMode === "browse" ? [
-        "Browsing",
-        "Up/down, j/k      Select skill",
-        "[/], Ctrl+p/n     Select previous/next file",
-        `${`${process.platform === "darwin" ? "Option" : "Alt"}+↑/↓`.padEnd(18)}Select previous/next file`,
-        ",/.               Scroll metadata",
-        "PgUp/PgDn         Scroll file",
-        "g                 Open Git",
-        "x                 Application updates",
-        "/                 Filter skills",
-        "s                 Cycle scope",
-        "e                 Cycle enabled state",
-        "t                 Toggle Markdown/raw",
-        "o                 Open selected file",
-        "Space             Review enable/disable",
-        "d/Delete          Review removal",
-        "u                 Update selected",
-        "p                 Update all",
-        "v                 Review update check",
-        "a                 Search and add skills",
-        "r                 Refresh",
-        ...(this.options.selectSkillsDir ? ["i                 Select installation"] : []),
-        "q                 Quit",
-        "Esc               Clear filter",
-        "Context menu: Up/down or j/k select; Enter acts",
-      ] : [
-        "Git",
-        "Up/down, j/k      Select Git file",
-        "PgUp/PgDn         Scroll diff",
-        "Esc               Return to browsing",
-        "s                 Cycle status filter",
-        "t                 Toggle full diff context",
-        "r                 Refresh",
-        "i                 Initialize repository",
-        "n                 Add remote",
-        "c                 Review commit",
-        "f                 Fetch",
-        "l                 Pull",
-        "p                 Push",
-        "Git actions depend on repository state and require review.",
-      ]).join("\n"),
-      width: "100%",
-      height: "auto",
-      fg: colors.text,
-      wrapMode: "word",
-      selectable: false,
-    }));
+    const layout = new BoxRenderable(this.renderer, { height: "auto", flexDirection: "row", flexShrink: 0 });
+    this.#helpLayout = layout;
+    this.#helpColumns = [];
+    for (const column of groups) {
+      const pane = new BoxRenderable(this.renderer, { width: "50%", height: "auto", flexDirection: "column", flexShrink: 0 });
+      this.#helpColumns.push(pane);
+      for (const [index, group] of column.entries()) {
+        if (index) pane.add(new TextRenderable(this.renderer, { content: "", height: 1, selectable: false }));
+        pane.add(new TextRenderable(this.renderer, {
+          content: t`${fg(colors.accent)(bold(group.title))}`, height: 1, selectable: false,
+        }));
+        for (const [key, description] of group.rows) {
+          pane.add(new TextRenderable(this.renderer, {
+            content: t`${fg(colors.accent)(bold(key))}${" ".repeat(Math.max(1, 18 - key.length))}${description}`,
+            width: "100%", height: 1, fg: colors.text, wrapMode: "none", selectable: false,
+          }));
+        }
+      }
+      layout.add(pane);
+    }
+    content.add(layout);
     dialog.add(content);
-    dialog.add(new TextRenderable(this.renderer, {
-      content: " ?/Esc close · Up/down scroll · PgUp/PgDn page",
-      fg: colors.muted,
-      height: 1,
-      wrapMode: "none",
-      selectable: false,
-    }));
+    const footer = new TextRenderable(this.renderer, {
+      content: " ?/Esc close",
+      fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
+    });
+    dialog.add(footer);
+    this.#helpDialog = dialog;
+    this.#helpFooter = footer;
+    this.#resizeHelpDialog();
     overlay.add(dialog);
     return overlay;
+  }
+
+  #resizeHelpDialog(): void {
+    const dialog = this.#helpDialog;
+    const layout = this.#helpLayout;
+    const footer = this.#helpFooter;
+    if (!dialog || !layout || !footer) return;
+    const wide = this.renderer.width >= 96;
+    const width = Math.max(10, Math.min(110, this.renderer.width - 2));
+    const gap = this.#helpColumnRows.filter((rows) => rows > 0).length > 1 ? 1 : 0;
+    const rows = wide ? Math.max(0, ...this.#helpColumnRows) : this.#helpColumnRows.reduce((sum, count) => sum + count, 0) + gap;
+    const height = Math.max(5, Math.min(this.renderer.height - 2, rows + 3));
+    const overflow = rows > height - 3;
+    dialog.width = width;
+    dialog.height = height;
+    layout.flexDirection = wide ? "row" : "column";
+    layout.rowGap = wide ? 0 : gap;
+    for (const pane of this.#helpColumns) pane.width = wide ? "50%" : "100%";
+    if (this.#helpContent) this.#helpContent.verticalScrollbarOptions = { visible: overflow };
+    footer.content = overflow
+      ? " ?/Esc close · Up/down scroll · PgUp/PgDn page"
+      : " ?/Esc close";
   }
 
   #createConfirmationDialog(): BoxRenderable {
@@ -2582,8 +2612,13 @@ export class SkillsManagerTui {
       alignItems: "center",
     });
     const width = Math.max(10, Math.min(confirmation.explicitKeyApproval ? 76 : 110, this.renderer.width - 4));
-    const contentRows = confirmation.lines.reduce((sum, line) => sum + Math.max(1, Math.ceil(escapeTerminalSingleLine(line).length / Math.max(1, width - 4))), 0);
-    const height = Math.max(5, Math.min(this.renderer.height - 3, confirmation.explicitKeyApproval ? contentRows + 3 : 22));
+    const text = new MeasuredTextRenderable(this.renderer, {
+      content: confirmation.lines.map(escapeTerminalSingleLine).join("\n"),
+      height: "auto", flexShrink: 0, fg: colors.text, wrapMode: "word",
+    });
+    const contentRows = text.rowsAt(width - 4);
+    const height = Math.max(5, Math.min(this.renderer.height - 3, 22, contentRows + 3));
+    const overflow = contentRows > height - 3;
     const dialog = new BoxRenderable(this.renderer, {
       width,
       height,
@@ -2603,21 +2638,11 @@ export class SkillsManagerTui {
       viewportOptions: { backgroundColor: colors.panel },
       scrollbarOptions: { trackOptions: { foregroundColor: colors.accent, backgroundColor: colors.panel } },
     });
+    content.horizontalScrollbarOptions = { visible: false };
+    content.verticalScrollbarOptions = { visible: overflow };
     this.#confirmationContent = content;
-    content.add(new TextRenderable(this.renderer, {
-      content: confirmation.lines.map(escapeTerminalSingleLine).join("\n"),
-      width: "100%",
-      height: "auto",
-      fg: colors.text,
-      wrapMode: "word",
-    }));
+    content.add(text);
     dialog.add(content);
-    if (confirmation.copyText) {
-      this.#copyNotice = new TextRenderable(this.renderer, {
-        content: "c copy command", fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
-      });
-      dialog.add(this.#copyNotice);
-    }
     const buttons = new BoxRenderable(this.renderer, {
       width: "100%",
       height: 1,
@@ -2625,9 +2650,7 @@ export class SkillsManagerTui {
       backgroundColor: colors.panel,
     });
     this.#confirmCancelButton = new TextRenderable(this.renderer, {
-      content: confirmation.explicitKeyApproval
-        ? t` ${fg(colors.accent)(bold("n"))} cancel · Esc back`
-        : confirmation.informational ? "[Enter/Esc] Close" : "[n/Esc] Cancel",
+      content: t` ${fg(colors.accent)(bold("Esc"))} ${confirmation.informational ? "close" : "cancel"}`,
       fg: !confirmation.explicitKeyApproval && this.#confirmationSelection === "cancel" ? colors.enabled : colors.muted,
       bg: !confirmation.explicitKeyApproval && this.#confirmationSelection === "cancel" ? colors.selection : colors.panel,
       height: 1,
@@ -2637,7 +2660,7 @@ export class SkillsManagerTui {
     buttons.add(this.#confirmCancelButton);
     if (!confirmation.informational) {
       this.#confirmApproveButton = new TextRenderable(this.renderer, {
-      content: confirmation.explicitKeyApproval ? t` · ${fg(colors.accent)(bold("y"))} enable` : "  [y] Approve",
+      content: t` · ${fg(colors.accent)(bold("y"))} ${confirmation.approveLabel ?? "approve"}`,
       fg: !confirmation.explicitKeyApproval && this.#confirmationSelection === "approve" ? colors.enabled : colors.muted,
       bg: !confirmation.explicitKeyApproval && this.#confirmationSelection === "approve" ? colors.selection : colors.panel,
       height: 1,
@@ -2646,15 +2669,12 @@ export class SkillsManagerTui {
       });
       buttons.add(this.#confirmApproveButton);
     }
-    if (!confirmation.explicitKeyApproval) {
-      buttons.add(new TextRenderable(this.renderer, {
-        content: confirmation.informational ? "  Up/down or PgUp/PgDn scroll" : "  Enter: selected action · Tab/left/right select · Up/down scroll",
-        fg: colors.muted,
-        height: 1,
-        selectable: false,
+    dialog.add(buttons);
+    if (overflow) {
+      dialog.add(new TextRenderable(this.renderer, {
+        content: " PgUp/PgDn scroll", fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
       }));
     }
-    dialog.add(buttons);
     overlay.add(dialog);
     return overlay;
   }
@@ -2732,15 +2752,16 @@ export class SkillsManagerTui {
     overlay.add(help);
     return overlay;
   }
-  #gitToolbarText(): string {
-    const controls = ["Esc close", "r local refresh"];
-    if (this.#git?.kind === "none" || this.#git?.kind === "parent") controls.push("i initialize");
-    if (this.#git?.kind === "leaf") {
-      if (this.#git.remotes.length === 0) controls.push("n add remote");
-      if (this.#gitFiles.length > 0) controls.push("c commit");
-      if (this.#git.remotes.length > 0) controls.push("f fetch", "l pull", "p push");
+  #gitToolbarText(): StyledText {
+    const controls: Array<[string, string]> = [["Esc", "close"], ["r", "local refresh"]];
+    if (this.#git?.kind === "none") controls.push(["i", "initialize"]);
+    if (this.#git?.kind === "leaf" || this.#git?.kind === "parent") {
+      if (this.#git.remotes.length === 0) controls.push(["n", "add remote"]);
+      if (this.#gitFiles.length > 0) controls.push(["c", "commit"]);
+      if (this.#git.remotes.length > 0) controls.push(["f", "fetch"], ["l", "pull"], ["p", "push"]);
     }
-    return controls.join(" · ");
+    return new StyledText(controls.flatMap(([key, label], index) =>
+      t`${index ? " · " : ""}${fg(colors.accent)(bold(key))} ${label}`.chunks));
   }
 
   #footerText(): string {

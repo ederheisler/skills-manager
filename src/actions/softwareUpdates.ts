@@ -171,7 +171,7 @@ function attemptTimestamp(value: unknown, now: number): number | null {
   return value.at;
 }
 
-async function responseJson(response: Response): Promise<unknown> {
+async function responseText(response: Response): Promise<string> {
   const length = response.headers.get("content-length");
   if (!response.body) throw new Error("Missing response body");
   const reader = response.body.getReader();
@@ -189,7 +189,7 @@ async function responseJson(response: Response): Promise<unknown> {
       chunks.push(value);
     }
   } finally { await reader.cancel().catch(() => {}); }
-  return JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+  return Buffer.concat(chunks, size).toString("utf8");
 }
 
 /** Separate, default-off consent and check state for the app and its bundled CLI. */
@@ -206,6 +206,7 @@ export class SoftwareUpdateService {
   readonly #preferenceRevision: Record<UpdateComponent, number> = { app: 0, cli: 0 };
   readonly #preferenceWrites = new Map<UpdateComponent, Promise<void>>();
   readonly #flights = new Map<UpdateComponent, Flight>();
+  readonly #foreground: Record<UpdateComponent, number> = { app: 0, cli: 0 };
   readonly #checking: Record<UpdateComponent, Set<symbol>> = { app: new Set(), cli: new Set() };
   readonly #attempts: Record<UpdateComponent, number | null> = { app: null, cli: null };
   readonly #timers = new Map<UpdateComponent, { handle: ReturnType<typeof setTimeout>; at: number }>();
@@ -344,7 +345,7 @@ export class SoftwareUpdateService {
     let latest: PrivateJsonSnapshot<StoredResult> | null = null;
     let latestName = path.basename(canonical);
     try { latest = await this.#readResultState(canonical, component, key); }
-    catch { if (allowed()) this.#error("An update result cache is invalid, unreadable, or unsafe."); }
+    catch { if (allowed()) this.#error("A saved update check result is invalid, unreadable, or unsafe."); }
     if (!allowed()) return null;
     const prefix = `result-${component}-${key}-`;
     const directory = await opendir(this.#cache);
@@ -367,7 +368,7 @@ export class SoftwareUpdateService {
           latestName = entry.name;
         }
       } catch {
-        if (allowed()) this.#error("An update result cache is invalid, unreadable, or unsafe.");
+        if (allowed()) this.#error("A saved update check result is invalid, unreadable, or unsafe.");
       }
     }
     return allowed() ? latest?.value ?? null : null;
@@ -413,13 +414,13 @@ export class SoftwareUpdateService {
       const attempt = attemptTimestamp(await readPrivateJson(this.#cacheFile(component, "attempt", key)), Date.now());
       if (allowed()) this.#attempts[component] = attempt;
     } catch {
-      if (allowed()) this.#error("An update attempt cache is invalid, unreadable, or unsafe.");
+      if (allowed()) this.#error("A saved update check record is invalid, unreadable, or unsafe.");
     }
     try {
       const result = await this.#readResult(component, key);
       if (allowed() && result) this.#results[component] = this.#compareResult(result);
     } catch {
-      if (allowed()) this.#error("An update result cache is invalid, unreadable, or unsafe.");
+      if (allowed()) this.#error("A saved update check result is invalid, unreadable, or unsafe.");
     }
   }
 
@@ -551,7 +552,12 @@ export class SoftwareUpdateService {
     };
     if (!enabled) {
       this.#preferences[component] = false;
-      this.#invalidate(component);
+      if (this.#foreground[component] === 0) this.#invalidate(component);
+      else {
+        const timer = this.#timers.get(component);
+        clearTimeout(timer?.handle);
+        this.#timers.delete(component);
+      }
       this.#notify();
     }
     const previous = this.#preferenceWrites.get(component) ?? Promise.resolve();
@@ -638,20 +644,27 @@ export class SoftwareUpdateService {
 
   async check(component: UpdateComponent, expectedRegistry?: string): Promise<void> {
     if (this.#disposed) return;
+    if (component === "cli" && expectedRegistry !== undefined) {
+      let approvedRegistry = "";
+      try { approvedRegistry = safeRegistry(expectedRegistry); } catch { /* Invalid approval cannot authorize a host. */ }
+      if (!approvedRegistry || approvedRegistry !== this.#registryScope) {
+        this.#error("The npm registry changed; review it before checking the CLI.");
+        return;
+      }
+    }
+    this.#foreground[component]++;
+    try { await this.#check(component, false); }
+    finally { this.#foreground[component]--; }
+  }
+
+  async #check(component: UpdateComponent, automatic: boolean): Promise<void> {
+    if (this.#disposed) return;
     const token = this.#beginChecking(component);
     try {
-      if (component === "cli" && expectedRegistry !== undefined) {
-        let approvedRegistry = "";
-        try { approvedRegistry = safeRegistry(expectedRegistry); } catch { /* Invalid approval cannot authorize a host. */ }
-        if (!approvedRegistry || approvedRegistry !== this.#registryScope) {
-          this.#error("The npm registry changed; review it before checking the CLI.");
-          return;
-        }
-      }
       const generation = this.#generation[component];
       const disclosedRegistry = this.#registryScope;
       if (component === "cli") await this.#refreshRegistry();
-      if (this.#disposed || generation !== this.#generation[component]
+      if (this.#disposed || (automatic && !this.#preferences[component]) || generation !== this.#generation[component]
         || (component === "cli" && disclosedRegistry !== this.#registryScope)) return;
       const existing = this.#flights.get(component);
       if (existing) return await existing.promise;
@@ -678,18 +691,20 @@ export class SoftwareUpdateService {
       const url = component === "app" ? GITHUB_URL : new URL("skills/latest", this.#registryScope).href;
       const response = await fetch(url, {
         method: "GET", redirect: "error", credentials: "omit",
-        headers: { Accept: "application/json", "User-Agent": "skills-manager" },
+        headers: { Accept: component === "app" ? "application/vnd.github.sha" : "application/json", "User-Agent": "skills-manager" },
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
       });
       if (!response.ok) {
         if (response.status >= 100 && response.status <= 599) error = `Update check unavailable (HTTP ${response.status}).`;
         await response.body?.cancel().catch(() => {});
       } else {
-        const data = await responseJson(response);
+        const text = await responseText(response);
         if (component === "app") {
-          if (!isRecord(data) || typeof data.sha !== "string" || !SHA.test(data.sha)) throw new Error("Invalid app response");
-          available = data.sha;
+          const sha = text.trim();
+          if (!SHA.test(sha)) throw new Error("Invalid app response");
+          available = sha;
         } else {
+          const data: unknown = JSON.parse(text);
           if (!isRecord(data) || data.name !== "skills" || typeof data.version !== "string"
             || data.version.length > 128 || !VERSION.test(data.version)) throw new Error("Invalid CLI response");
           available = data.version;
@@ -798,7 +813,7 @@ export class SoftwareUpdateService {
       let result: StoredResult | null;
       try { result = await this.#readResult(component, key); }
       catch {
-        if (allowed()) this.#error("Automatic checks are paused because the result cache is invalid or unsafe; manual checks remain available.");
+        if (allowed()) this.#error("Automatic checks are paused because the saved check result is invalid or unsafe; manual checks remain available.");
         return { next: Date.now() + 60_000, retry: false };
       }
       if (!allowed()) return { next: now + RETRY_MS, retry: false };
@@ -822,7 +837,7 @@ export class SoftwareUpdateService {
       if (allowed()) {
         this.#attempts[component] = now;
         this.#notify();
-        await this.check(component);
+        await this.#check(component, true);
       }
       const completed = this.#results[component];
       return { next: completed ? completed.checkedAt + DAY_MS : now + DAY_MS, at: now, retry: false };

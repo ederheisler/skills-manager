@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { readFileSync, readSync, writeSync } from "node:fs";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import { getSystemErrorName } from "node:util";
 import type { CommitPreview, GitBinding, PullPreview } from "./git.js";
@@ -50,6 +51,7 @@ type Op = typeof Op[keyof typeof Op];
 interface Request {
   action: "fingerprint" | "commit" | "pull" | "recover";
   binding: GitBinding;
+  root: string;
   approvedIdentity: string;
   preview?: CommitPreview;
   pullPreview?: PullPreview;
@@ -151,11 +153,32 @@ function privateIndexPath(name: string): string {
 function save(journal: Journal): void {
   rpc(Op.StatePut, "", Buffer.from(JSON.stringify(journal)));
 }
+function validIdentity(value: { dev: string; ino: string } | undefined): boolean {
+  return !!value && typeof value.dev === "string" && /^[0-9]+$/.test(value.dev) &&
+    typeof value.ino === "string" && /^[0-9]+$/.test(value.ino);
+}
+function sameIdentity(a: { dev: string; ino: string }, b: { dev: string; ino: string }): boolean {
+  return validIdentity(a) && validIdentity(b) && a.dev === b.dev && a.ino === b.ino;
+}
+function validBinding(binding: GitBinding, root: string): boolean {
+  const canonical = (value: unknown): value is string =>
+    typeof value === "string" && !value.includes("\0") && path.isAbsolute(value) && path.resolve(value) === value;
+  if (!binding || !canonical(root) || !canonical(binding.repositoryRoot) ||
+      !canonical(binding.gitDir) || !canonical(binding.commonDir) ||
+      !validIdentity(binding.root) || !validIdentity(binding.repositoryIdentity) ||
+      !validIdentity(binding.gitEntry) || !validIdentity(binding.gitDirIdentity) ||
+      !validIdentity(binding.commonDirIdentity) || typeof binding.prefix !== "string") return false;
+  const relative = path.relative(binding.repositoryRoot, root);
+  return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`) &&
+    relative.split(path.sep).join("/") === binding.prefix &&
+    (relative !== "" || sameIdentity(binding.root, binding.repositoryIdentity));
+}
 function equalBinding(a: GitBinding, b: GitBinding): boolean {
-  const same = (x: { dev: string; ino: string }, y: { dev: string; ino: string }) => x?.dev === y?.dev && x?.ino === y?.ino;
-  return !!a && !!b && same(a.root, b.root) && same(a.gitEntry, b.gitEntry) &&
-    a.gitDir === b.gitDir && same(a.gitDirIdentity, b.gitDirIdentity) &&
-    a.commonDir === b.commonDir && same(a.commonDirIdentity, b.commonDirIdentity);
+  return !!a && !!b && sameIdentity(a.root, b.root) &&
+    a.repositoryRoot === b.repositoryRoot && sameIdentity(a.repositoryIdentity, b.repositoryIdentity) &&
+    a.prefix === b.prefix && sameIdentity(a.gitEntry, b.gitEntry) &&
+    a.gitDir === b.gitDir && sameIdentity(a.gitDirIdentity, b.gitDirIdentity) &&
+    a.commonDir === b.commonDir && sameIdentity(a.commonDirIdentity, b.commonDirIdentity);
 }
 function validOid(value: unknown): value is string {
   return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value);
@@ -163,10 +186,26 @@ function validOid(value: unknown): value is string {
 function validHash(value: unknown): value is string | null {
   return value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
 }
-function validWorktreePath(value: unknown): value is string {
+function validWorktreePath(value: unknown, foldCase = true): value is string {
   return typeof value === "string" && value.length > 0 && !value.startsWith("/") && !value.includes("\0") &&
-    value.split("/").every((part) => part !== "" && part !== "." && part !== ".." &&
-      part.toLowerCase() !== ".git" && part.toLowerCase() !== ".skills-manager");
+    value.split("/").every((part) => {
+      const name = foldCase ? part.toLowerCase() : part;
+      return part !== "" && part !== "." && part !== ".." && name !== ".git" && name !== ".skills-manager";
+    });
+}
+function repositoryPath(binding: GitBinding, file: string): string {
+  return binding.prefix ? `${binding.prefix}/${file}` : file;
+}
+function skillsPath(binding: GitBinding, file: string): string {
+  const prefix = binding.prefix ? `${binding.prefix}/` : "";
+  if (!file.startsWith(prefix)) {
+    throw new Error(`Incoming Git change is outside the selected skills directory: ${JSON.stringify(file)}`);
+  }
+  const relative = file.slice(prefix.length);
+  if (!validWorktreePath(relative, false)) {
+    throw new Error(`Incoming Git change has an invalid or outside selected skill path: ${JSON.stringify(file)}`);
+  }
+  return relative;
 }
 function refLockContents(bytes: Buffer): (Buffer | null)[] {
   let offset = 0;
@@ -235,7 +274,7 @@ function loadJournal(request: Request, op: Op = Op.StateRead): Journal | null {
   try { journal = JSON.parse(bytes.toString("utf8")) as Journal; }
   catch { throw new Error("The pending Git transaction journal is invalid; preserve it for manual recovery"); }
   if (!journal || journal.version !== 1 || !/^[a-f0-9]{32}$/.test(journal.id) ||
-      journal.approvedIdentity !== request.approvedIdentity || !equalBinding(journal.binding, request.binding) ||
+      journal.approvedIdentity !== request.approvedIdentity || !validBinding(journal.binding, request.root) || !equalBinding(journal.binding, request.binding) ||
       !(journal.branch === null || (typeof journal.branch === "string" && journal.branch.length > 0 && !/[\s\0]/.test(journal.branch))) ||
       !(journal.head === null || validOid(journal.head)) || !validOid(journal.newOid) ||
       !validHash(journal.oldIndex) || !validHash(journal.newIndex) ||
@@ -247,7 +286,7 @@ function loadJournal(request: Request, op: Op = Op.StateRead): Journal | null {
       !(journal.lock === null || (journal.lockId !== null && typeof journal.lock === "string" && /^[0-9a-f]{32}$/.test(journal.lock))) ||
       !(journal.refLock === undefined || validPullRefLock(journal.refLock, journal.newOid, journal.branch)) ||
       !(journal.mode === undefined ? journal.pull === undefined : journal.mode === "pull" && validPullState(journal))) {
-    throw new Error("The pending Git transaction does not match the approved repository; preserve it for manual recovery");
+    throw new Error("The pending Git transaction journal is invalid, from an older version, or does not match the approved repository. Preserve the journal, Git index, and transaction files; do not delete or reinitialize them, and inspect them manually before retrying");
   }
   return journal;
 }
@@ -297,11 +336,11 @@ const gitConfig = [
 ];
 const filterConfig: string[] = [];
 function gitProcess(args: string[], extra: NodeJS.ProcessEnv = {}): ChildProcessWithoutNullStreams {
-  // FD 6 is intentionally not inherited by Git; 3-5 keep the reviewed
-  // directories alive for the Linux /proc/self/fd Git environment.
+  // FD 6 is intentionally not inherited by Git. On Linux, FD 7 pins the
+  // repository root used by GIT_WORK_TREE; 3-5 pin the other capabilities.
   return spawn(git, [...gitConfig, ...filterConfig, ...args], {
     env: { ...process.env, ...extra },
-    stdio: ["pipe", "pipe", "pipe", 3, 4, 5],
+    stdio: process.platform === "linux" ? ["pipe", "pipe", "pipe", 3, 4, 5, "ignore", 7] : ["pipe", "pipe", "pipe", 3, 4, 5],
   }) as ChildProcessWithoutNullStreams;
 }
 async function runGitBytes(args: string[], input?: Buffer, extra: NodeJS.ProcessEnv = {}): Promise<{ stdout: Buffer; stderr: string; code: number }> {
@@ -437,7 +476,7 @@ async function releaseRecordedRefLocks(journal: Journal): Promise<void> {
 
 function validateCommit(request: Request): asserts request is Request & { preview: CommitPreview; newOid: string; entries: TransactionEntry[] } {
   const { preview, entries, newOid } = request;
-  if (!preview || !equalBinding(preview.binding, request.binding) || !validOid(newOid) || !Array.isArray(entries) ||
+  if (!preview || preview.root !== request.root || !equalBinding(preview.binding, request.binding) || !validOid(newOid) || !Array.isArray(entries) ||
       !(preview.head === null || (validOid(preview.head) && preview.head.length === newOid.length)) ||
       !(preview.branch === null || (typeof preview.branch === "string" && preview.branch.length > 0 && !/[\s\0]/.test(preview.branch))) ||
       !validHash(preview.indexFingerprint) || !Array.isArray(preview.paths) || preview.paths.length !== entries.length) {
@@ -445,8 +484,7 @@ function validateCommit(request: Request): asserts request is Request & { previe
   }
   const selected = new Set(preview.paths);
   if (selected.size !== preview.paths.length || entries.some((entry) => !entry || !selected.delete(entry.path) ||
-    typeof entry.path !== "string" || !entry.path || entry.path.startsWith("/") || entry.path.includes("\0") ||
-    entry.path.split("/").some((part) => !part || part === "." || part === ".." || part === ".git" || part === ".skills-manager") ||
+    !validWorktreePath(entry.path, false) ||
     (entry.mode === null ? entry.oid !== null : !["100644", "100755", "120000"].includes(entry.mode) || !validOid(entry.oid) || entry.oid.length !== newOid.length))) {
     throw new Error("The transaction entries do not match the approved skill paths");
   }
@@ -455,7 +493,7 @@ async function updatePrivateIndex(journal: Journal, entries: TransactionEntry[],
   const deletions = entries.filter((entry) => entry.mode === null);
   try {
     if (deletions.length) {
-      const input = Buffer.concat(deletions.map((entry) => Buffer.from(`0 ${"0".repeat(oidLength)}\t${entry.path}\0`)));
+      const input = Buffer.concat(deletions.map((entry) => Buffer.from(`0 ${"0".repeat(oidLength)}\t${repositoryPath(journal.binding, entry.path)}\0`)));
       await rewritePrivateIndex(journal, indexName, ["update-index", "-z", "--index-info"], input);
     }
     // --index-info implicitly enables --replace, which can discard an
@@ -464,7 +502,7 @@ async function updatePrivateIndex(journal: Journal, entries: TransactionEntry[],
     let bytes = 0;
     for (const entry of entries) {
       if (entry.mode === null) continue;
-      const value = `${entry.mode},${entry.oid},${entry.path}`;
+      const value = `${entry.mode},${entry.oid},${repositoryPath(journal.binding, entry.path)}`;
       const size = Buffer.byteLength(value) + 13;
       if (bytes && bytes + size > 65536) {
         await rewritePrivateIndex(journal, indexName, args);
@@ -576,15 +614,16 @@ function rootChildren(file: string): string[] {
   }
   return names;
 }
-async function treeEntries(commit: string, changed: Set<string>): Promise<Map<string, TreeEntry>> {
+async function treeEntries(commit: string, changed: Map<string, string>): Promise<Map<string, TreeEntry>> {
   const output = decodeUtf8(await requiredGitBytes(["ls-tree", "-r", "-z", "--full-tree", commit]));
   const records = output.split("\0");
   if (records.pop() !== "") throw new Error("Invalid Git tree listing");
   const result = new Map<string, TreeEntry>();
   for (const record of records) {
     const tab = record.indexOf("\t");
-    const file = record.slice(tab + 1);
-    if (!changed.has(file)) continue;
+    const repositoryFile = record.slice(tab + 1);
+    const file = changed.get(repositoryFile);
+    if (file === undefined) continue;
     const match = /^([0-7]{6}) blob ([a-f0-9]{40}|[a-f0-9]{64})$/.exec(record.slice(0, tab));
     if (tab < 0 || !match || !validWorktreePath(file) ||
         !["100644", "100755", "120000"].includes(match[1]) || result.has(file)) {
@@ -613,18 +652,36 @@ interface PullPlan {
   directories: string[];
   incoming: Map<string, TreeEntry>;
 }
+async function requirePullScope(binding: GitBinding, head: string, target: string): Promise<void> {
+  const ancestor = await runGit(["merge-base", "--is-ancestor", head, target]);
+  if (ancestor.code !== 0) throw new Error(ancestor.stderr.trim() || "Pull is not a fast-forward");
+  const commits = (await requiredGit(["rev-list", "--reverse", "--topo-order", `${head}..${target}`]))
+    .split("\n").filter(Boolean);
+  for (const commit of commits) {
+    if (!validOid(commit) || commit.length !== head.length) throw new Error("Invalid incoming Git commit");
+    const output = decodeUtf8(await requiredGitBytes([
+      "diff-tree", "--root", "-m", "-r", "--no-commit-id", "--no-renames",
+      "--no-ext-diff", "--no-textconv", "--no-relative", "--ignore-submodules=none", "--name-only", "-z", commit,
+    ]));
+    const files = output.split("\0");
+    if (files.pop() !== "") throw new Error("Invalid incoming Git commit path listing");
+    for (const file of files) skillsPath(binding, file);
+  }
+}
 async function planPull(preview: PullPreview, indexName: string): Promise<PullPlan> {
   if (!Array.isArray(preview.paths) || preview.paths.some((file) => !validWorktreePath(file)) ||
       new Set(preview.paths).size !== preview.paths.length) throw new Error("Invalid approved pull paths");
   const output = decodeUtf8(await requiredGitBytes([
-    "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", preview.head, preview.target,
+    "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative", "--ignore-submodules=none",
+    "--name-only", "-z", preview.head, preview.target,
   ]));
-  const paths = output.split("\0");
-  if (paths.pop() !== "") throw new Error("Invalid Git pull path listing");
-  if (JSON.stringify([...paths].sort()) !== JSON.stringify([...preview.paths].sort())) {
+  const repositoryPaths = output.split("\0");
+  if (repositoryPaths.pop() !== "") throw new Error("Invalid Git pull path listing");
+  const changed = new Map(repositoryPaths.map((file) => [file, skillsPath(preview.binding, file)]));
+  const paths = [...changed.values()];
+  if (changed.size !== repositoryPaths.length || JSON.stringify([...paths].sort()) !== JSON.stringify([...preview.paths].sort())) {
     throw new Error("The incoming paths changed since the pull preview");
   }
-  const changed = new Set(paths);
   const before = await treeEntries(preview.head, changed);
   const incoming = await treeEntries(preview.target, changed);
   if (paths.some((file) => !before.has(file) && !incoming.has(file))) {
@@ -635,7 +692,7 @@ async function planPull(preview: PullPreview, indexName: string): Promise<PullPl
   for (const [file, entry] of before) {
     const snapshot = rootSnapshot(file);
     if (!snapshot || snapshot.kind !== kindForMode(entry.mode) ||
-        !snapshot.content.equals(await blobContent(entry, file, indexName))) {
+        !snapshot.content.equals(await blobContent(entry, repositoryPath(preview.binding, file), indexName))) {
       throw new Error(`Pull would overwrite local changes at ${JSON.stringify(file)}`);
     }
     const node = nodeFromSnapshot(file, `o${removals.length.toString(36)}`, snapshot);
@@ -892,6 +949,9 @@ async function recover(request: Request): Promise<{ message: string | null; comm
     if (!journal) return { message: "Interrupted Git journal staging was safely recovered.", committed: false };
   }
   if (!journal) return { message: null, committed: false };
+  if (journal.mode === "pull" && journal.phase === "prepared") {
+    await requirePullScope(journal.binding, journal.head!, journal.newOid);
+  }
   await releaseRecordedRefLocks(journal);
   if (journal.mode === "pull") return recoverPull(journal);
   if (journal.phase === "committed" || journal.phase === "started") {
@@ -1026,7 +1086,7 @@ async function commit(request: Request): Promise<null> {
 }
 async function pull(request: Request): Promise<null> {
   const preview = request.pullPreview;
-  if (!preview || !equalBinding(preview.binding, request.binding) ||
+  if (!preview || preview.root !== request.root || !equalBinding(preview.binding, request.binding) ||
       typeof preview.branch !== "string" || !preview.branch || /[\s\0]/.test(preview.branch) ||
       !validOid(preview.head) || !validOid(preview.target) || preview.head.length !== preview.target.length) {
     throw new Error("Invalid approved Git pull transaction");
@@ -1037,6 +1097,7 @@ async function pull(request: Request): Promise<null> {
   if (loadJournal(request) || loadJournal(request, Op.StateTempRead) || loadJournal(request, Op.StateDeleteRead)) {
     throw new Error("Recover the pending Git transaction before pulling");
   }
+  if (preview.head !== preview.target) await requirePullScope(request.binding, preview.head, preview.target);
   const journal: Journal = {
     version: 1, mode: "pull", id: randomBytes(16).toString("hex"), approvedIdentity: request.approvedIdentity,
     binding: request.binding, branch: preview.branch, head: preview.head, newOid: preview.target,
@@ -1060,8 +1121,6 @@ async function pull(request: Request): Promise<null> {
       cleanup(journal);
       return null;
     }
-    const ancestor = await runGit(["merge-base", "--is-ancestor", preview.head, preview.target]);
-    if (ancestor.code !== 0) throw new Error(ancestor.stderr.trim() || "Pull is not a fast-forward");
     if (original !== null) {
       journal.backupIdentity = identityHex(rpc(Op.PrivatePut, privateName(journal, "backup"), original));
       save(journal);
@@ -1101,7 +1160,7 @@ async function pull(request: Request): Promise<null> {
     };
     for (const directory of plan.directories) add(directory, 4, Buffer.alloc(0));
     for (const [file, entry] of plan.incoming) {
-      add(file, kindForMode(entry.mode), await blobContent(entry, file, indexName, preview.target));
+      add(file, kindForMode(entry.mode), await blobContent(entry, repositoryPath(preview.binding, file), indexName, preview.target));
     }
     journal.phase = "prepared";
     save(journal);
@@ -1131,6 +1190,10 @@ async function pull(request: Request): Promise<null> {
 async function main(): Promise<void> {
   if (!git || !git.startsWith("/")) throw new Error("A trusted absolute Git executable is required");
   const request = JSON.parse(readFileSync(0, "utf8")) as Request;
+  if (!request || !validBinding(request.binding, request.root) ||
+      typeof request.approvedIdentity !== "string" || !/^[a-f0-9]{64}$/.test(request.approvedIdentity)) {
+    throw new Error("Invalid approved Git repository binding");
+  }
   let result: unknown;
   switch (request.action) {
     case "fingerprint": result = digest(maybeRpc(Op.IndexRead)); break;

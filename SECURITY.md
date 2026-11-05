@@ -14,7 +14,7 @@ The [release plan](docs/superpowers/plans/2026-11-03-portable-open-source-releas
 
 The package preflight is designed to reject unreviewed root `README`, `LICENSE`, `LICENCE`, and `COPYING` variants that npm would otherwise include despite the allowlist. It also rejects TypeScript output and build identity targets with multiple hard links, which can expose another file to a build write.
 
-The app reads skills as untrusted data. It must not execute frontmatter, infer ownership from a missing lock, or use a containing repository for Git actions. Remote preparation requires an operating-system boundary. If that boundary is unavailable, the app must refuse the action.
+The app reads skills as untrusted data. It must not execute frontmatter or infer ownership from a missing lock. Git actions can use an existing containing repository under the boundaries below. Remote preparation requires an operating-system boundary. If that boundary is unavailable, the app must refuse the action.
 
 ## Threat model
 
@@ -38,19 +38,17 @@ Review exact paths before approving a change. Enable and disable move only the s
 
 The app refuses unsafe paths, collisions, stale previews, and operations for which it cannot establish the filesystem boundary. The reserved `.skills-manager` directory holds locks, operation records, and recovery data. An unrelated directory at that location is a collision, not permission to take it over. Do not remove recovery data to clear an error. Follow the displayed recovery state first. A completed deletion is irreversible after recovery cleanup. The app does not present multi-file operations as atomic.
 
-## Git and backup
+## Git and remote actions
 
 Optional Git actions require Git 2.48 or later. Commits and pulls require Git's `files` ref backend and refuse `reftable` repositories.
 
-Local skills work without Git. Onboarding offers Git initialization and remote backup separately. Both default to skip. App Git actions require the selected skills directory to be the actual repository root. A containing repository does not qualify. The app does not change a parent's index, ignore files, or Git configuration.
+Local skills work without Git. An existing repository at or above the selected directory needs no Git setup during onboarding. Startup opens the browse view. The app never automatically initializes Git, commits, changes a remote, or pushes.
 
-If the parent tracks selected files, initialization is blocked. For an untracked directory inside a parent repository, arrange a parent exclusion manually before approving leaf initialization. See the [parent repository procedure](docs/superpowers/plans/2026-11-03-portable-open-source-release.md#git-safety).
+Skill file writes and local commits are limited to the selected skills directory. Commit previews list the exact skill paths. Unrelated staged and unstaged files and transient recovery data stay outside the commit. The app does not add exclusions or untrack files.
 
-A commit preview lists the exact skill paths. Unrelated staged files and transient recovery data are not part of the commit. Initialization, first commit, remote configuration, and push require separate approvals.
+Push is an explicit action in Git view. A push sends branch history for the entire repository, including commits outside the selected skills directory. Push does not preserve uncommitted files. Review the actual repository, redacted destination, branch, upstream, and history before approval. Create a remote outside the app and make sure that its provider grants access only to the intended readers. Git cannot determine destination privacy from a URL. The app does not create provider repositories, change their visibility, or overwrite existing remotes.
 
-Create a private remote outside the app. The app does not create provider repositories or change their visibility. Before a backup, review the redacted destination, branch, upstream, and all outgoing commits. Make sure that the provider grants access only to the intended readers. Git cannot determine destination privacy from a URL.
-
-Push and pull reviews require complete, original history. Shallow repositories and legacy grafts are refused. Resolve those conditions outside the app before retrying. The push review includes all reachable history, not just newly transferred commits. The app never force-pushes. Declining Git setup or a failed remote action leaves local skills available.
+Push and pull reviews require complete, original history. Shallow repositories and legacy grafts are refused. Resolve those conditions outside the app before retrying. The push review includes all reachable history, not just newly transferred commits. The app never force-pushes. Pull is fast-forward only and is refused if incoming changes reach outside the selected skills directory. A declined or failed remote action leaves local skills available.
 
 ## Application and CLI updates
 
@@ -58,11 +56,11 @@ The Application updates menu offers separate checks for skills-manager and the V
 
 Explicit opt-in starts a check and permits later daily checks for that component and host. With permission on and no completed result, startup checks even when an older attempt timestamp exists. The menu shows when a check is in progress.
 
-A manual check authorizes one bounded request and does not enable automatic checks. The app check contacts `https://api.github.com/repos/ederheisler/skills-manager/commits/main`. The CLI check contacts the configured npm registry, which defaults to `registry.npmjs.org`. Each host sees the IP address of the connection.
+Each intentional opening of Application updates authorizes an immediate check of both components, even when automatic checks are off. Pressing `c` starts another check for the selected component without confirmation. These actions authorize one-shot requests and do not enable startup or background checks. The app check contacts `https://api.github.com/repos/ederheisler/skills-manager/commits/main`. The CLI check contacts the configured npm registry, which defaults to `registry.npmjs.org`. Each host sees the IP address of the connection.
 
 npm can protect a registry URL with embedded credentials in a user or global `.npmrc`. When the app cannot resolve that origin, CLI checks and the update handoff are unavailable, and automatic CLI checks stay off. GitHub app checks remain available. A credentialed `npm_config_registry` environment override is supported. The app does not display or silently discard credentials.
 
-Consent for one host does not authorize checks on the other. Neither check authorizes an update. Ordinary quit does not start an update.
+Persistent consent for one host does not authorize automatic checks on the other. Neither check authorizes an update. Ordinary quit does not start an update.
 
 The app stores explicit consent in configuration and completed check results in a private cache, outside the selected skills directory. The cache stores the checked commit or version, or a sanitized error, with its check time. It does not store registry credentials or a saved current-status verdict. Invalid, unreadable, or unwritable consent fails closed. If saving an opt-out fails, automatic checks stop in the current session, but an earlier saved opt-in can apply on a later launch. The app reports the save failure.
 

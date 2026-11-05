@@ -44,12 +44,28 @@ describe("skill Git status", () => {
     ].sort());
   });
 
-  it("reports no repository and a containing repository as errors rather than zero changes", async () => {
+  it("reports a missing repository as an error rather than zero changes", async () => {
     const selected = path.join(sandbox, "selected");
     await mkdir(selected);
-    await expect(countGitStatusLines(selected)).rejects.toThrow(/not a Git repository/i);
-    git(sandbox, "init");
-    await expect(countGitStatusLines(selected)).rejects.toThrow(/top-level/i);
+    await expect(countGitStatusLines(selected)).rejects.toThrow(/repository/i);
+  });
+
+  it("counts changed selected skills, not unrelated changes in a containing repository", async () => {
+    const selected = path.join(sandbox, "selected");
+    const skill = path.join(selected, "alpha", "SKILL.md");
+    await mkdir(path.dirname(skill), { recursive: true });
+    git(sandbox, "init", "-b", "trunk");
+    git(sandbox, "config", "user.name", "Fixture");
+    git(sandbox, "config", "user.email", "fixture@example.invalid");
+    await writeFile(skill, "---\nname: alpha\n---\nbase\n");
+    await writeFile(path.join(sandbox, "outside"), "base\n");
+    git(sandbox, "add", "selected/alpha/SKILL.md", "outside");
+    git(sandbox, "commit", "-m", "base");
+    expect(await countGitStatusLines(selected)).toBe(0);
+    await writeFile(skill, "---\nname: alpha\n---\nchanged\n");
+    await writeFile(path.join(sandbox, "outside"), "unrelated change\n");
+    expect(await countGitStatusLines(selected)).toBe(1);
+    expect((await getStatus(selected)).map((entry) => entry.path)).toEqual(["alpha/SKILL.md"]);
   });
 
   it("keeps deleted files of previously tracked skills visible", async () => {

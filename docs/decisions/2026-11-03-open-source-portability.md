@@ -12,9 +12,9 @@ The original [design](../superpowers/specs/2026-09-16-skills-manager-design.md) 
 - Keep the name and executable `skills-manager`. Make the project open source.
 - Support macOS and Linux. Windows is out of scope.
 - Use `~/.agents/skills` as the default skills directory. Adopt an explicitly selected directory in place without forced relocation or merging.
-- Keep disabled entries in `.disabled_skills` inside the selected skills directory. Make that directory itself the optional Git repository root.
-- Offer Git initialization as an explicit action. Support local skills without a Git repository. Do not use a containing repository as the app's storage repository.
-- Suggest an optional remote push for backup during onboarding. Local Git setup and remote backup are separate choices, both skipped by default. A backup is not public publishing.
+- Keep disabled entries in `.disabled_skills` inside the selected skills directory.
+- Support local skills without Git. Use an existing repository at or above the selected directory without Git setup during onboarding. If no repository exists, Git initialization is explicit.
+- Push only through an explicit action in Git view. Push sends whole-branch history, not uncommitted files. See the [existing repository choice](#existing-repository-choice).
 - Manage skills only. The previous decision to offer shared global instructions is superseded. Instruction files and their sharing are out of scope.
 - Use the MIT license. The required rights and copyright were confirmed, and the distribution includes third-party notices.
 - Protect existing files and links. Do not use personal machine paths or personal setup assumptions.
@@ -27,7 +27,7 @@ The choices below replace the corresponding open choices in the reviewed plan. T
 
 The project must work for other users and machines without disrupting existing skills, files, or links. A Git repository for skill storage must not be a prerequisite.
 
-The selected skills directory is the repository boundary because the app manages skills, not the surrounding harness. A containing repository remains under its owner's control. The [release plan](../superpowers/plans/2026-11-03-portable-open-source-release.md#git-safety) explains the nested-repository and consent boundaries.
+The original decision made the selected skills directory the repository boundary because the app manages skills, not the surrounding harness. A containing repository remained under its owner's control. [Existing repository choice](#existing-repository-choice) supersedes the leaf-only boundary while retaining scoped writes.
 
 MIT is a permissive license. The copyright name is `Eder Heisler`.
 
@@ -91,9 +91,25 @@ The user chose to persist completed setup. The implementation saves it in `$XDG_
 
 This supersedes the [update plan's original repeat-onboarding requirement](../superpowers/plans/2026-11-05-in-app-updates.md#3-add-review-and-guarded-handoff).
 
-Saved setup does not grant approval for later writes, Git initialization, backup, or other actions. It does not change the separate app and CLI update consent in `app.json` and `cli.json`, or the startup network policy.
+Saved setup does not grant approval for later writes, Git initialization, push, or other actions. It does not change the separate app and CLI update consent in `app.json` and `cli.json`, or the startup network policy.
 
 Valid existing Vercel installer lock entries can provide source tracking and version checks without skills-manager receipts. The recorded baseline is not proof of ownership, prior review, or unchanged local files. Version checks compare upstream with that baseline, not with current local content. Browsing and checking do not rewrite installer locks or create receipts. Replacement still requires review and the existing path and source safeguards.
+
+## Existing repository choice
+
+Date: 2026-11-05
+
+The user explicitly chose to use an existing repository that contains the selected skills directory. This supersedes the original leaf-only Git restriction and onboarding push suggestion. Existing repositories at the selected directory or above it need no Git setup during onboarding. Ordinary startup opens the browse view.
+
+Skill file writes and local commits remain scoped to the selected skills directory. Unrelated staged and unstaged files must remain intact. The app must not automatically initialize Git, commit, change a remote, push, add exclusions, or untrack files.
+
+Push is explicit in Git view. The review must show the actual repository, destination, and history scope. A push sends whole-branch history, including commits outside the selected skills directory. It does not preserve uncommitted files. Pull must refuse incoming changes outside the selected directory.
+
+## Browse category labels
+
+Date: 2026-11-05
+
+The user reported confusion about unknown, local, and source labels. In response, the app uses All, From a repo, and Local for browse categories, with repo and local badges. Local groups skills without a recorded remote association, including internally unknown and local origins. It does not assert authorship. Authorship remains separate and can be unknown. This presentation does not change provenance, scanning, or permission rules.
 
 ## Automated releases
 
@@ -125,7 +141,15 @@ The latest-main installation, automated releases, and main-branch protection dec
 
 Date: 2026-11-05
 
-The user chose update controls that match the main view's colored letter controls. Enter must not enable automatic checks. Approval requires `y` or an intentional click. App and CLI update actions remain available without an available version or a prior check. The screen must not use fake `unknown` or `latest` placeholders.
+Update controls use colored shortcuts consistent with the main view. Enter controls automatic checks, not `a`. If automatic checks are off, Enter opens a separate consent prompt. Only `y` or an intentional click enables checks. If checks are on, Enter disables them. App and CLI update actions remain available without an available version or a prior check. The screen must not use fake `unknown` or `latest` placeholders.
+
+The user explicitly chose immediate checks for both components whenever the updates screen opens, even with automatic checks off. Opening the screen authorizes those one-shot requests. Pressing `c` directly authorizes another check for the selected component. Foreground checks do not wait for a daily interval or enable automatic checks. Progress, results, and errors appear inline.
+
+The user rejected `n` as a redundant cancel control in all confirmations. Escape is the sole visible cancel action, and `n` does not cancel. Confirmation labels identify the specific action instead of using a generic label.
+
+The CLI refresh and application update confirmations remain separate. The CLI refresh confirmation stays short and discloses network access and trust in executed code. It explains that a known, clean, reproducible app commit and the selected root are kept across restart. An unknown, dirty, or nonreproducible build requires an explicit switch to `main`. The [security policy](../../SECURITY.md#application-and-cli-updates) retains the details, including normal permissions for scripts.
+
+The normal updates menu does not offer a recovery command action. If an update fails or is unavailable, the app can show the installation command to start it again. Helper recovery state and failure handling remain in place.
 
 Automatic checks remain off by default, with separate permission for each host scope. The user requested a check when permission is valid but no completed result exists, even if an old attempt was recorded. Completed results persist. The implementation stores these results in a private, host-scoped cache. A new approval starts a check and permits later daily checks.
 

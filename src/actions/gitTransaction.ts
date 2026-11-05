@@ -3,6 +3,7 @@ import type { ApprovedSkillsRoot } from "./boundary.js";
 import { runConfinedNodeWorker } from "./gitBoundary.js";
 import type { CommitPreview, GitBinding, PullPreview } from "./git.js";
 
+/** Paths are relative to the selected skills directory, not the Git repository. */
 export interface TransactionEntry {
   path: string;
   mode: string | null;
@@ -12,6 +13,7 @@ export interface TransactionEntry {
 interface WorkerRequest {
   action: "fingerprint" | "commit" | "pull" | "recover";
   binding: GitBinding;
+  root: string;
   approvedIdentity: string;
   preview?: CommitPreview;
   pullPreview?: PullPreview;
@@ -19,7 +21,7 @@ interface WorkerRequest {
   entries?: TransactionEntry[];
 }
 
-type Operation = Omit<WorkerRequest, "binding" | "approvedIdentity">;
+type Operation = Omit<WorkerRequest, "binding" | "approvedIdentity" | "root">;
 async function worker(
   approved: ApprovedSkillsRoot,
   binding: GitBinding,
@@ -34,8 +36,10 @@ async function worker(
     .join(path.delimiter) || "/dev/null";
   const result = await runConfinedNodeWorker(approved.path, {
     env: { ...env, PATH: executablePath, LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_ATTR_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", GIT_NO_REPLACE_OBJECTS: "1", GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" },
-    input: Buffer.from(JSON.stringify({ ...request, binding, approvedIdentity: approved.identity })),
+    input: Buffer.from(JSON.stringify({ ...request, root: approved.path, binding, approvedIdentity: approved.identity })),
     expectedRoot: { ...binding.root, identity: approved.identity },
+    repositoryRoot: binding.repositoryRoot,
+    expectedRepositoryRoot: binding.repositoryIdentity,
     gitDir: binding.gitDir,
     expectedGitDir: binding.gitDirIdentity,
     expectedGitEntry: binding.gitEntry,

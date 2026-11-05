@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { lstat, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,7 +28,17 @@ export interface GitDiscovery {
 }
 export interface GitStatusEntry { path: string; status: string }
 export interface GitFileIdentity { dev: string; ino: string }
-export interface GitBinding { root: GitFileIdentity; gitEntry: GitFileIdentity; gitDir: string; gitDirIdentity: GitFileIdentity; commonDir: string; commonDirIdentity: GitFileIdentity }
+export interface GitBinding {
+  root: GitFileIdentity;
+  repositoryRoot: string;
+  repositoryIdentity: GitFileIdentity;
+  prefix: string;
+  gitEntry: GitFileIdentity;
+  gitDir: string;
+  gitDirIdentity: GitFileIdentity;
+  commonDir: string;
+  commonDirIdentity: GitFileIdentity;
+}
 export interface InitializePreview { root: string; parent: string | null; parentTracked: boolean; parentExcluded: boolean; exclusionFile: string | null; rootIdentity: GitFileIdentity; fingerprint: string }
 export interface RemotePreview { root: string; name: string; url: string; gitDir: string; commonDir: string; binding: GitBinding; fingerprint: string }
 export interface CommitPreview { root: string; paths: string[]; blockingPaths: string[]; head: string | null; branch: string | null; binding: GitBinding; indexFingerprint: string | null; fingerprint: string }
@@ -85,15 +95,76 @@ function validateRemoteTransport(url: string): void {
   }
 }
 
+function readGitReference(file: string): string {
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size < 1 || info.size > 65536) throw new Error("Invalid Git metadata reference");
+    const bytes = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (!count) throw new Error("Incomplete Git metadata reference");
+      offset += count;
+    }
+    const value = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes).replace(/\r?\n$/, "");
+    if (!value || /[\r\n\0]/.test(value)) throw new Error("Invalid Git metadata reference");
+    return value;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function untrustedGitDirectories(root: string): string[] {
+  const blocked = [root];
+  // Discovery itself must not execute a Git binary supplied by a containing
+  // repository or its linked metadata before Git has reported the top level.
+  for (let directory = root; ; directory = path.dirname(directory)) {
+    const entry = path.join(directory, ".git");
+    try {
+      lstatSync(entry);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        if (path.dirname(directory) === directory) break;
+        continue;
+      }
+      throw error;
+    }
+    blocked.push(directory);
+    const resolved = realpathSync(entry);
+    const info = statSync(resolved);
+    let gitDir: string;
+    if (info.isDirectory()) gitDir = resolved;
+    else {
+      const reference = readGitReference(resolved);
+      if (!reference.startsWith("gitdir: ")) throw new Error("Invalid Git directory reference");
+      gitDir = realpathSync(path.resolve(directory, reference.slice(8)));
+    }
+    blocked.push(gitDir);
+    let common: string | null = null;
+    try { common = readGitReference(path.join(gitDir, "commondir")); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (common !== null) blocked.push(realpathSync(path.resolve(gitDir, common)));
+    if (path.dirname(directory) === directory) break;
+  }
+  return blocked;
+}
+
 function environment(root: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")));
+  const blocked = untrustedGitDirectories(root);
   const executablePath = (env.PATH ?? "").split(path.delimiter)
     .filter((entry) => {
       if (!entry || !path.isAbsolute(entry)) return false;
       try {
         const directory = realpathSync(entry);
-        if (inside(directory, root)) return false;
-        try { return !inside(realpathSync(path.join(directory, "git")), root); }
+        if (blocked.some((base) => inside(directory, base))) return false;
+        try {
+          const executable = realpathSync(path.join(directory, "git"));
+          return !blocked.some((base) => inside(executable, base));
+        }
         catch { return true; } // The directory can still provide SSH or Git helpers.
       } catch { return false; }
     }).join(path.delimiter) || "/dev/null";
@@ -122,9 +193,10 @@ async function run(root: string, args: string[], options: { env?: NodeJS.Process
     if (options.boundary) {
       const { approved, rootIdentity, binding, remote } = options.boundary;
       const result = await runConfinedGit(root, [...config, ...overrides, ...args], {
-        env: environment(root, options.env), input: options.input,
+        env: environment(binding?.repositoryRoot ?? root, options.env), input: options.input,
         expectedRoot: { ...rootIdentity, identity: approved.identity },
         ...(binding ? {
+          repositoryRoot: binding.repositoryRoot, expectedRepositoryRoot: binding.repositoryIdentity,
           gitDir: binding.gitDir, expectedGitDir: binding.gitDirIdentity, expectedGitEntry: binding.gitEntry,
           commonDir: binding.commonDir, expectedCommonDir: binding.commonDirIdentity,
         } : {}),
@@ -222,6 +294,7 @@ export async function discoverGit(skillsDir: string): Promise<GitDiscovery> {
       throw new Error(top.stderr || "Git repository discovery failed");
     }
     const topLevel = await realpath(line(top.stdout));
+    let parentDetails: Pick<GitDiscovery, "parentTracked" | "parentExcluded" | "exclusionFile"> = {};
     if (topLevel !== root) {
       const relative = path.relative(topLevel, root).split(path.sep).join("/");
       if (!relative || relative === ".." || relative.startsWith("../")) throw new Error("Git top-level does not contain selected directory");
@@ -231,25 +304,25 @@ export async function discoverGit(skillsDir: string): Promise<GitDiscovery> {
       const ignored = await run(topLevel, ["--no-literal-pathspecs", "check-ignore", "--no-index", "-q", "--", `./${relative}/`]);
       if (ignored.exitCode !== 0 && ignored.exitCode !== 1) throw new Error(ignored.stderr || "Cannot inspect parent exclusion");
       const exclude = line(await required(topLevel, ["rev-parse", "--git-path", "info/exclude"]));
-      return { ...empty, kind: "parent", topLevel, parentTracked: tracked.length > 0, parentExcluded: ignored.exitCode === 0, exclusionFile: path.resolve(topLevel, exclude) };
+      parentDetails = { parentTracked: tracked.length > 0, parentExcluded: ignored.exitCode === 0, exclusionFile: path.resolve(topLevel, exclude) };
     }
-    const branch = await maybe(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    const head = await maybe(root, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+    const branch = await maybe(topLevel, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    const head = await maybe(topLevel, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
     const upstream = head && branch
-      ? line(await required(root, ["for-each-ref", "--format=%(upstream:short)", `refs/heads/${branch}`])) || null
+      ? line(await required(topLevel, ["for-each-ref", "--format=%(upstream:short)", `refs/heads/${branch}`])) || null
       : null;
-    const remotes = (await required(root, ["remote"])).split("\n").filter(Boolean);
-    const gitDir = await realpath(line(await required(root, ["rev-parse", "--absolute-git-dir"])));
-    const commonDir = await realpath(path.resolve(root, line(await required(root, ["rev-parse", "--git-common-dir"]))));
-    return { ...empty, kind: "leaf", topLevel, gitDir, commonDir, branch, head, upstream, remotes };
+    const remotes = (await required(topLevel, ["remote"])).split("\n").filter(Boolean);
+    const gitDir = await realpath(line(await required(topLevel, ["rev-parse", "--absolute-git-dir"])));
+    const commonDir = await realpath(path.resolve(topLevel, line(await required(topLevel, ["rev-parse", "--git-common-dir"]))));
+    return { ...empty, ...parentDetails, kind: topLevel === root ? "leaf" : "parent", topLevel, gitDir, commonDir, branch, head, upstream, remotes };
   } catch (error) {
     return { ...empty, error: redactGitUrl(error instanceof Error ? error.message : String(error)) };
   }
 }
 
-async function leaf(skillsDir: string): Promise<GitDiscovery> {
+async function repository(skillsDir: string): Promise<GitDiscovery> {
   const state = await discoverGit(skillsDir);
-  if (state.kind !== "leaf") throw new Error(state.error || (state.kind === "parent" ? "Git actions require the selected skills directory to be the repository top-level, not a parent repository" : "The selected skills directory is not a Git repository"));
+  if (state.kind !== "leaf" && state.kind !== "parent") throw new Error(state.error || "The selected skills directory is not in a Git repository");
   return state;
 }
 
@@ -258,11 +331,36 @@ async function fileIdentity(file: string, link = false): Promise<GitFileIdentity
   return { dev: info.dev.toString(), ino: info.ino.toString() };
 }
 
+function repositoryRoot(state: GitDiscovery): string {
+  if (!state.topLevel) throw new Error("Git repository root is unavailable");
+  return state.topLevel;
+}
+
+function repositoryPrefix(state: GitDiscovery): string {
+  const relative = path.relative(repositoryRoot(state), state.selectedDir).split(path.sep).join("/");
+  if (relative === ".." || relative.startsWith("../") || path.isAbsolute(relative)) throw new Error("Git repository root does not contain the selected skills directory");
+  return relative;
+}
+
+function repositoryPath(prefix: string, file: string): string {
+  validatePath(file);
+  return prefix ? `${prefix}/${file}` : file;
+}
+
+function skillPath(prefix: string, file: string): string | null {
+  if (!prefix) return file;
+  return file.startsWith(`${prefix}/`) ? file.slice(prefix.length + 1) : null;
+}
+
 async function gitBinding(state: GitDiscovery): Promise<GitBinding> {
   if (!state.gitDir || !state.commonDir) throw new Error("Git metadata location is unavailable");
+  const repo = repositoryRoot(state);
   return {
     root: await fileIdentity(state.selectedDir),
-    gitEntry: await fileIdentity(path.join(state.selectedDir, ".git"), true),
+    repositoryRoot: repo,
+    repositoryIdentity: await fileIdentity(repo),
+    prefix: repositoryPrefix(state),
+    gitEntry: await fileIdentity(path.join(repo, ".git"), true),
     gitDir: state.gitDir,
     gitDirIdentity: await fileIdentity(state.gitDir),
     commonDir: state.commonDir,
@@ -279,17 +377,15 @@ export async function recoverSkillsGit(approved: ApprovedSkillsRoot): Promise<st
   await assertApprovedSkillsRoot(approved);
   if (!(await hasIndexTransaction(approved))) return undefined;
   const state = await discoverGit(approved.path);
-  if (state.kind !== "leaf") throw new Error(state.error || "Cannot inspect Git recovery state");
+  if (state.kind !== "leaf" && state.kind !== "parent") throw new Error(state.error || "Cannot inspect Git recovery state");
   const binding = await gitBinding(state);
   return withSkillsLock(approved, () => recoverIndexTransaction(approved, binding));
 }
 
 async function initializationGuard(skillsDir: string): Promise<GitDiscovery> {
   const state = await discoverGit(skillsDir);
-  if (state.kind === "parent") {
-    if (state.parentTracked) throw new Error("Parent repository tracks selected paths; it would continue tracking them after initialization. Do not untrack automatically.");
-    if (!state.parentExcluded) throw new Error(`Arrange a directory-wide exclusion manually in the parent repository (for example ${state.exclusionFile}); a parent can otherwise stage the embedded repository as a Git link.`);
-  } else if (state.kind !== "none") {
+  if (state.kind === "parent") throw new Error("Selected directory is already in a Git repository");
+  if (state.kind !== "none") {
     throw new Error(state.error || (state.kind === "leaf" ? "Selected directory is already a Git repository" : "Cannot safely inspect selected directory"));
   }
   try { await lstat(path.join(state.selectedDir, ".git")); throw new Error("A .git entry already exists; inspect it manually before initialization"); }
@@ -323,7 +419,7 @@ export async function previewAddRemote(approved: ApprovedSkillsRoot, name: strin
   await assertApprovedSkillsRoot(approved);
   if (!name || name.startsWith("-") || /[\s\0]/.test(name)) throw new Error("Invalid remote name");
   validateRemoteTransport(url);
-  const state = await leaf(approved.path);
+  const state = await repository(approved.path);
   if (state.remotes.length !== 0) throw new Error("Remote configuration is offered only when no remote exists; existing remotes are never overwritten");
   const binding = await gitBinding(state);
   const result = { root: state.selectedDir, name, url: redactGitUrl(url), gitDir: binding.gitDir, commonDir: binding.commonDir, binding };
@@ -341,15 +437,17 @@ export async function addRemoteApproved(approved: ApprovedSkillsRoot, preview: R
   });
 }
 
-async function rootsInTree(root: string, revision: string | null): Promise<Set<string>> {
+async function rootsInTree(state: GitDiscovery, revision: string | null): Promise<Set<string>> {
   const roots = new Set<string>();
   if (!revision) return roots;
-  const entries = nul(await required(root, ["ls-tree", "-r", "-z", revision]));
+  const prefix = repositoryPrefix(state);
+  const entries = nul(await required(repositoryRoot(state), ["ls-tree", "-r", "-z", "--full-tree", revision, ...(prefix ? ["--", prefix] : [])]));
   for (const entry of entries) {
     const tab = entry.indexOf("\t");
     if (tab < 0) throw new Error("Invalid Git tree output");
     const meta = entry.slice(0, tab);
-    const file = entry.slice(tab + 1);
+    const file = skillPath(prefix, entry.slice(tab + 1));
+    if (file === null) throw new Error("Git tree returned a path outside the selected skills directory");
     const parts = file.split("/");
     if (parts[0] === ".disabled_skills" && parts.length === 3 && parts[2] === "SKILL.md") roots.add(parts.slice(0, 2).join("/"));
     else if (parts.length === 2 && parts[1] === "SKILL.md" && !parts[0].startsWith(".git") && parts[0] !== ".skills-manager") roots.add(parts[0]);
@@ -358,11 +456,11 @@ async function rootsInTree(root: string, revision: string | null): Promise<Set<s
   return roots;
 }
 
-async function currentRoots(root: string, head: string | null): Promise<Set<string>> {
-  const roots = await rootsInTree(root, head);
-  for (const skill of await scanSkills(root)) {
+async function currentRoots(state: GitDiscovery): Promise<Set<string>> {
+  const roots = await rootsInTree(state, state.head);
+  for (const skill of await scanSkills(state.selectedDir)) {
     if (!skill.path) continue;
-    const relative = path.relative(root, skill.path).split(path.sep).join("/");
+    const relative = path.relative(state.selectedDir, skill.path).split(path.sep).join("/");
     if (relative && !relative.startsWith("../")) roots.add(validatePath(relative));
   }
   return roots;
@@ -372,33 +470,37 @@ function allowed(file: string, roots: Set<string>): boolean {
   try { validatePath(file); } catch { return false; }
   return [...roots].some((root) => inside(file, root));
 }
-async function allStatus(root: string, paths: string[] = []): Promise<GitStatusEntry[]> {
-  const output = await required(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", ...(paths.length ? ["--", ...paths] : [])], { filters: true });
+async function allStatus(state: GitDiscovery, paths: string[] = []): Promise<GitStatusEntry[]> {
+  const prefix = repositoryPrefix(state);
+  const scope = paths.length ? paths.map((file) => repositoryPath(prefix, file)) : prefix ? [prefix] : [];
+  const output = await required(repositoryRoot(state), ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none", ...(scope.length ? ["--", ...scope] : [])], { filters: true });
   return nul(output).map((record) => {
     if (record.length < 4 || record[2] !== " ") throw new Error("Invalid Git status output");
-    return { status: record.slice(0, 2), path: record.slice(3) };
+    const file = skillPath(prefix, record.slice(3));
+    if (file === null) throw new Error("Git status returned a path outside the selected skills directory");
+    return { status: record.slice(0, 2), path: file };
   });
 }
 export async function getStatus(skillsDir: string): Promise<GitStatusEntry[]> {
-  const state = await leaf(skillsDir);
-  const roots = await currentRoots(state.selectedDir, state.head);
-  const entries = await allStatus(state.selectedDir, [...roots]);
+  const state = await repository(skillsDir);
+  const roots = await currentRoots(state);
+  const entries = await allStatus(state, [...roots]);
   return entries.filter((entry) => allowed(entry.path, roots));
 }
 
 export async function getFileDiff(skillsDir: string, file: string, _untracked: boolean, fullContext = false): Promise<GitResult> {
   validatePath(file);
-  const state = await leaf(skillsDir);
+  const state = await repository(skillsDir);
   if (!(await getStatus(skillsDir)).some((entry) => entry.path === file)) throw new Error("File is not a changed skill path");
   const current = await snapshot(state.selectedDir, file);
   let previous: Uint8Array | null = null;
   if (state.head) {
-    const record = nul(await required(state.selectedDir, ["ls-tree", "-z", state.head, "--", file]))[0];
+    const record = nul(await required(repositoryRoot(state), ["ls-tree", "-z", "--full-tree", state.head, "--", repositoryPath(repositoryPrefix(state), file)]))[0];
     if (record) {
       const match = /^([0-7]+) blob ([0-9a-f]+)\t/.exec(record);
       if (!match) throw new Error("Cannot diff a Git submodule or non-file entry");
       const blob = await execa("git", [...config, "cat-file", "blob", match[2]], {
-        cwd: state.selectedDir, env: environment(state.selectedDir), extendEnv: false, reject: false,
+        cwd: repositoryRoot(state), env: environment(repositoryRoot(state)), extendEnv: false, reject: false,
         encoding: "buffer", stripFinalNewline: false,
       });
       if (blob.exitCode !== 0) throw new Error(redactGitUrl(Buffer.from(blob.stderr).toString("utf8")) || "Cannot read Git blob");
@@ -412,7 +514,7 @@ export async function getFileDiff(skillsDir: string, file: string, _untracked: b
     if (previous !== null) await writeFile(oldPath, previous, { mode: 0o600 });
     if (current.data !== null) await writeFile(newPath, current.data, { mode: 0o600 });
     const context = fullContext ? ["--unified=999999"] : [];
-    const result = await run(state.selectedDir, [
+    const result = await run(repositoryRoot(state), [
       "diff", "--no-index", "--no-ext-diff", "--no-textconv", ...context, "--",
       previous === null ? "/dev/null" : oldPath, current.data === null ? "/dev/null" : newPath,
     ], { filters: true });
@@ -456,7 +558,7 @@ async function blockingAncestor(root: string, file: string, approved: ApprovedSk
 
 async function commitDetails(approved: ApprovedSkillsRoot, paths: string[]): Promise<{ preview: CommitPreview; snapshots: FileSnapshot[] }> {
   await assertApprovedSkillsRoot(approved);
-  const state = await leaf(approved.path);
+  const state = await repository(approved.path);
   const selected = [...new Set(paths.map(validatePath))].sort();
   if (!selected.length) throw new Error("Select at least one changed skill file");
   const entries = await getStatus(approved.path);
@@ -474,7 +576,7 @@ async function commitDetails(approved: ApprovedSkillsRoot, paths: string[]): Pro
     blockingPaths.add(blocker.path);
     item.identity = digest({ blocker: blocker.path, identity: blocker.identity });
   }
-  const index = await required(state.selectedDir, ["ls-files", "--stage", "-z", "--", ...selected]);
+  const index = await required(repositoryRoot(state), ["ls-files", "--stage", "-z", "--", ...selected.map((file) => repositoryPath(repositoryPrefix(state), file))]);
   const binding = await gitBinding(state);
   const indexFingerprint = await readIndexFingerprint(approved, binding);
   const sortedBlockingPaths = [...blockingPaths].sort();
@@ -488,14 +590,14 @@ export async function previewCommit(approved: ApprovedSkillsRoot, paths: string[
 
 export async function commitSelected(approved: ApprovedSkillsRoot, preview: CommitPreview, message: string): Promise<GitResult> {
   if (!message.trim()) throw new Error("A commit message is required");
-  await leaf(approved.path);
+  await repository(approved.path);
   return withSkillsLock(approved, async () => {
     await requireNoPendingRecovery(approved, preview.binding);
     const { preview: current, snapshots } = await commitDetails(approved, preview.paths);
     if (JSON.stringify(current) !== JSON.stringify(preview)) throw new Error("Commit preview changed; inspect and approve it again");
     const basename = `git-index-${randomBytes(16).toString("hex")}`;
     if (await inspectGitIndex(approved, basename) !== null) throw new Error("Temporary Git index already exists");
-    const env = { GIT_INDEX_FILE: `.skills-manager/${basename}` };
+    const env = { GIT_INDEX_FILE: path.join(current.root, ".skills-manager", basename) };
     const boundary = mutation(approved, current.binding);
     const entries: { path: string; mode: string | null; oid: string | null }[] = [];
     try {
@@ -504,14 +606,14 @@ export async function commitSelected(approved: ApprovedSkillsRoot, preview: Comm
       // transitions do not discard any unselected index entry.
       for (const item of snapshots) {
         if (item.data === null || item.mode === null) {
-          await required(current.root, ["update-index", "--force-remove", "--", item.path], { env, boundary });
+          await required(current.root, ["-C", current.binding.repositoryRoot, "update-index", "--force-remove", "--", repositoryPath(current.binding.prefix, item.path)], { env, boundary });
           entries.push({ path: item.path, mode: null, oid: null });
         }
       }
       for (const item of snapshots) {
         if (item.data !== null && item.mode !== null) {
           const oid = line(await required(current.root, ["hash-object", "-w", "--stdin"], { env, boundary, input: item.data }));
-          await required(current.root, ["update-index", "--add", "--cacheinfo", `${item.mode},${oid},${item.path}`], { env, boundary });
+          await required(current.root, ["-C", current.binding.repositoryRoot, "update-index", "--add", "--cacheinfo", `${item.mode},${oid},${repositoryPath(current.binding.prefix, item.path)}`], { env, boundary });
           entries.push({ path: item.path, mode: item.mode, oid });
         }
       }
@@ -535,8 +637,8 @@ export async function commitSelected(approved: ApprovedSkillsRoot, preview: Comm
 }
 
 async function selectedRemote(state: GitDiscovery, requested?: string): Promise<{ remote: string; remoteBranch: string | null }> {
-  const configuredRemote = state.branch ? await maybe(state.selectedDir, ["config", "--get", `branch.${state.branch}.remote`]) : null;
-  const merge = state.branch ? await maybe(state.selectedDir, ["config", "--get", `branch.${state.branch}.merge`]) : null;
+  const configuredRemote = state.branch ? await maybe(repositoryRoot(state), ["config", "--get", `branch.${state.branch}.remote`]) : null;
+  const merge = state.branch ? await maybe(repositoryRoot(state), ["config", "--get", `branch.${state.branch}.merge`]) : null;
   const remote = requested ?? (configuredRemote && configuredRemote !== "." ? configuredRemote : state.remotes.length === 1 ? state.remotes[0] : "");
   if (!remote || !state.remotes.includes(remote)) throw new Error("Select one configured remote explicitly");
   const remoteBranch = remote === configuredRemote && merge?.startsWith("refs/heads/") ? merge.slice("refs/heads/".length) : state.branch;
@@ -554,14 +656,14 @@ async function checkRef(root: string, ref: string): Promise<void> {
 
 async function fetchDetails(approved: ApprovedSkillsRoot, requestedRemote?: string, requestedBranch?: string): Promise<{ preview: FetchPreview; raw: string }> {
   await assertApprovedSkillsRoot(approved);
-  const state = await leaf(approved.path);
+  const state = await repository(approved.path);
   const selected = await selectedRemote(state, requestedRemote);
   const branch = requestedBranch ?? selected.remoteBranch;
   if (!branch) throw new Error("Select a remote branch explicitly when HEAD is detached");
-  await checkRef(state.selectedDir, `refs/heads/${branch}`);
+  await checkRef(repositoryRoot(state), `refs/heads/${branch}`);
   const destination = `refs/remotes/${selected.remote}/${branch}`;
-  await checkRef(state.selectedDir, destination);
-  const raw = await rawRemoteUrl(state.selectedDir, selected.remote, false);
+  await checkRef(repositoryRoot(state), destination);
+  const raw = await rawRemoteUrl(repositoryRoot(state), selected.remote, false);
   const fetchUrl = redactGitUrl(raw);
   const binding = await gitBinding(state);
   const preview = { root: state.selectedDir, remote: selected.remote, fetchUrl, branch, destination, binding, fingerprint: digest({ root: state.selectedDir, approved, remote: selected.remote, raw, branch, destination, binding }) };
@@ -583,12 +685,12 @@ function frozenRemote(raw: string): { alias: string; env: NodeJS.ProcessEnv } {
   } };
 }
 
-function networkEnvironment(raw: string, root: string, binding: GitBinding, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function networkEnvironment(raw: string, binding: GitBinding, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const networkEnv = { ...env, GIT_ALLOW_PROTOCOL: "file:ssh:http:https:git" };
   const ssh = /^ssh:\/\//i.test(raw) || (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) && /^[^/]+:/.test(raw));
   if (!ssh) return networkEnv;
-  const blocked = [root, binding.gitDir, binding.commonDir];
-  for (const directory of (environment(root).PATH ?? "").split(path.delimiter)) {
+  const blocked = [binding.repositoryRoot, binding.gitDir, binding.commonDir];
+  for (const directory of (environment(binding.repositoryRoot).PATH ?? "").split(path.delimiter)) {
     try {
       const executable = realpathSync(path.join(directory, "ssh"));
       if (blocked.some((item) => inside(executable, item)) || !statSync(executable).isFile()) continue;
@@ -599,16 +701,20 @@ function networkEnvironment(raw: string, root: string, binding: GitBinding, env:
       // Search the next absolute PATH entry.
     }
   }
-  throw new Error("Cannot find an executable SSH client outside the selected repository and its Git metadata");
+  throw new Error("Cannot find an executable SSH client outside the repository and its Git metadata");
 }
 export async function fetchApproved(approved: ApprovedSkillsRoot, preview: FetchPreview): Promise<GitResult> {
-  await leaf(approved.path);
+  await repository(approved.path);
   return withSkillsLock(approved, async () => {
     await requireNoPendingRecovery(approved, preview.binding);
     const { preview: now, raw } = await fetchDetails(approved, preview.remote, preview.branch);
     if (JSON.stringify(now) !== JSON.stringify(preview)) throw new Error("Fetch destination changed; inspect and approve it again");
-    const remote = frozenRemote(raw);
-    return run(now.root, ["fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--", remote.alias, `refs/heads/${now.branch}:${now.destination}`], { label: "fetch", redact: true, env: networkEnvironment(raw, now.root, now.binding, remote.env), boundary: mutation(approved, now.binding) });
+    // Relative local URLs are interpreted from the repository root even when
+    // the selected skills directory is a nested worktree path.
+    const destination = !/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) && !/^[^/]+:/.test(raw)
+      ? path.resolve(now.binding.repositoryRoot, raw) : raw;
+    const remote = frozenRemote(destination);
+    return run(now.root, ["fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--", remote.alias, `refs/heads/${now.branch}:${now.destination}`], { label: "fetch", redact: true, env: networkEnvironment(raw, now.binding, remote.env), boundary: mutation(approved, now.binding) });
   });
 }
 
@@ -626,15 +732,15 @@ async function commitHistory(root: string, range: string): Promise<GitCommit[]> 
   const commits: GitCommit[] = [];
   for (const id of ids) {
     const subject = line(await required(root, ["show", "-s", "--no-show-signature", "--format=%s", id]));
-    const files = nul(await required(root, ["diff-tree", "--root", "-m", "-r", "--no-commit-id", "--no-renames", "--no-ext-diff", "--no-textconv", "--name-only", "-z", id]));
+    const files = nul(await required(root, ["diff-tree", "--root", "-m", "-r", "--no-commit-id", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--name-only", "-z", id]));
     commits.push({ id, subject: redactGitUrl(subject), paths: [...new Set(files)].sort() });
   }
   return commits;
 }
-async function validateHistory(root: string, commits: GitCommit[], approvedPaths: string[], refs: string[]): Promise<void> {
+async function validateHistory(state: GitDiscovery, commits: GitCommit[], approvedPaths: string[], refs: string[]): Promise<void> {
   const roots = new Set<string>();
   for (const revision of [...refs, ...commits.map((commit) => commit.id)]) {
-    for (const item of await rootsInTree(root, revision)) roots.add(item);
+    for (const item of await rootsInTree(state, revision)) roots.add(item);
   }
   for (const file of commits.flatMap((commit) => commit.paths)) {
     if (!allowed(file, roots) || (approvedPaths.length && !approvedPaths.some((item) => inside(file, item)))) {
@@ -663,17 +769,20 @@ async function localBareRemote(root: string, raw: string): Promise<PushPreview["
 
 async function pushDetails(approved: ApprovedSkillsRoot, paths: string[] = [], requestedRemote?: string): Promise<{ preview: PushPreview; raw: string }> {
   await assertApprovedSkillsRoot(approved);
-  const state = await leaf(approved.path);
+  const state = await repository(approved.path);
   const selected = await branchRemote(state, requestedRemote);
   const destination = `refs/heads/${selected.remoteBranch}`;
-  await checkRef(state.selectedDir, destination);
-  const raw = await rawRemoteUrl(state.selectedDir, selected.remote, true);
-  const localRemote = await localBareRemote(state.selectedDir, raw);
+  const repo = repositoryRoot(state);
+  await checkRef(repo, destination);
+  const raw = await rawRemoteUrl(repo, selected.remote, true);
+  const localRemote = await localBareRemote(repo, raw);
   const approvedPaths = selectedPaths(paths);
   // Conservatively show all reachable commits: a remote can be rewound after a fetch.
-  const outgoing = await commitHistory(state.selectedDir, state.head!);
-  await validateHistory(state.selectedDir, outgoing, approvedPaths, [state.head!]);
-  const warning = "Check destination access with the provider; Git cannot determine privacy. All reachable commits are shown because the remote can change; some may already be present.";
+  const outgoing = await commitHistory(repo, state.head!);
+  if (state.kind === "leaf") await validateHistory(state, outgoing, approvedPaths, [state.head!]);
+  const warning = state.kind === "parent"
+    ? "Push sends the whole branch history, including files outside the selected skills directory; selecting paths does not limit a push. Check destination access with the provider; Git cannot determine privacy. All reachable commits are shown because the remote can change; some may already be present."
+    : "Check destination access with the provider; Git cannot determine privacy. All reachable commits are shown because the remote can change; some may already be present.";
   const binding = await gitBinding(state);
   const result = { root: state.selectedDir, remote: selected.remote, pushUrl: redactGitUrl(raw), branch: selected.branch, upstream: state.upstream, destination, head: state.head!, outgoing, approvedPaths, warning, binding, localRemote };
   return { preview: { ...result, fingerprint: digest({ ...result, raw, approved }) }, raw };
@@ -682,44 +791,52 @@ export async function previewPush(approved: ApprovedSkillsRoot, paths: string[] 
   return (await pushDetails(approved, paths, requestedRemote)).preview;
 }
 export async function pushApproved(approved: ApprovedSkillsRoot, preview: PushPreview): Promise<GitResult> {
-  await leaf(approved.path);
+  await repository(approved.path);
   return withSkillsLock(approved, async () => {
     await requireNoPendingRecovery(approved, preview.binding);
     const { preview: now, raw } = await pushDetails(approved, preview.approvedPaths, preview.remote);
     if (JSON.stringify(now) !== JSON.stringify(preview)) throw new Error("Push preview changed; inspect and approve it again");
     const remote = frozenRemote(now.localRemote?.path ?? raw);
     const receivePack = now.localRemote ? ["--receive-pack=git -c core.hooksPath=/dev/null receive-pack"] : [];
-    return run(now.root, ["push", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", ...receivePack, "--", remote.alias, `${now.head}:${now.destination}`], { label: "push", redact: true, env: networkEnvironment(raw, now.root, now.binding, remote.env), boundary: mutation(approved, now.binding, now.localRemote) });
+    return run(now.root, ["push", "--no-follow-tags", "--recurse-submodules=no", "--no-signed", ...receivePack, "--", remote.alias, `${now.head}:${now.destination}`], { label: "push", redact: true, env: networkEnvironment(raw, now.binding, remote.env), boundary: mutation(approved, now.binding, now.localRemote) });
   });
 }
 
 export async function previewPull(approved: ApprovedSkillsRoot, paths: string[] = []): Promise<PullPreview> {
   await assertApprovedSkillsRoot(approved);
-  const state = await leaf(approved.path);
+  const state = await repository(approved.path);
   const selected = await branchRemote(state);
   if (!state.upstream) throw new Error("The current branch has no upstream; configure one and explicitly fetch before pulling");
   const destination = `refs/remotes/${selected.remote}/${selected.remoteBranch}`;
-  await checkRef(state.selectedDir, destination);
-  const target = await maybe(state.selectedDir, ["rev-parse", "--verify", "--quiet", `${destination}^{commit}`]);
+  const repo = repositoryRoot(state);
+  const prefix = repositoryPrefix(state);
+  await checkRef(repo, destination);
+  const target = await maybe(repo, ["rev-parse", "--verify", "--quiet", `${destination}^{commit}`]);
   if (!target) throw new Error("Upstream tracking branch is missing; fetch it explicitly first");
-  const fastForward = await run(state.selectedDir, ["merge-base", "--is-ancestor", state.head!, target]);
+  const fastForward = await run(repo, ["merge-base", "--is-ancestor", state.head!, target]);
   if (fastForward.exitCode !== 0) throw new Error("Pull is not a fast-forward; resolve divergence manually");
-  const raw = await rawRemoteUrl(state.selectedDir, selected.remote, false);
+  const raw = await rawRemoteUrl(repo, selected.remote, false);
   const approvedPaths = selectedPaths(paths);
-  const commits = await commitHistory(state.selectedDir, `${state.head}..${target}`);
-  await validateHistory(state.selectedDir, commits, approvedPaths, [state.head!, target]);
-  const changed = nul(await required(state.selectedDir, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", state.head!, target], { filters: true })).sort();
-  const local = (await allStatus(state.selectedDir)).filter((entry) => !inside(entry.path, ".skills-manager"));
+  const selectedFile = (file: string): string => {
+    const relative = skillPath(prefix, file);
+    if (relative === null) throw new Error(`Pull contains a path outside the selected skills directory: ${JSON.stringify(file)}`);
+    return relative;
+  };
+  const commits = (await commitHistory(repo, `${state.head}..${target}`))
+    .map((commit) => ({ ...commit, paths: commit.paths.map(selectedFile) }));
+  await validateHistory(state, commits, approvedPaths, [state.head!, target]);
+  const changed = nul(await required(repo, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=none", "--name-only", "-z", state.head!, target], { filters: true })).map(selectedFile).sort();
+  const local = (await allStatus(state)).filter((entry) => !inside(entry.path, ".skills-manager"));
   for (const file of changed) {
     if (local.some((entry) => intersects(entry.path, file))) throw new Error(`Pull would overwrite local changes at ${JSON.stringify(file)}`);
   }
   const binding = await gitBinding(state);
   const result = { root: state.selectedDir, remote: selected.remote, fetchUrl: redactGitUrl(raw), branch: selected.branch, upstream: state.upstream, destination, head: state.head!, target, commits, paths: changed, approvedPaths, binding };
-  const index = await required(state.selectedDir, ["ls-files", "--stage", "-z", "--", ...changed]);
+  const index = await required(repo, ["ls-files", "--stage", "-z", "--", ...changed.map((file) => repositoryPath(prefix, file))]);
   return { ...result, fingerprint: digest({ ...result, raw, approved, index, local }) };
 }
 export async function pullApproved(approved: ApprovedSkillsRoot, preview: PullPreview): Promise<GitResult> {
-  await leaf(approved.path);
+  await repository(approved.path);
   return withSkillsLock(approved, async () => {
     await requireNoPendingRecovery(approved, preview.binding);
     const now = await previewPull(approved, preview.approvedPaths);

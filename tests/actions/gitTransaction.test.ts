@@ -117,8 +117,8 @@ async function crashPreparedCommit(approved: ApprovedSkillsRoot, preview: Commit
     const result = await commitSelected(approved, preview, "interrupted fixture");
     if (result.exitCode !== 0) throw new Error(result.stderr);
   `;
-  const headLock = path.join(root, ".git", "HEAD.lock");
-  const stateDir = path.join(root, ".skills-manager");
+  const headLock = path.join(preview.binding.gitDir, "HEAD.lock");
+  const stateDir = path.join(approved.path, ".skills-manager");
   const journalFile = path.join(stateDir, "git-transaction-journal");
   const watcherAbort = new AbortController();
   const changes = await withSkillsLock(approved, async () =>
@@ -453,6 +453,118 @@ describe("real Git commit transactions", () => {
     expect(paths("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD")).toEqual(["alpha/SKILL.md"]);
     expect(paths("diff", "--cached", "--name-only", "-z")).toEqual(["notes.txt"]);
     expect(await readFile(path.join(root, "notes.txt"), "utf8")).toBe("independently staged\n");
+  }, 60_000);
+
+  it("binds interrupted parent-repository recovery to both roots and the selected prefix", async (context) => {
+    requireTransactions(context);
+    const selected = path.join(root, "project", "skills");
+    await put("project/skills/alpha/SKILL.md", skillContent("base"));
+    await put("notes.txt", "parent base\n");
+    git("add", "--all");
+    git("commit", "-m", "parent fixture base");
+    git("config", "core.filesRefLockTimeout", "30000");
+    await put("project/skills/alpha/SKILL.md", skillContent("reviewed before interruption"));
+    await put("notes.txt", "independently staged parent content\n");
+    git("add", "notes.txt");
+    const approved = await approveSkillsRoot(selected);
+    const preview = await previewCommit(approved, ["alpha/SKILL.md"]);
+    const head = text("rev-parse", "HEAD");
+    const index = await readFile(path.join(root, ".git", "index"));
+    const staged = git("ls-files", "--stage", "-z", "--", "notes.txt");
+    await crashPreparedCommit(approved, preview, context.signal);
+
+    const journal = path.join(selected, ".skills-manager", "git-transaction-journal");
+    const envelope = await readFile(journal);
+    const bodyOffset = Buffer.byteLength(journalMagic) + 16 + 1 + 64 + 1;
+    const captured = JSON.parse(envelope.subarray(bodyOffset).toString("utf8")) as {
+      phase: string;
+      binding: {
+        repositoryRoot: string;
+        repositoryIdentity: { dev: string; ino: string };
+        prefix: string;
+      };
+    };
+    expect(captured.phase).toBe("prepared");
+    expect(captured.binding).toMatchObject({
+      repositoryRoot: root, repositoryIdentity: preview.binding.repositoryIdentity, prefix: "project/skills",
+    });
+    await rm(`${journal}.next`, { force: true });
+    const mismatches = [
+      { ...captured, binding: { ...captured.binding, prefix: "../notes.txt" } },
+      { ...captured, binding: { ...captured.binding, prefix: "project/other-skills" } },
+      { ...captured, binding: { ...captured.binding, repositoryRoot: outside } },
+      {
+        ...captured,
+        binding: {
+          ...captured.binding,
+          repositoryIdentity: {
+            ...captured.binding.repositoryIdentity,
+            ino: (BigInt(captured.binding.repositoryIdentity.ino) + 1n).toString(),
+          },
+        },
+      },
+    ];
+    for (const mismatch of mismatches) {
+      const invalid = journalEnvelope(mismatch);
+      await writeFile(journal, invalid, { mode: 0o600 });
+      await expect(recoverSkillsGit(approved)).rejects.toThrow();
+      expect(await readFile(journal)).toEqual(invalid);
+      expect(text("rev-parse", "HEAD")).toBe(head);
+      expect(await readFile(path.join(root, ".git", "index"))).toEqual(index);
+      expect(git("ls-files", "--stage", "-z", "--", "notes.txt")).toEqual(staged);
+      expect(await readFile(path.join(root, "notes.txt"), "utf8")).toBe("independently staged parent content\n");
+      expect(await readFile(path.join(selected, "alpha/SKILL.md"), "utf8"))
+        .toBe(skillContent("reviewed before interruption"));
+    }
+
+    const legacyBinding: Partial<typeof captured.binding> = { ...captured.binding };
+    delete legacyBinding.repositoryRoot;
+    delete legacyBinding.repositoryIdentity;
+    delete legacyBinding.prefix;
+    const legacy = journalEnvelope({ ...captured, binding: legacyBinding });
+    await writeFile(journal, legacy, { mode: 0o600 });
+    await expect(recoverSkillsGit(approved)).rejects.toThrow(/manual|inspect/i);
+    await expect(commitSelected(approved, preview, "must not commit over legacy recovery")).rejects.toThrow(/manual|inspect/i);
+    expect(await readFile(journal)).toEqual(legacy);
+    expect(text("rev-parse", "HEAD")).toBe(head);
+    expect(await readFile(path.join(root, ".git", "index"))).toEqual(index);
+    expect(git("ls-files", "--stage", "-z", "--", "notes.txt")).toEqual(staged);
+    await expect(lstat(`${journal}.next`)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(`${journal}.delete`)).rejects.toMatchObject({ code: "ENOENT" });
+
+    await writeFile(journal, envelope, { mode: 0o600 });
+    expect(await recoverSkillsGit(approved)).toMatch(/interrupt|roll.*back/i);
+    expect(text("rev-parse", "HEAD")).toBe(head);
+    expect(await readFile(path.join(root, ".git", "index"))).toEqual(index);
+    expect(git("ls-files", "--stage", "-z", "--", "notes.txt")).toEqual(staged);
+    await expect(lstat(journal)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await recoverSkillsGit(approved)).toBeUndefined();
+  }, 60_000);
+
+  it("preserves a legacy leaf recovery journal and requires manual inspection", async (context) => {
+    requireTransactions(context);
+    const { approved, head, index, staged } = await interruptedFixture(context.signal);
+    const journal = path.join(root, ".skills-manager", "git-transaction-journal");
+    const envelope = await readFile(journal);
+    const offset = Buffer.byteLength(journalMagic) + 16 + 1 + 64 + 1;
+    const captured = JSON.parse(envelope.subarray(offset).toString("utf8")) as { binding: Record<string, unknown> };
+    delete captured.binding.repositoryRoot;
+    delete captured.binding.repositoryIdentity;
+    delete captured.binding.prefix;
+    const legacy = journalEnvelope(captured);
+    await rm(`${journal}.next`, { force: true });
+    await writeFile(journal, legacy, { mode: 0o600 });
+    await expect(recoverSkillsGit(approved)).rejects.toThrow(/manual|inspect/i);
+    expect(await readFile(journal)).toEqual(legacy);
+    expect(text("rev-parse", "HEAD")).toBe(head);
+    expect(await readFile(path.join(root, ".git", "index"))).toEqual(index);
+    expect(git("ls-files", "--stage", "-z")).toEqual(staged);
+    expect(await readFile(path.join(root, "alpha/SKILL.md"), "utf8"))
+      .toBe(skillContent("reviewed before interruption"));
+    await expect(lstat(`${journal}.next`)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(`${journal}.delete`)).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(journal, envelope, { mode: 0o600 });
+    expect(await recoverSkillsGit(approved)).toMatch(/interrupt|roll.*back/i);
   }, 60_000);
 
   it("rolls back an installed index when a crash precedes the ref update", async (context) => {

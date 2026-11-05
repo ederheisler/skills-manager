@@ -279,7 +279,7 @@ async function main(): Promise<void> {
     }
     if (failure || interrupted) {
       if (code === 0) code = 1;
-      await report(`The update could not be completed while ${phase}.\nManual recovery: ${recoveryCommand(skillsDir)}\n`);
+      await report(`The update could not be completed while ${phase}.\nTo start the app again, run:\n${recoveryCommand(skillsDir)}\n`);
     }
   }
   const finalSignal = interrupted ?? signals.find((signal) => signal === childSignal);
