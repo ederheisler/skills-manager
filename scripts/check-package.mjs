@@ -7,6 +7,7 @@ const beforeBuild = process.argv[2] === '--before-build';
 const manifest = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const listed = new Set(manifest.files.filter((file) => file.startsWith('dist/')));
 const expected = new Set();
+const generatedAssets = new Set(['dist/state/buildIdentity.json']);
 const requiredAssets = new Set([
   'LICENSE',
   'THIRD_PARTY_NOTICES',
@@ -23,6 +24,13 @@ for (const file of manifest.files) {
 }
 for (const file of requiredAssets) {
   if (!manifest.files.includes(file)) throw new Error(`Required file is missing from the package allowlist: ${file}`);
+}
+
+for (const name of await readdir(root)) {
+  if (/^(?:readme|license|licence|copying)(?:\..*)?$/i.test(name) &&
+      name !== 'README.md' && name !== 'LICENSE') {
+    throw new Error(`Unexpected implicitly included package file: ${name}`);
+  }
 }
 
 const directories = new Set(['src', 'native']);
@@ -68,8 +76,9 @@ async function requireRegularFile(relative, executable = false) {
 
 async function checkBuildTarget(relative) {
   try {
-    if (!(await lstat(path.join(root, relative))).isFile()) {
-      throw new Error(`Build output must not be a link or special file: ${relative}`);
+    const stats = await lstat(path.join(root, relative));
+    if (!stats.isFile() || stats.nlink !== 1) {
+      throw new Error(`Build output must not be a link or multiply linked file: ${relative}`);
     }
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
@@ -77,6 +86,7 @@ async function checkBuildTarget(relative) {
 }
 
 await inspectSources(path.join(root, 'src'));
+for (const file of generatedAssets) expected.add(file);
 for (const file of expected) {
   if (!listed.has(file)) throw new Error(`Compiled module is missing from the package allowlist: ${file}`);
 }
@@ -87,6 +97,17 @@ for (const file of listed) {
 }
 
 if (!beforeBuild) {
+  let buildIdentity;
+  try {
+    buildIdentity = JSON.parse(await readFile(path.join(root, 'dist/state/buildIdentity.json'), 'utf8'));
+  } catch {
+    throw new Error('Build identity metadata is missing or invalid.');
+  }
+  const knownIdentity = (buildIdentity?.source === 'git' || buildIdentity?.source === 'archive') &&
+    typeof buildIdentity.commit === 'string' && /^[0-9a-f]{40}$/.test(buildIdentity.commit) &&
+    typeof buildIdentity.dirty === 'boolean';
+  const unknownIdentity = buildIdentity?.source === 'unknown' && buildIdentity.commit === null && buildIdentity.dirty === false;
+  if (!knownIdentity && !unknownIdentity) throw new Error('Build identity metadata is missing or invalid.');
   for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES']) {
     await requireRegularFile(file);
   }

@@ -158,7 +158,10 @@ jobs:
         run: |
           fixture="$RUNNER_TEMP/portability"
           mkdir -p "$fixture"/{source,home,tmp,pack,consumer}
-          env -i PATH="$PATH" HOME="$fixture/home" /usr/bin/git archive --format=tar HEAD |
+          archive_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+          test "$archive_commit" = "$GITHUB_SHA"
+          printf '%s\n' "$archive_commit" > "$fixture/archive-commit"
+          env -i PATH="$PATH" HOME="$fixture/home" /usr/bin/git archive --format=tar "$archive_commit" |
             env -i PATH="$PATH" HOME="$fixture/home" tar -xf - -C "$fixture/source"
           cd "$fixture/source"
           env -i PATH="$PATH" HOME="$fixture/home" TMPDIR="$fixture/tmp" CI=1 \
@@ -169,6 +172,10 @@ jobs:
               npm test
             env -i PATH="$PATH" HOME="$fixture/test-home" TMPDIR="$fixture/test-tmp" CI=1 \
               npm audit --audit-level=moderate --include=dev
+          else
+            mkdir -p "$fixture/test-home" "$fixture/test-tmp"
+            env -i PATH="$PATH" HOME="$fixture/test-home" TMPDIR="$fixture/test-tmp" CI=1 \
+              npm test -- tests/state/appBuild.test.ts tests/actions/softwareUpdates.test.ts tests/actions/appUpdateHandoff.test.ts tests/actions/appUpdatePreparation.test.ts tests/cliOptions.test.ts tests/tui.test.ts
           fi
           env -i PATH="$PATH" HOME="$fixture/home" TMPDIR="$fixture/tmp" CI=1 \
             npm pack --ignore-scripts --pack-destination "$fixture/pack"
@@ -196,8 +203,9 @@ jobs:
           fixture="$RUNNER_TEMP/portability"
           mkdir -p "$fixture/smoke-home" "$fixture/smoke-tmp"
           cd "$fixture/source"
+          archive_commit="$(cat "$fixture/archive-commit")"
           env -i PATH="$PATH" HOME="$fixture/smoke-home" TMPDIR="$fixture/smoke-tmp" CI=1 TERM=xterm-256color \
-            node scripts/release-smoke.mjs "$fixture/consumer/node_modules/skills-manager"
+            RELEASE_EXPECTED_COMMIT="$archive_commit" node scripts/release-smoke.mjs "$fixture/consumer/node_modules/skills-manager"
 
   required-checks:
     name: Required checks
