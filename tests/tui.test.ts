@@ -198,6 +198,26 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       await setup.waitFor(() => setup.captureCharFrame().includes("Application updates"));
       expect(setup.captureCharFrame()).toContain("skills-manager (app) · automatic: off");
       expect(setup.captureCharFrame()).toContain("Vercel skills CLI · automatic: off");
+      expect(setup.captureCharFrame()).toContain("Not checked");
+      expect(setup.captureCharFrame()).not.toContain("registry latest: unknown");
+      expect(setup.captureCharFrame()).not.toContain("GitHub main SHA: unknown");
+      expect(setup.captureCharFrame()).toContain("r update app + CLI");
+      const updateControls = setup.captureSpans().lines.find((line) =>
+        line.spans.map((span) => span.text).join("").includes("r update app + CLI"));
+      expect(updateControls?.spans.some((span) => span.text === "r" && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
+      const checkControls = setup.captureSpans().lines.find((line) =>
+        line.spans.map((span) => span.text).join("").includes("c check"));
+      for (const key of ["c", "a"]) {
+        expect(checkControls?.spans.some((span) => span.text === key && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
+      }
+      expect(setup.captureCharFrame()).not.toContain("r  update app + CLI");
+      setup.mockInput.pressEnter();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("skills-manager (app) · automatic: off");
+      await setup.mockInput.typeText("r");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Update and restart both"));
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Update and restart both"));
       expect(fetch).not.toHaveBeenCalled();
       expect(await readdir(shellHome)).toEqual([]);
       expect((await readdir(home)).sort()).toEqual(before);
@@ -280,6 +300,7 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
       expect(frame).toContain("x app updates · open");
+      expect(frame).not.toContain("o pen");
       expect(frame).toContain("scope: all · state: all");
       expect(frame).not.toContain("s cope: all");
       expect(frame).not.toContain("s tate: all");
@@ -313,6 +334,25 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
     }
   });
 
+  it("keeps directory, quit and help controls visible together at 140 columns", async () => {
+    const { skillsDir } = await fixture();
+    const setup = await createTestRenderer({ width: 140, height: 30 });
+    try {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+        selectSkillsDir: async () => null,
+      }).start();
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("i directory · quit · ? help");
+      expect(frame).not.toContain("i  directory");
+      const controls = setup.captureSpans().lines.find((line) =>
+        line.spans.map((span) => span.text).join("").includes("i directory"));
+      expect(controls?.spans.some((span) => span.text === "i" && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
   it("keeps component checks separate, defers results during help and review, and retains its nonmodal badge", async () => {
     const { skillsDir } = await fixture();
     const response = Promise.withResolvers<Response>();
@@ -327,7 +367,7 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       let frame = setup.captureCharFrame();
       expect(frame).toContain("skills-manager (app) · automatic: off");
       expect(frame).toContain("Vercel skills CLI · automatic: off");
-      expect(frame).toContain("Running version:");
+      expect(frame).toContain("Not checked");
       expect(fetch).not.toHaveBeenCalled();
 
       await setup.mockInput.typeText("2c");
@@ -388,7 +428,8 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
 
   it("requires separate explicit consent and remembers the app setting across sessions", async () => {
     const { skillsDir } = await fixture();
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200 }));
+    const response = Promise.withResolvers<Response>();
+    const fetch = vi.spyOn(globalThis, "fetch").mockReturnValue(response.promise);
     const first = await createTestRenderer({ width: 180, height: 30 });
     const app = createTrackedTui(first.renderer, await approveSkillsRoot(skillsDir));
     try {
@@ -399,7 +440,26 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       await first.waitFor(() => first.captureCharFrame().includes("Enable automatic skills-manager checks"));
       expect(first.captureCharFrame()).toContain("https://api.github.com");
       expect(first.captureCharFrame()).toContain("IP address");
+      const consentFrame = first.captureCharFrame().split("\n");
+      const consentTop = consentFrame.findIndex((row) => row.includes("┌─Enable automatic skills-manager checks"));
+      const consentLeft = consentFrame[consentTop]?.indexOf("┌─Enable automatic skills-manager checks") ?? -1;
+      const consentBottom = consentFrame.findIndex((row, index) => index > consentTop && row[consentLeft] === "└");
+      expect(consentTop).toBeGreaterThanOrEqual(0);
+      expect(consentBottom - consentTop).toBeLessThanOrEqual(8);
+      expect(confirmationText(first.captureCharFrame(), "Enable automatic skills-manager checks")).not.toContain("Enter");
+      const consentControls = first.captureSpans().lines.find((line) =>
+        line.spans.map((span) => span.text).join("").includes("y enable"));
+      for (const key of ["n", "y"]) {
+        expect(consentControls?.spans.some((span) => span.text === key && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
+      }
       first.mockInput.pressEnter();
+      await first.renderOnce();
+      expect(first.captureCharFrame()).toContain("Enable automatic skills-manager checks");
+      first.mockInput.pressArrow("right");
+      first.mockInput.pressEnter();
+      await first.renderOnce();
+      expect(first.captureCharFrame()).toContain("Enable automatic skills-manager checks");
+      await first.mockInput.typeText("n");
       await first.waitFor(() => !first.captureCharFrame().includes("Enable automatic skills-manager checks"));
       expect(fetch).not.toHaveBeenCalled();
 
@@ -408,9 +468,14 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       await first.mockInput.typeText("y");
       await first.waitFor(() => first.captureCharFrame().includes("skills-manager (app) · automatic: on"));
       await first.waitFor(() => fetch.mock.calls.length > 0);
+      await first.waitFor(() => first.captureCharFrame().includes("checking..."));
+      response.resolve(new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200 }));
+      await first.waitFor(() => !first.captureCharFrame().includes("checking..."));
+      expect(first.captureCharFrame()).toContain("Next check:");
       expect(fetch.mock.calls.every(([url]) => String(url).startsWith("https://api.github.com/"))).toBe(true);
       expect(first.captureCharFrame()).toContain("Vercel skills CLI · automatic: off");
     } finally {
+      response.resolve(new Response(null, { status: 503 }));
       first.renderer.destroy();
       await app.shutdown();
     }
@@ -426,6 +491,27 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
     } finally {
       second.renderer.destroy();
       await restarted.shutdown();
+    }
+  });
+
+  it("enables automatic checks by clicking the consent action", async () => {
+    const { skillsDir } = await fixture();
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200 }));
+    const setup = await createTestRenderer({ width: 180, height: 30 });
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir));
+    try {
+      await app.start();
+      await setup.mockInput.typeText("xa");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Enable automatic skills-manager checks"));
+      const rows = setup.captureCharFrame().split("\n");
+      const row = rows.findIndex((line) => line.includes("y enable"));
+      expect(row).toBeGreaterThanOrEqual(0);
+      await setup.mockMouse.click(rows[row]!.indexOf("y enable"), row);
+      await setup.waitFor(() => setup.captureCharFrame().includes("skills-manager (app) · automatic: on"));
+      await setup.waitFor(() => fetch.mock.calls.length > 0);
+    } finally {
+      setup.renderer.destroy();
+      await app.shutdown();
     }
   });
 
@@ -933,14 +1019,14 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       expect(row).toBeGreaterThanOrEqual(0);
       await setup.mockMouse.click(rows[row]!.indexOf("broken"), row);
       await setup.waitFor(() => setup.captureCharFrame().includes('broken-symlink -> "missing-target"'));
-      expect(setup.captureCharFrame()).toContain("Author: unknown");
+      expect(setup.captureCharFrame()).toContain("Author not listed");
       expect(setup.captureCharFrame()).toContain("Source: unknown");
       expect(setup.captureCharFrame()).toContain("Warning:");
       rows = setup.captureCharFrame().split("\n");
       row = rows.findIndex((line) => line.includes("[on] [unknown] invalid"));
       await setup.mockMouse.click(rows[row]!.indexOf("invalid"), row);
       await setup.waitFor(() => setup.captureCharFrame().includes("Warning:"));
-      expect(setup.captureCharFrame()).toContain("Author: unknown");
+      expect(setup.captureCharFrame()).toContain("Author not listed");
     } finally {
       setup.renderer.destroy();
     }
@@ -981,6 +1067,8 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       await setup.mockInput.typeText("d");
       await setup.waitFor(() => setup.captureCharFrame().includes("Remove skill"));
       expect(confirmationText(setup.captureCharFrame(), "Remove skill")).toContain(`Path: "${path.dirname(file)}"`);
+      expect(setup.captureCharFrame()).toContain("Enter: selected action");
+      expect(setup.captureCharFrame()).not.toContain("[n/Esc/Enter] Cancel");
       expect(setup.captureCharFrame()).toContain("Ownership: unknown");
       expect(setup.captureCharFrame()).toContain("irreversible after recovery cleanup");
       await writeFile(file, "changed after preview\n");
@@ -1165,6 +1253,8 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
       await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.waitFor(() => setup.captureCharFrame().includes("https://github.com/example/project"));
+      expect(setup.captureCharFrame().split("\n").filter((row) => row.includes("example/project"))).toHaveLength(1);
       await setup.mockInput.typeText("v");
       await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
       const review = confirmationText(setup.captureCharFrame(), "Review saved sources");
@@ -1186,6 +1276,23 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       setup.renderer.destroy();
     }
   });
+  it("shows a conflicting external source separately from the installed source", async () => {
+    const { home, skillsDir } = await fixture();
+    const { receipt } = await savedSourceFixture(skillsDir);
+    const claim = { ...receipt.entry, source: "other/project", sourceUrl: "https://github.com/other/project" };
+    await writeFile(path.join(home, ".skill-lock.json"), JSON.stringify({ version: 3, skills: { alpha: claim } }));
+    const setup = await createTestRenderer({ width: 200, height: 30 });
+    try {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.waitFor(() => setup.captureCharFrame().includes("other/project"));
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("https://github.com/example/project");
+      expect(frame).toContain("Recorded source (unverified): other/project");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
 
 
   it.each(["u", "p"])("does not contact a saved update endpoint when cancelling %s", async (key) => {

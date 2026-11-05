@@ -121,6 +121,14 @@ Both automatic checks default to off. Each grants ongoing consent for its disclo
 The [update plan](../superpowers/plans/2026-11-05-in-app-updates.md#verification) records verification of the prior implementation. That evidence does not establish verification of later changes.
 The latest-main installation, automated releases, and main-branch protection decisions remain unchanged.
 
+## Update controls and check results
+
+Date: 2026-11-05
+
+The user chose update controls that match the main view's colored letter controls. Enter must not enable automatic checks. Approval requires `y` or an intentional click. App and CLI update actions remain available without an available version or a prior check. The screen must not use fake `unknown` or `latest` placeholders.
+
+Automatic checks remain off by default, with separate permission for each host scope. The user requested a check when permission is valid but no completed result exists, even if an old attempt was recorded. Completed results persist. The implementation stores these results in a private, host-scoped cache. A new approval starts a check and permits later daily checks.
+
 ## Vercel skills CLI updates
 
 Date: 2026-11-05

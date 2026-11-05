@@ -1,6 +1,6 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readlink, realpath, rename, symlink, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, opendir, readlink, realpath, rename, symlink, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,7 +35,17 @@ const SHA = /^[a-f0-9]{40}$/;
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 interface StoredConsent { kind: "skills-manager-update-consent"; version: 1; enabled: boolean; scope: string }
+interface StoredResult {
+  kind: "skills-manager-update-result";
+  version: 1;
+  component: UpdateComponent;
+  scope: string;
+  checkedAt: number;
+  available: string | null;
+  error: string | null;
+}
 interface Flight { controller: AbortController; promise: Promise<void> }
+interface PrivateJsonSnapshot<T = unknown> { value: T; mtimeMs: number }
 
 function storageHome(variable: string, fallback: string): string {
   const value = process.env[variable];
@@ -78,7 +88,7 @@ function validatePrivateStat(info: { isDirectory(): boolean; isFile(): boolean; 
 }
 
 /** Open a private, bounded regular file without following a final symlink. */
-async function readPrivateJson(file: string): Promise<unknown | null> {
+async function readPrivateJsonState(file: string): Promise<PrivateJsonSnapshot | null> {
   let before;
   try { before = await lstat(file); }
   catch (error) { if (hasErrorCode(error, "ENOENT")) return null; throw error; }
@@ -98,13 +108,26 @@ async function readPrivateJson(file: string): Promise<unknown | null> {
       bytesRead += part.bytesRead;
     }
     if (bytesRead > MAX_STATE_BYTES) throw new Error("Update state is too large");
-    const value: unknown = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"));
+    const after = await handle.stat();
+    validatePrivateStat(after, false);
+    if (actual.dev !== after.dev || actual.ino !== after.ino || actual.size !== after.size
+      || actual.mtimeMs !== after.mtimeMs || actual.ctimeMs !== after.ctimeMs) {
+      throw new Error("Update state changed while being read");
+    }
+    const bytes = buffer.subarray(0, bytesRead);
+    const text = bytes.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("Invalid update state encoding");
+    const value: unknown = JSON.parse(text);
     if (value === null) throw new Error("Invalid update state");
-    return value;
+    return { value, mtimeMs: actual.mtimeMs };
   } finally { await handle.close(); }
 }
 
-async function atomicPrivateJson(file: string, value: unknown, stillAllowed: () => boolean): Promise<void> {
+async function readPrivateJson(file: string): Promise<unknown | null> {
+  return (await readPrivateJsonState(file))?.value ?? null;
+}
+
+async function atomicPrivateJson(file: string, value: unknown, stillAllowed: () => boolean, publish?: (temporary: string) => Promise<void>): Promise<void> {
   try { validatePrivateStat(await lstat(file), false); }
   catch (error) { if (!hasErrorCode(error, "ENOENT")) throw error; }
   if (!stillAllowed()) throw new Error("Update storage authorization changed");
@@ -113,9 +136,11 @@ async function atomicPrivateJson(file: string, value: unknown, stillAllowed: () 
   try {
     if (!stillAllowed()) throw new Error("Update storage authorization changed");
     await handle.writeFile(`${JSON.stringify(value)}\n`);
+    if (publish) await handle.sync();
     await handle.close();
     if (!stillAllowed()) throw new Error("Update storage authorization changed");
-    await rename(temporary, file);
+    if (publish) await publish(temporary);
+    else await rename(temporary, file);
   } catch (error) {
     await handle.close().catch(() => {});
     await unlink(temporary).catch(() => {});
@@ -135,6 +160,15 @@ function safeRegistry(value: string): string {
 function validInstalledVersion(value: string): boolean {
   return value !== "unknown" && value.length > 0 && Buffer.byteLength(value) <= 128
     && !/[\u0000-\u001f\u007f-\u009f\p{Cf}]/u.test(value);
+}
+
+function attemptTimestamp(value: unknown, now: number): number | null {
+  if (value === null) return null;
+  if (!isRecord(value) || value.kind !== "skills-manager-update-attempt" || value.version !== 1
+    || typeof value.at !== "number" || !Number.isSafeInteger(value.at) || value.at < 0 || value.at > now + DAY_MS) {
+    throw new Error("Invalid attempt cache");
+  }
+  return value.at;
 }
 
 async function responseJson(response: Response): Promise<unknown> {
@@ -172,7 +206,9 @@ export class SoftwareUpdateService {
   readonly #preferenceRevision: Record<UpdateComponent, number> = { app: 0, cli: 0 };
   readonly #preferenceWrites = new Map<UpdateComponent, Promise<void>>();
   readonly #flights = new Map<UpdateComponent, Flight>();
-  readonly #timers = new Map<UpdateComponent, ReturnType<typeof setTimeout>>();
+  readonly #checking: Record<UpdateComponent, Set<symbol>> = { app: new Set(), cli: new Set() };
+  readonly #attempts: Record<UpdateComponent, number | null> = { app: null, cli: null };
+  readonly #timers = new Map<UpdateComponent, { handle: ReturnType<typeof setTimeout>; at: number }>();
   readonly #background = new Set<Promise<void>>();
   #build: BuildIdentity = { version: "unknown", commit: null, dirty: false, source: "unknown" };
   #cliVersion: string | null = null;
@@ -198,6 +234,15 @@ export class SoftwareUpdateService {
   get registry(): string { return this.#registry; }
   get knownSkillsRoots(): readonly string[] { return [...new Set([...this.#knownRoots, ...this.#knownPhysicalRoots])]; }
 
+  activity(): Record<UpdateComponent, { checking: boolean; nextCheckAt: number | null; lastAttemptAt: number | null }> {
+    const component = (name: UpdateComponent) => ({
+      checking: this.#checking[name].size > 0,
+      nextCheckAt: this.#timers.get(name)?.at ?? null,
+      lastAttemptAt: this.#attempts[name],
+    });
+    return { app: component("app"), cli: component("cli") };
+  }
+
   async refreshRegistry(): Promise<void> {
     if (!this.#disposed) await this.#refreshRegistry();
   }
@@ -205,6 +250,15 @@ export class SoftwareUpdateService {
   #notify(): void {
     if (this.#disposed) return;
     try { this.#onChange?.(); } catch { /* UI callbacks must not break update state. */ }
+  }
+  #beginChecking(component: UpdateComponent): symbol {
+    const token = Symbol();
+    this.#checking[component].add(token);
+    this.#notify();
+    return token;
+  }
+  #endChecking(component: UpdateComponent, token: symbol): void {
+    if (this.#checking[component].delete(token)) this.#notify();
   }
   #error(message: string): void {
     if (!this.#errors.includes(message)) {
@@ -245,6 +299,146 @@ export class SoftwareUpdateService {
     return this.#registryScope ? createHash("sha256").update(this.#registryScope).digest("hex") : "";
   }
   #consentFile(component: UpdateComponent): string { return path.join(this.#config, `${component}.json`); }
+  #cacheKey(component: UpdateComponent): string {
+    const scope = this.#scope(component);
+    return scope ? createHash("sha256").update(scope).digest("hex") : "";
+  }
+  #cacheFile(component: UpdateComponent, kind: "attempt" | "result", key: string): string {
+    return path.join(this.#cache, `${kind}-${component}-${key}.json`);
+  }
+
+  async #readResultState(file: string, component: UpdateComponent, key: string): Promise<PrivateJsonSnapshot<StoredResult> | null> {
+    const state = await readPrivateJsonState(file);
+    if (state === null) return null;
+    const value = state.value;
+    if (!isRecord(value) || Object.keys(value).length !== 7 || value.kind !== "skills-manager-update-result" || value.version !== 1
+      || value.component !== component || value.scope !== key
+      || typeof value.checkedAt !== "number" || !Number.isSafeInteger(value.checkedAt)
+      || value.checkedAt < 0 || value.checkedAt > Date.now() + DAY_MS
+      || (value.available !== null && typeof value.available !== "string")
+      || (value.error !== null && (typeof value.error !== "string"
+        || !/^Update check unavailable(?: \(HTTP [1-5]\d{2}\))?\.$/.test(value.error)))) {
+      throw new Error("Invalid result cache");
+    }
+    if (value.error === null) {
+      if (typeof value.available !== "string" || (component === "app"
+        ? !SHA.test(value.available) : value.available.length > 128 || !VERSION.test(value.available))) {
+        throw new Error("Invalid result cache");
+      }
+    } else if (value.available !== null) {
+      throw new Error("Invalid result cache");
+    }
+    return {
+      ...state,
+      value: {
+        kind: "skills-manager-update-result", version: 1, component, scope: key,
+        checkedAt: value.checkedAt, available: value.available as string | null, error: value.error as string | null,
+      },
+    };
+  }
+
+  async #readResult(component: UpdateComponent, key: string): Promise<StoredResult | null> {
+    const generation = this.#generation[component];
+    const allowed = () => !this.#disposed && generation === this.#generation[component] && key === this.#cacheKey(component);
+    const canonical = this.#cacheFile(component, "result", key);
+    let latest: PrivateJsonSnapshot<StoredResult> | null = null;
+    let latestName = path.basename(canonical);
+    try { latest = await this.#readResultState(canonical, component, key); }
+    catch { if (allowed()) this.#error("An update result cache is invalid, unreadable, or unsafe."); }
+    if (!allowed()) return null;
+    const prefix = `result-${component}-${key}-`;
+    const directory = await opendir(this.#cache);
+    for await (const entry of directory) {
+      if (!allowed()) break;
+      if (!entry.name.startsWith(prefix)) continue;
+      const match = /^(0|[1-9]\d{0,15})-([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\.json$/.exec(entry.name.slice(prefix.length));
+      if (!match) continue;
+      const checkedAt = Number(match[1]);
+      if (!Number.isSafeInteger(checkedAt) || checkedAt > Date.now() + DAY_MS
+        || (latest && checkedAt < latest.value.checkedAt)) continue;
+      try {
+        const candidate = await this.#readResultState(path.join(this.#cache, entry.name), component, key);
+        if (!candidate) continue;
+        if (candidate.value.checkedAt !== checkedAt) throw new Error("Invalid result cache timestamp");
+        if (!latest || checkedAt > latest.value.checkedAt
+          || (checkedAt === latest.value.checkedAt && (candidate.mtimeMs > latest.mtimeMs
+            || (candidate.mtimeMs === latest.mtimeMs && entry.name > latestName)))) {
+          latest = candidate;
+          latestName = entry.name;
+        }
+      } catch {
+        if (allowed()) this.#error("An update result cache is invalid, unreadable, or unsafe.");
+      }
+    }
+    return allowed() ? latest?.value ?? null : null;
+  }
+
+  #compareResult(result: StoredResult): SoftwareUpdateCheck {
+    const { component, available, checkedAt, error } = result;
+    const installed = component === "app" ? this.#build.commit : this.#cliVersion;
+    let status: SoftwareUpdateCheck["status"];
+    let message: string;
+    if (error !== null) {
+      status = "unavailable"; message = error;
+    } else if (component === "app") {
+      if (!installed || this.#build.dirty || this.#build.source === "unknown" || !SHA.test(installed)) {
+        status = "unknown"; message = "The running app build cannot be compared reliably with main.";
+      } else if (installed === available) {
+        status = "match"; message = "The running app matches main at check time.";
+      } else {
+        status = "different"; message = "The running app and main are different builds.";
+      }
+    } else if (!installed) {
+      status = "unknown"; message = "The running skills CLI version is unknown.";
+    } else if (installed === available) {
+      status = "match"; message = "The running skills CLI matches the registry latest tag.";
+    } else {
+      status = "different"; message = "The running skills CLI differs from the registry latest tag.";
+    }
+    return { component, status, installed, available, checkedAt, message };
+  }
+
+  async #loadCache(component: UpdateComponent): Promise<void> {
+    const key = this.#cacheKey(component);
+    if (!key) return;
+    const generation = this.#generation[component];
+    const allowed = () => !this.#disposed && generation === this.#generation[component] && key === this.#cacheKey(component);
+    try {
+      if (!(await this.#directory(this.#cache, false)) || !allowed()) return;
+    } catch {
+      if (allowed()) this.#error("Update history is unavailable because its private storage is unsafe or unreadable.");
+      return;
+    }
+    try {
+      const attempt = attemptTimestamp(await readPrivateJson(this.#cacheFile(component, "attempt", key)), Date.now());
+      if (allowed()) this.#attempts[component] = attempt;
+    } catch {
+      if (allowed()) this.#error("An update attempt cache is invalid, unreadable, or unsafe.");
+    }
+    try {
+      const result = await this.#readResult(component, key);
+      if (allowed() && result) this.#results[component] = this.#compareResult(result);
+    } catch {
+      if (allowed()) this.#error("An update result cache is invalid, unreadable, or unsafe.");
+    }
+  }
+
+  async #storeResult(result: StoredResult, allowed: () => boolean): Promise<void> {
+    if (!result.scope || !allowed()) return;
+    try {
+      await this.#directory(this.#cache, true, allowed);
+      const file = path.join(this.#cache, `result-${result.component}-${result.scope}-${result.checkedAt}-${randomUUID()}.json`);
+      await atomicPrivateJson(file, result, allowed, async (temporary) => {
+        if (!(await this.#directory(this.#cache, false))) throw new Error("Update storage disappeared");
+        if (!allowed()) throw new Error("Update storage authorization changed");
+        // The destination is immutable; link fails rather than replacing any file.
+        await link(temporary, file);
+        await unlink(temporary);
+      });
+    } catch {
+      if (allowed()) this.#error("The completed update check could not be saved safely.");
+    }
+  }
 
   async #readConsent(component: UpdateComponent): Promise<StoredConsent | null> {
     if (!(await this.#directory(this.#config, false))) return null;
@@ -287,6 +481,7 @@ export class SoftwareUpdateService {
       if (previous && previous !== next) {
         this.#preferences.cli = false;
         this.#preferenceRevision.cli++;
+        this.#attempts.cli = null;
         this.#invalidate("cli");
         this.#error("The npm registry changed or became unavailable; automatic CLI checks are off until the current registry is approved.");
       }
@@ -321,6 +516,7 @@ export class SoftwareUpdateService {
       try { await this.#loadConsent(component); }
       catch { this.#preferences[component] = false; this.#error(`Automatic ${component === "app" ? "app" : "CLI"} update consent is invalid, unreadable, or unsafe; checks are off.`); }
     }
+    for (const component of COMPONENTS) await this.#loadCache(component);
     if (this.#disposed) return;
     this.#notify();
     for (const component of COMPONENTS) if (this.#preferences[component]) this.#schedule(component, 0);
@@ -330,10 +526,13 @@ export class SoftwareUpdateService {
     this.#generation[component]++;
     this.#flights.get(component)?.controller.abort();
     this.#flights.delete(component);
+    const wasChecking = this.#checking[component].size > 0;
+    this.#checking[component].clear();
     const timer = this.#timers.get(component);
-    clearTimeout(timer);
+    clearTimeout(timer?.handle);
     this.#timers.delete(component);
     delete this.#results[component];
+    if (wasChecking || timer) this.#notify();
   }
 
   async setAutomatic(component: UpdateComponent, enabled: boolean, expectedRegistry?: string): Promise<void> {
@@ -388,9 +587,10 @@ export class SoftwareUpdateService {
           reportInterruptedRevocation();
           return;
         }
+        const newlyEnabled = enabled && !this.#preferences[component];
         this.#preferences[component] = enabled;
         this.#notify();
-        if (enabled && !this.#disposed) this.#schedule(component, 0);
+        if (newlyEnabled && !this.#disposed) this.#launchAutomatic(component, true);
       } catch {
         if (revision !== this.#preferenceRevision[component] || storageRevision !== this.#storageRevision) {
           reportInterruptedRevocation();
@@ -438,35 +638,41 @@ export class SoftwareUpdateService {
 
   async check(component: UpdateComponent, expectedRegistry?: string): Promise<void> {
     if (this.#disposed) return;
-    if (component === "cli" && expectedRegistry !== undefined) {
-      let approvedRegistry = "";
-      try { approvedRegistry = safeRegistry(expectedRegistry); } catch { /* Invalid approval cannot authorize a host. */ }
-      if (!approvedRegistry || approvedRegistry !== this.#registryScope) {
-        this.#error("The npm registry changed; review it before checking the CLI.");
-        return;
+    const token = this.#beginChecking(component);
+    try {
+      if (component === "cli" && expectedRegistry !== undefined) {
+        let approvedRegistry = "";
+        try { approvedRegistry = safeRegistry(expectedRegistry); } catch { /* Invalid approval cannot authorize a host. */ }
+        if (!approvedRegistry || approvedRegistry !== this.#registryScope) {
+          this.#error("The npm registry changed; review it before checking the CLI.");
+          return;
+        }
       }
+      const generation = this.#generation[component];
+      const disclosedRegistry = this.#registryScope;
+      if (component === "cli") await this.#refreshRegistry();
+      if (this.#disposed || generation !== this.#generation[component]
+        || (component === "cli" && disclosedRegistry !== this.#registryScope)) return;
+      const existing = this.#flights.get(component);
+      if (existing) return await existing.promise;
+      const controller = new AbortController();
+      const flight: Flight = { controller, promise: Promise.resolve() };
+      flight.promise = this.#performCheck(component, controller, generation).finally(() => {
+        if (this.#flights.get(component) === flight) this.#flights.delete(component);
+      });
+      this.#flights.set(component, flight);
+      await flight.promise;
+    } finally {
+      this.#endChecking(component, token);
     }
-    const generation = this.#generation[component];
-    const disclosedRegistry = this.#registryScope;
-    if (component === "cli") await this.#refreshRegistry();
-    if (this.#disposed || generation !== this.#generation[component]
-      || (component === "cli" && disclosedRegistry !== this.#registryScope)) return;
-    const existing = this.#flights.get(component);
-    if (existing) return existing.promise;
-    const controller = new AbortController();
-    const flight: Flight = { controller, promise: Promise.resolve() };
-    flight.promise = this.#performCheck(component, controller, generation).finally(() => {
-      if (this.#flights.get(component) === flight) this.#flights.delete(component);
-    });
-    this.#flights.set(component, flight);
-    return flight.promise;
   }
 
   async #performCheck(component: UpdateComponent, controller: AbortController, generation: number): Promise<void> {
-    const installed = component === "app" ? this.#build.commit : this.#cliVersion;
-    let status: SoftwareUpdateCheck["status"] = "unavailable";
+    const scope = this.#cacheKey(component);
+    const allowed = () => !controller.signal.aborted && generation === this.#generation[component]
+      && !this.#disposed && scope === this.#cacheKey(component);
     let available: string | null = null;
-    let message = "Update check unavailable.";
+    let error: string | null = "Update check unavailable.";
     try {
       if (component === "cli" && !this.#registryScope) throw new Error("Registry unknown");
       const url = component === "app" ? GITHUB_URL : new URL("skills/latest", this.#registryScope).href;
@@ -476,51 +682,56 @@ export class SoftwareUpdateService {
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
       });
       if (!response.ok) {
-        message = `Update check unavailable (HTTP ${response.status}).`;
+        if (response.status >= 100 && response.status <= 599) error = `Update check unavailable (HTTP ${response.status}).`;
         await response.body?.cancel().catch(() => {});
       } else {
         const data = await responseJson(response);
         if (component === "app") {
           if (!isRecord(data) || typeof data.sha !== "string" || !SHA.test(data.sha)) throw new Error("Invalid app response");
           available = data.sha;
-          if (!installed || this.#build.dirty || this.#build.source === "unknown" || !SHA.test(installed)) {
-            status = "unknown";
-            message = "The running app build cannot be compared reliably with main.";
-          } else if (installed === available) {
-            status = "match"; message = "The running app matches main at check time.";
-          } else {
-            status = "different"; message = "The running app and main are different builds.";
-          }
         } else {
           if (!isRecord(data) || data.name !== "skills" || typeof data.version !== "string"
             || data.version.length > 128 || !VERSION.test(data.version)) throw new Error("Invalid CLI response");
           available = data.version;
-          if (!installed) { status = "unknown"; message = "The running skills CLI version is unknown."; }
-          else if (installed === available) { status = "match"; message = "The running skills CLI matches the registry latest tag."; }
-          else { status = "different"; message = "The running skills CLI differs from the registry latest tag."; }
         }
+        error = null;
       }
     } catch { /* Never expose network errors, URLs, credentials, or untrusted response text. */ }
-    if (controller.signal.aborted || generation !== this.#generation[component] || this.#disposed) return;
-    this.#results[component] = { component, status, installed, available, checkedAt: Date.now(), message };
+    if (!allowed()) return;
+    const result: StoredResult = {
+      kind: "skills-manager-update-result", version: 1, component, scope,
+      checkedAt: Date.now(), available, error,
+    };
+    await this.#storeResult(result, allowed);
+    if (!allowed()) return;
+    this.#results[component] = this.#compareResult(result);
     this.#notify();
   }
 
-  #schedule(component: UpdateComponent, delay: number): void {
+  #schedule(component: UpdateComponent, delay: number, approvedCheck = false): void {
     if (this.#disposed || !this.#preferences[component]) return;
     const previous = this.#timers.get(component);
-    clearTimeout(previous);
+    clearTimeout(previous?.handle);
+    const wait = Math.max(0, delay);
+    const at = Date.now() + wait;
     const timer = setTimeout(() => {
+      if (this.#timers.get(component)?.handle !== timer) return;
       this.#timers.delete(component);
-      const operation = this.#automaticCheck(component);
-      this.#background.add(operation);
-      void operation.finally(() => { this.#background.delete(operation); this.#notify(); });
-    }, Math.max(0, delay));
+      this.#launchAutomatic(component, approvedCheck);
+    }, wait);
     timer.unref();
-    this.#timers.set(component, timer);
+    this.#timers.set(component, { handle: timer, at });
+    this.#notify();
   }
 
-  async #automaticCheck(component: UpdateComponent): Promise<void> {
+  #launchAutomatic(component: UpdateComponent, approvedCheck: boolean): void {
+    const operation = this.#automaticCheck(component, approvedCheck);
+    this.#background.add(operation);
+    void operation.finally(() => { this.#background.delete(operation); });
+  }
+
+  async #automaticCheck(component: UpdateComponent, approvedCheck: boolean): Promise<void> {
+    const token = this.#beginChecking(component);
     const generation = this.#generation[component];
     const allowed = () => !this.#disposed && this.#preferences[component] && generation === this.#generation[component];
     try {
@@ -543,24 +754,30 @@ export class SoftwareUpdateService {
         this.#error("Automatic update checks are off because their saved consent is no longer valid.");
         return;
       }
-      const claim = await this.#claim(component, allowed);
+      const claim = await this.#claim(component, allowed, approvedCheck);
       if (!allowed()) return;
-      if (claim.claimed) await this.check(component);
-      if (allowed()) this.#schedule(component, Math.max(0, claim.next - Date.now()));
+      if (claim.at !== undefined) {
+        this.#attempts[component] = claim.at;
+        this.#notify();
+      }
+      // The claim retains the cross-process lock until the check and its result are saved.
+      if (allowed()) this.#schedule(component, Math.max(0, claim.next - Date.now()), approvedCheck && claim.retry);
     } catch {
       if (allowed()) {
         this.#error("Automatic update checks could not safely record their daily attempt; checks are paused until storage is available.");
         this.#schedule(component, 60_000);
       }
+    } finally {
+      this.#endChecking(component, token);
     }
   }
 
-  async #claim(component: UpdateComponent, allowed: () => boolean): Promise<{ claimed: boolean; next: number }> {
-    if (!allowed()) return { claimed: false, next: Date.now() + RETRY_MS };
+  async #claim(component: UpdateComponent, allowed: () => boolean, approvedCheck: boolean): Promise<{ next: number; retry: boolean; at?: number }> {
+    if (!allowed()) return { next: Date.now() + RETRY_MS, retry: false };
     await this.#directory(this.#cache, true, allowed);
-    if (!allowed()) return { claimed: false, next: Date.now() + RETRY_MS };
-    const hash = createHash("sha256").update(this.#scope(component)).digest("hex");
-    const file = path.join(this.#cache, `attempt-${component}-${hash}.json`);
+    if (!allowed()) return { next: Date.now() + RETRY_MS, retry: false };
+    const key = this.#cacheKey(component);
+    const file = this.#cacheFile(component, "attempt", key);
     const lock = `${file}.lock`;
     // This ownership token is read as text and never followed as a filesystem path.
     const token = `skills-manager-update-lock:${process.pid}:${randomBytes(12).toString("hex")}`;
@@ -568,32 +785,47 @@ export class SoftwareUpdateService {
     catch (error) {
       if (!hasErrorCode(error, "EEXIST")) throw error;
       if (allowed()) await this.#recoverAbandonedLock(lock, allowed);
-      return { claimed: false, next: Date.now() + RETRY_MS };
+      return { next: Date.now() + RETRY_MS, retry: true };
     }
     const identity = await lstat(lock);
     if (!identity.isSymbolicLink() || (process.getuid && identity.uid !== process.getuid())
       || await readlink(lock) !== token) throw new Error("Update coordination lock changed");
     try {
-      if (!allowed()) return { claimed: false, next: Date.now() + RETRY_MS };
+      if (!allowed()) return { next: Date.now() + RETRY_MS, retry: false };
       const value = await readPrivateJson(file);
       const now = Date.now();
-      if (value !== null && (!isRecord(value) || value.kind !== "skills-manager-update-attempt"
-        || value.version !== 1 || typeof value.at !== "number"
-        || !Number.isSafeInteger(value.at) || value.at < 0 || value.at > now + DAY_MS)) throw new Error("Invalid attempt cache");
-      const previous = isRecord(value) && typeof value.at === "number" ? value.at : null;
-      if (previous !== null && now < previous + DAY_MS) return { claimed: false, next: previous + DAY_MS };
-      if (!allowed()) return { claimed: false, next: now + RETRY_MS };
+      const previous = attemptTimestamp(value, now);
+      let result: StoredResult | null;
+      try { result = await this.#readResult(component, key); }
+      catch {
+        if (allowed()) this.#error("Automatic checks are paused because the result cache is invalid or unsafe; manual checks remain available.");
+        return { next: Date.now() + 60_000, retry: false };
+      }
+      if (!allowed()) return { next: now + RETRY_MS, retry: false };
+      if (result && (!this.#results[component] || this.#results[component]!.checkedAt < result.checkedAt)) {
+        this.#results[component] = this.#compareResult(result);
+        this.#notify();
+      }
+      if (!approvedCheck && result && now < result.checkedAt + DAY_MS) {
+        return { next: result.checkedAt + DAY_MS, ...(previous === null ? {} : { at: previous }), retry: false };
+      }
       await atomicPrivateJson(file, { kind: "skills-manager-update-attempt", version: 1, at: now }, allowed);
       // A stale-lock recovery can displace this holder. Its recorded timestamp
       // remains conservative, but it must not start a request without the lock.
       try {
         const current = await lstat(lock);
-        if (current.dev !== identity.dev || current.ino !== identity.ino) return { claimed: false, next: now + RETRY_MS };
+        if (current.dev !== identity.dev || current.ino !== identity.ino) return { next: now + RETRY_MS, at: now, retry: true };
       } catch (error) {
-        if (hasErrorCode(error, "ENOENT")) return { claimed: false, next: now + RETRY_MS };
+        if (hasErrorCode(error, "ENOENT")) return { next: now + RETRY_MS, at: now, retry: true };
         throw error;
       }
-      return { claimed: true, next: now + DAY_MS };
+      if (allowed()) {
+        this.#attempts[component] = now;
+        this.#notify();
+        await this.check(component);
+      }
+      const completed = this.#results[component];
+      return { next: completed ? completed.checkedAt + DAY_MS : now + DAY_MS, at: now, retry: false };
     } finally {
       // Only remove this instance's token; never follow it.
       try {

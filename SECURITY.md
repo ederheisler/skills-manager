@@ -56,7 +56,7 @@ Push and pull reviews require complete, original history. Shallow repositories a
 
 The Application updates menu offers separate checks for skills-manager and the Vercel `skills` CLI. Both automatic checks default to off. Each requires its own persistent opt-in for the disclosed host. You can disable either check independently. Disabling a check cancels its pending requests in the current session.
 
-After opt-in, the app can check after startup and during a long-running session. Automatic attempts occur at most once every 24 hours per component and host.
+Explicit opt-in starts a check and permits later daily checks for that component and host. With permission on and no completed result, startup checks even when an older attempt timestamp exists. The menu shows when a check is in progress.
 
 A manual check authorizes one bounded request and does not enable automatic checks. The app check contacts `https://api.github.com/repos/ederheisler/skills-manager/commits/main`. The CLI check contacts the configured npm registry, which defaults to `registry.npmjs.org`. Each host sees the IP address of the connection.
 
@@ -64,7 +64,7 @@ npm can protect a registry URL with embedded credentials in a user or global `.n
 
 Consent for one host does not authorize checks on the other. Neither check authorizes an update. Ordinary quit does not start an update.
 
-The app stores explicit consent in configuration and authorized check metadata in cache, outside the selected skills directory. Invalid, unreadable, or unwritable consent fails closed. If saving an opt-out fails, automatic checks stop in the current session, but an earlier saved opt-in can apply on a later launch. The app reports the save failure.
+The app stores explicit consent in configuration and completed check results in a private cache, outside the selected skills directory. The cache stores the checked commit or version, or a sanitized error, with its check time. It does not store registry credentials or a saved current-status verdict. Invalid, unreadable, or unwritable consent fails closed. If saving an opt-out fails, automatic checks stop in the current session, but an earlier saved opt-in can apply on a later launch. The app reports the save failure.
 
 The app saves completed directory setup separately in `$XDG_CONFIG_HOME/skills-manager/config.json` when `XDG_CONFIG_HOME` is absolute, or `~/.config/skills-manager/config.json` otherwise. This private configuration records the selected directory and its identity. It does not authorize later writes, Git actions, or network requests. App and CLI update consent remains separate.
 

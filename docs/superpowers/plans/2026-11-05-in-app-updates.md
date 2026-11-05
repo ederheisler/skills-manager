@@ -63,6 +63,10 @@ For CLI-only refresh, retain a known, reproducible full running app SHA and rebu
 For unknown, dirty, or otherwise nonreproducible identity, offer a manual route or an explicit switch to main.
 Never copy or overwrite a user checkout. An unchanged app SHA does not disable CLI checks or refresh.
 
+Amendment, 2026-11-05: The update screen uses the main view's colored letter controls. Enter does not enable automatic checks or approve actions. Automatic-check consent requires an explicit `y`. Both app and CLI update actions remain offered without a successful check or an available version. Do not show raw `latest` or `unknown` placeholders in place of useful status.
+
+New approval starts a check immediately and permits later daily checks for that component and host. Each permission remains off by default and separate. With permission on and no completed result, startup checks even when an old attempt timestamp exists. Save completed successes and failures in the private, host-scoped cache and show checking while a request is in progress. Recompare restored results with the current build or CLI identity. A recorded attempt alone is not a completed check.
+
 ## Implementation slices and dependencies
 
 ### 1. Prove and package build identity
@@ -246,6 +250,16 @@ Browse help showed Option+↑/↓ without Git operations. Git help showed commit
 A read-only scan of the installed skills found 40 entries, including 20 tracked entries and the `crit-cli` source. The installer lock, `crit-cli` document, and root entries stayed unchanged. The scan created no manager state.
 
 SCB reviewed 17 changed files. It flagged complexity and similar guard shapes. The guards cover different validation and lifecycle operations, so they were kept. This local run did not independently measure startup traffic or test Linux.
+
+### Local update controls and checks
+
+Before the final immutable cache change, the build and full suite passed with 646 tests passed and 11 skipped across 30 files. After that change, the build and 65 focused service and lifecycle tests passed. `npm audit` reported zero vulnerabilities, including development dependencies.
+
+Four native Node terminal sessions on macOS exited with status zero and empty stderr. Fresh default-off startup made no fetch. Tab and Enter did not enable checks. Explicit `y` approval for each component made one request to `api.github.com` or `registry.npmjs.org`, showed checking, and displayed the completed result. The next launch restored both results without a fetch during two seconds of observation.
+
+With existing permissions, recent legacy attempts, and no completed results, startup made one request per host and showed checking and completed results. The next launch restored those results without a fetch during two seconds of observation. The `c`, `a`, `r`, `f`, and `m` controls appeared bold in `#C6A0F6`. Both update actions appeared before results. The consent view fit six rows in a 40-row terminal.
+
+Setup configuration, permission files, and skill hashes stayed unchanged across each pair of sessions. The isolated fixtures were cleaned up. The actual user's skills and cache were untouched. A scoped SCB review of five changed source and test files found no correctness blocker. It retained complexity and duplicate-guard warnings because the guarded operations differ.
 
 ### Graph maintenance
 

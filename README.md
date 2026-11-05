@@ -29,13 +29,13 @@ Do not run `npx skills-manager`. That unscoped npm name belongs to another proje
 
 ## Application and CLI updates
 
-In browse mode, press `x` to open Application updates. The menu offers separate, bounded manual checks for skills-manager and the Vercel `skills` CLI. Manual checks do not enable automatic checks. Both automatic checks default to off and require separate persistent opt-ins for their disclosed hosts. You can disable either one.
+In browse mode, press `x` to open Application updates. The menu uses colored letter controls like the main view. A manual check does not enable automatic checks. Both automatic checks default to off and require separate persistent opt-ins for their disclosed hosts. Press `y` to approve an opt-in. Enter does not approve it. You can disable either check.
 
-The app check contacts `api.github.com`. The CLI check contacts the configured npm registry, `registry.npmjs.org` by default. Each host sees your connection's IP address. After opt-in, automatic attempts occur at most once every 24 hours per component and host while the app runs.
+The app check contacts `api.github.com`. The CLI check contacts the configured npm registry, `registry.npmjs.org` by default. Each host sees your connection's IP address. An opt-in starts a check, then permits daily checks for that component and host while the app runs. Completed results are saved and the menu shows when a check is in progress.
 
 The app check compares the running build's full commit SHA with GitHub `main`. The CLI check compares its resolved version with the registry's `latest` tag. A different commit is not necessarily newer, and `latest` does not guarantee compatibility. An unknown identity or unavailable check is not a match.
 
-Update and restart starts a new app from `main` and refreshes the CLI. A CLI-only refresh keeps a known, clean, reproducible full app commit and selects the latest CLI. A successful CLI check is not required for a refresh. If that commit is unknown, dirty, or not reproducible, use manual recovery or explicitly switch to `main`. A source checkout, tagged install, or unknown channel requires that switch for a combined update.
+Update and restart starts a new app from `main` and refreshes the CLI. A CLI-only refresh keeps a known, clean, reproducible full app commit and selects the latest CLI. The menu offers both update actions without requiring an available version or a successful check. If that commit is unknown, dirty, or not reproducible, use manual recovery or explicitly switch to `main`. A source checkout, tagged install, or unknown channel requires that switch for a combined update.
 
 The helper builds in a private project and cache. Repository and dependency scripts run with your normal permissions. Approve only trusted code. After shutdown, a failed handoff cannot restore the old screen. Rerun the [Quick start](#quick-start) command with the current `--skills-dir` for app recovery. See the [security policy](SECURITY.md#application-and-cli-updates) for workspace, credential, and cleanup details.
 
