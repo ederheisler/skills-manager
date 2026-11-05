@@ -94,3 +94,12 @@ Date: 2026-11-04
 The maintainer is currently the only repository collaborator. Every change to `main`, including the maintainer's changes, requires a pull request and the selected stable status checks. Direct pushes, force-pushes, deletion, and bypassing protections are prohibited. External contributors submit pull requests from forks. Only the maintainer has merge permission.
 
 On 2026-11-04, GitHub reported ruleset `26549966` active on `main`. It required pull requests, zero approvals, resolved review threads, and the `Required checks` status from GitHub Actions (integration ID `15368`). It required branches to be up to date, allowed no bypass, and blocked deletion and force-pushes. Zero approvals was an implementation choice for a sole-maintainer repository, not a separately selected review count.
+
+## Application update planning
+
+Date: 2026-11-05
+
+The user requested a plan for in-app application update notifications and an update process. No separate rationale was stated.
+The [application update plan](../superpowers/plans/2026-11-05-in-app-updates.md) is proposed and the feature is not implemented.
+Its opt-in, daily cadence, and handoff mechanics are recommendations, not approved decisions.
+The existing explicit-network policy and latest-main installation route remain current.
