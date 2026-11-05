@@ -235,7 +235,7 @@ The real-TUI suite allows 30 seconds for each complete workflow, retaining 4-sec
 
 The public verification record is attached to [implementation PR #8](https://github.com/ederheisler/skills-manager/pull/8).
 
-### Local regression verification
+### Local startup and UI checks
 
 `npm run build` passed. The 28 non-TUI test files passed. After correcting an obsolete browse-view Git expectation, all 60 TUI tests passed. The total was 610 passed and 11 skipped across 29 files. `npm audit` reported zero vulnerabilities.
 
@@ -243,9 +243,9 @@ On macOS, a native Node terminal fixture persisted the first setup. A second ord
 
 Browse help showed Option+↑/↓ without Git operations. Git help showed commit, fetch, pull, and push. Containing-repository information appeared only in Git view. The fixture skills, installer lock, outside sentinel, cache, and working directory stayed unchanged.
 
-A read-only scan of the installed skills found 40 entries, including 20 tracked entries and the `crit-cli` source. The installer lock, skill files, and root entries stayed unchanged. The scan created no manager state.
+A read-only scan of the installed skills found 40 entries, including 20 tracked entries and the `crit-cli` source. The installer lock, `crit-cli` document, and root entries stayed unchanged. The scan created no manager state.
 
-SCB reviewed 17 changed files. Complexity thresholds and similar guard shapes remained because validation and lifecycle operations differ. The review found no established correctness defect. Startup traffic was not independently instrumented for this regression, and current-head Linux CI was not observed in this local run.
+SCB reviewed 17 changed files. It flagged complexity and similar guard shapes. The guards cover different validation and lifecycle operations, so they were kept. This local run did not independently measure startup traffic or test Linux.
 
 ### Graph maintenance
 
@@ -265,3 +265,8 @@ The corrective test-harness commit needed a second, separately guarded AST refre
 - `repo.ts`, `tree_check_mount_fd`, `tree_same_snapshot`, `types.ts`, `withSkillsLock`
 
 The next test-only AST refresh reported 4 hub renames. No community names disappeared.
+
+The startup and UI fixes required one guarded AST refresh. It reported 42 hub renames. These names disappeared:
+
+- `API reference`, `Engine methods`, `Execution order`, `Implementation slices and dependencies`, `Setup`, `checkUpdates.ts`
+- `git-tree-hash.h`, `git.ts`, `ref_node_fs`, `skills-manager`, `tree.h`
