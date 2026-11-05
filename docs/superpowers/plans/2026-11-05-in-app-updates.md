@@ -261,6 +261,8 @@ With existing permissions, recent legacy attempts, and no completed results, sta
 
 Setup configuration, permission files, and skill hashes stayed unchanged across each pair of sessions. The isolated fixtures were cleaned up. The actual user's skills and cache were untouched. A scoped SCB review of five changed source and test files found no correctness blocker. It retained complexity and duplicate-guard warnings because the guarded operations differ.
 
+CI run [42083344358](https://github.com/ederheisler/skills-manager/actions/runs/42083344358) failed on all three platforms because the release smoke test expected obsolete footer text. The corrected harness passed locally on macOS arm64 with Node 26.13 against installed GitHub commit `42e2a8485ce247aade006f72bf1138aee807979b`. It exercised the real CLI refresh, same-commit restart, and sentinel assertions. The script complexity review found no additional blocker.
+
 ### Graph maintenance
 
 The Graphify AST refresh reported 54 hub renames and 20 disappeared names:

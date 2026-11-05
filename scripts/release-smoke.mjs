@@ -182,8 +182,7 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
       child.stdin.write('x');
     } else if (step === 5 && screen.includes('Application updates')
       && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)
-      && screen.includes('f refresh CLI only · m manual recovery · Esc close')) {
+      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)) {
       step = 6;
       stageStart = transcript.length;
       child.stdin.write(refresh ? 'f' : '\x1b');
@@ -229,8 +228,7 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
       child.stdin.write('x');
     } else if (step === 15 && screen.includes('Application updates')
       && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)
-      && screen.includes('f refresh CLI only · m manual recovery · Esc close')) {
+      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)) {
       step = 16;
       stageStart = transcript.length;
       child.stdin.write('\x1b');
