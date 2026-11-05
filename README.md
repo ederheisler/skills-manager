@@ -29,13 +29,13 @@ Do not run `npx skills-manager`. That unscoped npm name belongs to another proje
 
 ## Application and CLI updates
 
-In browse mode, press `x` to open Application updates. The menu offers separate, bounded manual checks for skills-manager and the Vercel `skills` CLI. Manual checks do not enable automatic checks. Both automatic checks default to off and require separate persistent opt-ins for their disclosed hosts. You can disable either one.
+In browse mode, press `x` to open Application updates. The menu uses colored letter controls like the main view. A manual check does not enable automatic checks. Both automatic checks default to off and require separate persistent opt-ins for their disclosed hosts. Press `y` to approve an opt-in. Enter does not approve it. You can disable either check.
 
-The app check contacts `api.github.com`. The CLI check contacts the configured npm registry, `registry.npmjs.org` by default. Each host sees your connection's IP address. After opt-in, automatic attempts occur at most once every 24 hours per component and host while the app runs.
+The app check contacts `api.github.com`. The CLI check contacts the configured npm registry, `registry.npmjs.org` by default. Each host sees your connection's IP address. An opt-in starts a check, then permits daily checks for that component and host while the app runs. Completed results are saved and the menu shows when a check is in progress.
 
 The app check compares the running build's full commit SHA with GitHub `main`. The CLI check compares its resolved version with the registry's `latest` tag. A different commit is not necessarily newer, and `latest` does not guarantee compatibility. An unknown identity or unavailable check is not a match.
 
-Update and restart starts a new app from `main` and refreshes the CLI. A CLI-only refresh keeps a known, clean, reproducible full app commit and selects the latest CLI. A successful CLI check is not required for a refresh. If that commit is unknown, dirty, or not reproducible, use manual recovery or explicitly switch to `main`. A source checkout, tagged install, or unknown channel requires that switch for a combined update.
+Update and restart starts a new app from `main` and refreshes the CLI. A CLI-only refresh keeps a known, clean, reproducible full app commit and selects the latest CLI. The menu offers both update actions without requiring an available version or a successful check. If that commit is unknown, dirty, or not reproducible, use manual recovery or explicitly switch to `main`. A source checkout, tagged install, or unknown channel requires that switch for a combined update.
 
 The helper builds in a private project and cache. Repository and dependency scripts run with your normal permissions. Approve only trusted code. After shutdown, a failed handoff cannot restore the old screen. Rerun the [Quick start](#quick-start) command with the current `--skills-dir` for app recovery. See the [security policy](SECURITY.md#application-and-cli-updates) for workspace, credential, and cleanup details.
 
@@ -56,7 +56,11 @@ Run `npm test` before opening a pull request. Merged version bumps are released 
 
 ## Using the app safely
 
-Onboarding lets you choose an existing skills directory. It does not merge or move skills, create Git state, or rewrite installer locks. Git initialization and backup are optional and default to skip. Review paths and destinations before approving changes. Press `?` in the browse or Git view to open keyboard help. Review dialogs default to cancellation.
+Onboarding lets you choose an existing skills directory. Completed setup is saved in `$XDG_CONFIG_HOME/skills-manager/config.json` when `XDG_CONFIG_HOME` is absolute. Otherwise, the path is `~/.config/skills-manager/config.json`. Later launches reuse setup for an unchanged root. A new or changed root requires setup again.
+
+Onboarding does not merge or move skills, create Git state, or rewrite installer locks. Git initialization and backup are optional and default to skip. Review paths and destinations before approving changes. Review dialogs default to cancellation.
+
+Existing Vercel installer records provide source tracking and update checks without skills-manager receipts. Press `?` for help in the current view. Git controls and repository status appear in Git view, not the browse footer. Shortcuts use Option on macOS and Alt on Linux.
 
 Local browsing works without network access. Automatic update checks require the separate opt-ins described above. Search, remote preparation, fetch, pull, and push require explicit actions. Remote preparation runs behind an operating-system boundary, not a general-purpose hostile-code sandbox. Do not edit or move files, or run Git commands, concurrently with an app action.
 

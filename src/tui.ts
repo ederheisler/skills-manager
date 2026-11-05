@@ -2,6 +2,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   BoxRenderable,
   CodeRenderable,
@@ -42,6 +43,7 @@ import type { SkillScope, SkillState } from "./state/filter.js";
 import { filterSkills } from "./state/filter.js";
 import { countSkillFileLines, listSkillFiles, readSkillFile, readSkillSource, readSkillText, scanSkills } from "./state/repo.js";
 import type { Skill, SkillFile } from "./state/types.js";
+import { readInstalledSource } from "./state/upstreamProvenance.js";
 import { checkForUpdates } from "./actions/checkUpdates.js";
 import { SoftwareUpdateService, type SoftwareUpdateCheck, type UpdateComponent } from "./actions/softwareUpdates.js";
 import { prepareUpdateHandoff, type PreparedUpdateHandoff, type UpdateTarget } from "./actions/appUpdateHandoff.js";
@@ -105,12 +107,16 @@ function registryOrigin(registry: string): string {
   try { return new URL(registry).origin; } catch { return "unknown"; }
 }
 
-function checkSummary(check: SoftwareUpdateCheck | undefined): string {
-  if (!check) return "not checked";
-  const state = check.status === "match" ? "matches at check time"
-    : check.status === "different" ? "different"
-      : check.status === "unknown" ? "identity unknown" : "unavailable";
-  return `${state} · ${new Date(check.checkedAt).toISOString()}${check.message ? ` · ${check.message}` : ""}`;
+function shortDate(timestamp: number): string {
+  return new Date(timestamp).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+}
+
+function checkSummary(check: SoftwareUpdateCheck | undefined, component: UpdateComponent, attempted: boolean): string {
+  if (!check) return attempted ? "No saved result" : "Not checked";
+  const state = check.status === "match" ? "Current"
+    : check.status === "different" ? component === "app" ? "Different build" : "Different version"
+      : check.status === "unknown" ? "Cannot compare" : "Error";
+  return `${state} · ${shortDate(check.checkedAt)}${check.status === "unavailable" && check.message ? ` · ${check.message}` : ""}`;
 }
 
 interface FrontmatterItem {
@@ -153,6 +159,7 @@ interface Confirmation {
   cancel?: () => Promise<void>;
   after?: () => Promise<void>;
   informational?: boolean;
+  explicitKeyApproval?: boolean;
   copyText?: string;
 }
 
@@ -472,7 +479,7 @@ export class SkillsManagerTui {
       } else if (key.name === "up" || key.name === "down") {
         this.#confirmationContent?.scrollBy(key.name === "up" ? -1 : 1);
       } else if (key.name === "left" || key.name === "right" || key.name === "tab") {
-        if (!this.#confirmation?.informational) {
+        if (!this.#confirmation?.informational && !this.#confirmation?.explicitKeyApproval) {
           this.#confirmationSelection = this.#confirmationSelection === "cancel" ? "approve" : "cancel";
           if (this.#confirmCancelButton) {
             this.#confirmCancelButton.fg = this.#confirmationSelection === "cancel" ? colors.enabled : colors.muted;
@@ -483,9 +490,9 @@ export class SkillsManagerTui {
             this.#confirmApproveButton.bg = this.#confirmationSelection === "approve" ? colors.selection : colors.panel;
           }
         }
-      } else if (key.name === "y" || (key.name === "return" && this.#confirmationSelection === "approve")) {
+      } else if (key.name === "y" || (key.name === "return" && !this.#confirmation?.explicitKeyApproval && this.#confirmationSelection === "approve")) {
         await this.#finishConfirmation(true);
-      } else if (key.name === "n" || key.name === "escape" || key.name === "return") {
+      } else if (key.name === "n" || key.name === "escape" || (key.name === "return" && !this.#confirmation?.explicitKeyApproval)) {
         await this.#finishConfirmation(false);
       }
       return;
@@ -803,11 +810,11 @@ export class SkillsManagerTui {
     this.#confirm({
       title: `Enable automatic ${label} checks`,
       lines: [
-        `Allow ${label} checks at ${host}. The host can see your IP address.`,
-        "The app may check at startup and at most once per 24 hours while running.",
-        "Consent is saved for future sessions. Select this component and press a again to disable it.",
-        "Each component has its own consent; this choice does not enable the other check.",
+        `Check ${label} now and at most once a day.`,
+        `Connects to ${host}; the server sees your IP address.`,
+        "In this menu, press a to turn checks off.",
       ],
+      explicitKeyApproval: true,
       returnMode: "software-updates",
       approve: async () => this.#softwareUpdates.setAutomatic(component, true, registry),
     });
@@ -853,7 +860,7 @@ export class SkillsManagerTui {
     this.#confirm({
       title: target === "all" ? "Update and restart both" : switchToMain ? "Refresh CLI: switch to main" : "Refresh Vercel skills CLI",
       lines: [
-        `Current skills directory: ${quoteTerminalPath(skillsDir)}. The new session repeats onboarding and approval.`,
+        `Current skills directory: ${quoteTerminalPath(skillsDir)}. The new session validates it again and reuses saved setup if unchanged.`,
         target === "all"
           ? "Start a new session from GitHub main and refresh the Vercel skills CLI. Main may advance beyond the last checked SHA."
           : switchToMain
@@ -912,7 +919,7 @@ export class SkillsManagerTui {
         "Run this command in a terminal to request the app from GitHub main:",
         command,
         "This app recovery command does not guarantee a fresh Vercel skills CLI. Use the CLI refresh action for that.",
-        "Press c to copy the exact command. The selected directory will be reviewed again during onboarding.",
+        "Press c to copy the exact command. The new session validates the selected directory again and reuses saved setup if unchanged.",
       ],
       returnMode: "software-updates",
       informational: true,
@@ -1059,6 +1066,7 @@ export class SkillsManagerTui {
     this.#confirm({
       title: "Update check",
       lines: [
+        "Checks upstream changes, not your local edits.",
         report.updated.length ? `Updates available: ${report.updated.map((id) => this.#skills.find((skill) => skill.id === id)?.name ?? id).join(", ")}` : report.unavailable.length ? "No updates identified; some checks were unavailable." : "No updates found.",
         ...report.unavailable.map(({ name, reason }) => `${name}: unavailable - ${reason}`),
       ],
@@ -1205,7 +1213,6 @@ export class SkillsManagerTui {
           `To: ${quoteTerminalPath(destination)}`,
           `Entry: ${skill.entryKind}${skill.linkTarget !== null ? ` -> ${quoteTerminalPath(skill.linkTarget)}` : ""}`,
           "Moves only this entry; dependent links may dangle until it returns.",
-          "Ownership and local changes may be unknown; source metadata is not permission.",
         ],
         returnMode: "browse",
         approve: async () => {
@@ -1267,14 +1274,14 @@ export class SkillsManagerTui {
     const revision = this.#revision;
     const snapshots = skills.map((skill) => ({
       ...skill,
-      lockEntry: skill.lockEntry ? { ...skill.lockEntry } : null,
+      lockEntry: skill.lockEntry ? structuredClone(skill.lockEntry) : null,
       provenance: { ...skill.provenance },
     }));
     this.#confirm({
       title: "Review saved sources",
       lines: [
         `Installation: ${quoteTerminalPath(root.path)}`,
-        "Saved source associations are not authenticated. Approval permits contacting these sources.",
+        "These saved sources have not been verified. Review the URLs before continuing.",
         ...snapshots.flatMap((skill) => skill.lockEntry && skill.provenance.kind === "source" ? [
           `Skill: ${quoteTerminalPath(skill.path)}`,
           `Source: ${quoteTerminalPath(skill.lockEntry.source)}`,
@@ -1298,7 +1305,15 @@ export class SkillsManagerTui {
       await this.#runExclusive(() => this.#checkForUpdates(skills));
       return;
     }
-    this.#reviewSources(skills, async (_root, snapshots) => this.#checkForUpdates(snapshots));
+    this.#reviewSources(skills, async (root, snapshots) => {
+      for (const skill of snapshots) {
+        if (!skill.lockEntry || skill.provenance.kind !== "source") continue;
+        const current = await readInstalledSource(root.path, skill.path, skill.name, root);
+        if (!isDeepStrictEqual(current, skill.lockEntry)) throw new Error("The saved source changed since approval.");
+      }
+      await assertApprovedSkillsRoot(root);
+      await this.#checkForUpdates(snapshots);
+    });
   }
 
   async #updateSelected(): Promise<void> {
@@ -1335,7 +1350,7 @@ export class SkillsManagerTui {
   async #updateAll(): Promise<void> {
     const candidates = this.#skills.filter((skill) => !skill.orphaned && skill.provenance.kind === "source" && skill.lockEntry);
     if (candidates.length === 0) {
-      this.#showError("No skills have a matching saved source association. Select a skill and supply a source to review a replacement.");
+      this.#showError("No skills have a saved source. Select a skill and supply a source to review a replacement.");
       return;
     }
     const skipped = this.#skills.filter((skill) => !skill.orphaned && (skill.provenance.kind !== "source" || !skill.lockEntry)).map((skill) => skill.name);
@@ -1354,7 +1369,7 @@ export class SkillsManagerTui {
         throw error;
       }
       this.#status = "";
-      this.#reviewPrepared(changes, "browse", skipped.length ? [`Skipped without a matching saved source association: ${skipped.join(", ")}. Select a skill and press u to supply a source.`] : []);
+      this.#reviewPrepared(changes, "browse", skipped.length ? [`Skipped without a saved source: ${skipped.join(", ")}. Select a skill and press u to supply a source.`] : []);
     });
   }
 
@@ -1973,7 +1988,7 @@ export class SkillsManagerTui {
       controls.add(entry);
     } else {
       controls.add(new TextRenderable(this.renderer, {
-        content: t`${fg(colors.accent)(bold("x"))} app updates · ${fg(colors.accent)(bold("o"))}pen · ${fg(colors.accent)(bold("space"))} enable/disable · ${fg(colors.accent)(bold("r"))}efresh · ${fg(colors.accent)(bold("u"))}pdate · u${fg(colors.accent)(bold("p"))}date all · ${fg(colors.accent)(bold("v"))} check · ${fg(colors.accent)(bold("a"))}dd · ${fg(colors.accent)(bold("d"))}elete · ${fg(colors.accent)(bold("g"))}it${this.options.selectSkillsDir ? " · i installation" : ""} · ${fg(colors.accent)(bold("q"))}uit`,
+        content: t`${fg(colors.accent)(bold("x"))} app updates · ${fg(colors.accent)(bold("o"))}pen · ${fg(colors.accent)(bold("space"))} enable/disable · ${fg(colors.accent)(bold("r"))}efresh · ${fg(colors.accent)(bold("u"))}pdate · u${fg(colors.accent)(bold("p"))}date all · ${fg(colors.accent)(bold("v"))} check · ${fg(colors.accent)(bold("a"))}dd · ${fg(colors.accent)(bold("d"))}elete · ${fg(colors.accent)(bold("g"))}it${this.options.selectSkillsDir ? " · " : ""}${this.options.selectSkillsDir ? fg(colors.accent)(bold("i")) : ""}${this.options.selectSkillsDir ? " directory" : ""} · ${fg(colors.accent)(bold("q"))}uit`,
         fg: colors.muted,
         height: 1,
         minWidth: 0,
@@ -1996,7 +2011,7 @@ export class SkillsManagerTui {
     });
     footer.add(this.#noticeText);
     footer.add(new TextRenderable(this.renderer, {
-      content: `Directory: ${quoteTerminalPath(this.#skillsDir)} | ${escapeTerminalSingleLine(this.#gitStatus || "Git: checking...")}`,
+      content: `Directory: ${quoteTerminalPath(this.#skillsDir)}${this.#isGitMode ? ` | ${escapeTerminalSingleLine(this.#gitStatus || "Git: checking...")}` : ""}`,
       fg: colors.muted,
       height: 1,
       wrapMode: "none",
@@ -2293,9 +2308,10 @@ export class SkillsManagerTui {
         skill.provenance.kind === "source"
           ? `Source: ${skill.provenance.source} · ${skill.provenance.sourceUrl}`
           : formatSkillSource(skill),
-        `Author: ${skill.authors.length ? skill.authors.join(", ") : "unknown"}`,
+        skill.authors.length ? `Author: ${skill.authors.join(", ")}` : "Author not listed",
         `Entry: ${skill.entryKind}${skill.linkTarget !== null ? ` -> ${quoteTerminalPath(skill.linkTarget)}` : ""}`,
-        ...(skill.recordedSource ? [`Recorded source (unverified): ${skill.recordedSource.source}`] : []),
+        ...(skill.recordedSource && (skill.provenance.kind !== "source" || !isDeepStrictEqual(skill.recordedSource, skill.lockEntry))
+          ? [`Recorded source (unverified): ${skill.recordedSource.source}`] : []),
         ...skill.warnings.map((warning) => `Warning: ${warning}`),
         ...metadata,
         ...(description ? [description.value] : []),
@@ -2413,23 +2429,26 @@ export class SkillsManagerTui {
     });
     this.#softwareContent = content;
     const updates = this.#softwareUpdates;
+    const activity = updates.activity();
     const app = updates.results.app;
     const cli = updates.results.cli;
     const build = updates.build;
     const lines = [
       ...(this.#preparingHandoff ? ["Preparing update session; q quits without starting it.", ""] : []),
       `${this.#softwareUpdateSelection === "app" ? ">" : " "} skills-manager (app) · automatic: ${updates.preferences.app ? "on" : "off"}`,
-      `  Running: ${build.version} · SHA: ${build.commit ?? "unknown"} (${build.source}${build.dirty ? ", dirty" : ""})`,
-      `  GitHub main SHA: ${app?.available ?? "unknown"}`,
-      `  Check: ${this.#softwareChecks.has("app") ? "checking..." : checkSummary(app)}`,
+      `  ${build.version === "unknown" ? "Installed version unavailable" : `Running: ${build.version}`}${build.commit ? ` · ${build.commit.slice(0, 7)}` : ""}${build.dirty ? " · modified" : ""}`,
+      ...(app?.available ? [`  Latest build: ${app.available.slice(0, 7)}`] : []),
+      `  Check: ${activity.app.checking ? "checking..." : checkSummary(app, "app", activity.app.lastAttemptAt !== null)}`,
+      ...(!app && activity.app.lastAttemptAt ? [`  Last attempt: ${shortDate(activity.app.lastAttemptAt)}`] : []),
+      ...(updates.preferences.app && activity.app.nextCheckAt ? [`  Next check: ${shortDate(activity.app.nextCheckAt)}`] : []),
       "",
       `${this.#softwareUpdateSelection === "cli" ? ">" : " "} Vercel skills CLI · automatic: ${updates.preferences.cli ? "on" : "off"}`,
-      `  Running version: ${updates.cliVersion ?? "unknown"} · registry latest: ${cli?.available ?? "unknown"}`,
-      `  Check: ${this.#softwareChecks.has("cli") ? "checking..." : checkSummary(cli)}`,
+      ...(updates.cliVersion ? [`  Running version: ${updates.cliVersion}`] : []),
+      ...(cli?.available ? [`  registry latest: ${cli.available}`] : []),
+      `  Check: ${activity.cli.checking ? "checking..." : checkSummary(cli, "cli", activity.cli.lastAttemptAt !== null)}`,
+      ...(!cli && activity.cli.lastAttemptAt ? [`  Last attempt: ${shortDate(activity.cli.lastAttemptAt)}`] : []),
+      ...(updates.preferences.cli && activity.cli.nextCheckAt ? [`  Next check: ${shortDate(activity.cli.nextCheckAt)}`] : []),
       "",
-      `App check: https://api.github.com · CLI check and install: ${registryOrigin(updates.registry)}`,
-      "Automatic checks are separate and off by default. Different does not necessarily mean newer.",
-      "Registry latest is informational, not a compatibility guarantee.",
       ...updates.errors.map((error) => `Update settings: ${error}`),
       ...(this.#message ? [`Notice: ${this.#message}`] : []),
     ];
@@ -2439,11 +2458,11 @@ export class SkillsManagerTui {
     }));
     dialog.add(content);
     dialog.add(new TextRenderable(this.renderer, {
-      content: " Up/down or 1/2 select · c check · a automatic on/off · PgUp/PgDn scroll",
+      content: t` Up/down select · ${fg(colors.accent)(bold("c"))} check selected · ${fg(colors.accent)(bold("a"))} automatic on/off · PgUp/PgDn scroll`,
       fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
     }));
     dialog.add(new TextRenderable(this.renderer, {
-      content: " r update and restart both · f refresh CLI only · m manual recovery · Esc close",
+      content: t` ${fg(colors.accent)(bold("r"))} update app + CLI · ${fg(colors.accent)(bold("f"))} refresh CLI · ${fg(colors.accent)(bold("m"))} recovery command · Esc close`,
       fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
     }));
     overlay.add(dialog);
@@ -2492,43 +2511,47 @@ export class SkillsManagerTui {
       });
     }
     content.add(new TextRenderable(this.renderer, {
-      content: [
-        "Navigation",
-        "Up/down or j/k   Select a skill, Git file or search result",
-        "[ / ] or Ctrl+p/n   Select previous/next skill file",
-        "Alt+up/down   Select previous/next skill file",
-        ", or .   Scroll skill metadata",
-        "PgUp/PgDn   Scroll the file or Git diff",
-        "?   Open help from browsing or Git",
-        "",
+      content: (this.#helpReturnMode === "browse" ? [
         "Browsing",
-        "/   Filter skills; Enter applies, Esc clears",
-        "s   Cycle source scope     e   Cycle enabled state",
-        "t   Toggle Markdown/raw    o   Open selected file",
-        "Space   Review enable/disable     d or Delete   Review removal",
-        "u   Update selected        p   Update all",
-        "v   Review update check    a   Search and add skills",
-        "r   Refresh                i   Select installation, if available",
-        "x   Application updates",
-        "g   Open Git               q   Quit",
-        "",
+        "Up/down, j/k      Select skill",
+        "[/], Ctrl+p/n     Select previous/next file",
+        `${`${process.platform === "darwin" ? "Option" : "Alt"}+↑/↓`.padEnd(18)}Select previous/next file`,
+        ",/.               Scroll metadata",
+        "PgUp/PgDn         Scroll file",
+        "g                 Open Git",
+        "x                 Application updates",
+        "/                 Filter skills",
+        "s                 Cycle scope",
+        "e                 Cycle enabled state",
+        "t                 Toggle Markdown/raw",
+        "o                 Open selected file",
+        "Space             Review enable/disable",
+        "d/Delete          Review removal",
+        "u                 Update selected",
+        "p                 Update all",
+        "v                 Review update check",
+        "a                 Search and add skills",
+        "r                 Refresh",
+        ...(this.options.selectSkillsDir ? ["i                 Select installation"] : []),
+        "q                 Quit",
+        "Esc               Clear filter",
+        "Context menu: Up/down or j/k select; Enter acts",
+      ] : [
         "Git",
-        "s   Cycle status filter    t   Toggle full diff context",
-        "r   Refresh                i   Initialize repository",
-        "n   Add remote             c   Review commit",
-        "f   Fetch                  l   Pull",
-        "p   Push                   Esc   Return to browsing",
+        "Up/down, j/k      Select Git file",
+        "PgUp/PgDn         Scroll diff",
+        "Esc               Return to browsing",
+        "s                 Cycle status filter",
+        "t                 Toggle full diff context",
+        "r                 Refresh",
+        "i                 Initialize repository",
+        "n                 Add remote",
+        "c                 Review commit",
+        "f                 Fetch",
+        "l                 Pull",
+        "p                 Push",
         "Git actions depend on repository state and require review.",
-        "",
-        "Reviews and prompts",
-        "Up/down or PgUp/PgDn   Scroll review",
-        "Left/right or Tab   Select Cancel/Approve",
-        "y   Approve     n or Esc   Cancel     Enter   Use selection",
-        "Informational reviews: Enter or Esc closes",
-        "Search results: Up/down or j/k select, Enter prepares, o opens repo",
-        "Text prompts: ? is literal, Enter submits, Esc cancels",
-        "Context menu: Up/down or j/k select, Enter acts; Esc clears filter or closes",
-      ].join("\n"),
+      ]).join("\n"),
       width: "100%",
       height: "auto",
       fg: colors.text,
@@ -2558,8 +2581,9 @@ export class SkillsManagerTui {
       justifyContent: "center",
       alignItems: "center",
     });
-    const width = Math.max(10, Math.min(110, this.renderer.width - 4));
-    const height = Math.max(5, Math.min(this.renderer.height - 3, 22));
+    const width = Math.max(10, Math.min(confirmation.explicitKeyApproval ? 76 : 110, this.renderer.width - 4));
+    const contentRows = confirmation.lines.reduce((sum, line) => sum + Math.max(1, Math.ceil(escapeTerminalSingleLine(line).length / Math.max(1, width - 4))), 0);
+    const height = Math.max(5, Math.min(this.renderer.height - 3, confirmation.explicitKeyApproval ? contentRows + 3 : 22));
     const dialog = new BoxRenderable(this.renderer, {
       width,
       height,
@@ -2601,9 +2625,11 @@ export class SkillsManagerTui {
       backgroundColor: colors.panel,
     });
     this.#confirmCancelButton = new TextRenderable(this.renderer, {
-      content: confirmation.informational ? "[Enter/Esc] Close" : "[n/Esc/Enter] Cancel",
-      fg: this.#confirmationSelection === "cancel" ? colors.enabled : colors.muted,
-      bg: this.#confirmationSelection === "cancel" ? colors.selection : colors.panel,
+      content: confirmation.explicitKeyApproval
+        ? t` ${fg(colors.accent)(bold("n"))} cancel · Esc back`
+        : confirmation.informational ? "[Enter/Esc] Close" : "[n/Esc] Cancel",
+      fg: !confirmation.explicitKeyApproval && this.#confirmationSelection === "cancel" ? colors.enabled : colors.muted,
+      bg: !confirmation.explicitKeyApproval && this.#confirmationSelection === "cancel" ? colors.selection : colors.panel,
       height: 1,
       selectable: false,
       onMouseDown: () => { this.#track(this.#finishConfirmation(false)); },
@@ -2611,21 +2637,23 @@ export class SkillsManagerTui {
     buttons.add(this.#confirmCancelButton);
     if (!confirmation.informational) {
       this.#confirmApproveButton = new TextRenderable(this.renderer, {
-      content: "  [y] Approve",
-      fg: this.#confirmationSelection === "approve" ? colors.enabled : colors.muted,
-      bg: this.#confirmationSelection === "approve" ? colors.selection : colors.panel,
+      content: confirmation.explicitKeyApproval ? t` · ${fg(colors.accent)(bold("y"))} enable` : "  [y] Approve",
+      fg: !confirmation.explicitKeyApproval && this.#confirmationSelection === "approve" ? colors.enabled : colors.muted,
+      bg: !confirmation.explicitKeyApproval && this.#confirmationSelection === "approve" ? colors.selection : colors.panel,
       height: 1,
       selectable: false,
       onMouseDown: () => { this.#track(this.#finishConfirmation(true)); },
       });
       buttons.add(this.#confirmApproveButton);
     }
-    buttons.add(new TextRenderable(this.renderer, {
-      content: "  Up/down or PgUp/PgDn scroll",
-      fg: colors.muted,
-      height: 1,
-      selectable: false,
-    }));
+    if (!confirmation.explicitKeyApproval) {
+      buttons.add(new TextRenderable(this.renderer, {
+        content: confirmation.informational ? "  Up/down or PgUp/PgDn scroll" : "  Enter: selected action · Tab/left/right select · Up/down scroll",
+        fg: colors.muted,
+        height: 1,
+        selectable: false,
+      }));
+    }
     dialog.add(buttons);
     overlay.add(dialog);
     return overlay;

@@ -227,6 +227,11 @@ describe("scanSkills", () => {
   it("keeps missing, invalid, and unassociated lock entries unknown without editing them", async () => {
     const paths = resolvePaths(agentRoot);
     await writeSkill(agentRoot, "manual", "---\nname: manual\n---\n");
+    const entry = {
+      source: "owner/repo", sourceType: "github", sourceUrl: "https://github.com/owner/repo",
+      skillPath: "skills/manual/SKILL.md", skillFolderHash: "f".repeat(40),
+      installedAt: "2026-01-01", updatedAt: "2026-01-01",
+    };
     await expect(scanSkills(agentRoot)).resolves.toEqual([
       expect.objectContaining({ name: "manual", lockEntry: null, provenance: { kind: "unknown" } }),
     ]);
@@ -234,17 +239,48 @@ describe("scanSkills", () => {
       "{broken",
       JSON.stringify({ version: 3 }),
       JSON.stringify({ version: 3, skills: { manual: { source: "owner/repo" } } }),
-      JSON.stringify({ version: 3, skills: { manual: {
-        source: "owner/repo", sourceType: "github", sourceUrl: "https://github.com/owner/repo",
-        skillPath: "skills/manual/SKILL.md", skillFolderHash: "f".repeat(40),
-        installedAt: "2026-01-01", updatedAt: "2026-01-01",
-      } } }),
+      JSON.stringify({ version: 2, skills: { manual: entry } }),
+      JSON.stringify({ version: 3, skills: { other: entry } }),
+      JSON.stringify({ version: 3, skills: { manual: { ...entry, sourceUrl: "https://github.com/other/repo" } } }),
+      JSON.stringify({ version: 3, skills: { manual: { ...entry, skillFolderHash: "not-a-hash" } } }),
+      JSON.stringify({ version: 3, skills: { manual: { ...entry, skillPath: "../outside/SKILL.md" } } }),
     ]) {
       await writeFile(paths.lockFile, lock);
       const skills = await scanSkills(agentRoot);
-      expect(skills).toEqual([expect.objectContaining({ name: "manual", lockEntry: null, provenance: { kind: "unknown" } })]);
+      expect(skills).toEqual([expect.objectContaining({
+        name: "manual", lockEntry: null, recordedSource: null, provenance: { kind: "unknown" },
+      })]);
       expect(await readFile(paths.lockFile, "utf8")).toBe(lock);
     }
+    await expect(lstat(path.join(agentRoot, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["active", "disabled"])("tracks a valid Vercel parent record for an %s skill after local edits", async (location) => {
+    const paths = resolvePaths(agentRoot);
+    const directory = location === "active" ? paths.skillsDir : paths.disabledDir;
+    const skillFile = path.join(directory, "example", "SKILL.md");
+    await writeSkill(directory, "example", "---\nname: example\ndescription: Adopted skill\n---\nOriginal\n");
+    const entry = {
+      source: "owner/repo", sourceType: "github", sourceUrl: "https://github.com/owner/repo.git",
+      skillPath: "skills/example/SKILL.md", skillFolderHash: "f".repeat(40),
+      installedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    };
+    const lock = `${JSON.stringify({ version: 3, skills: { example: entry }, dismissed: {} }, null, 2)}\n`;
+    await writeFile(paths.lockFile, lock);
+    for (const edited of [false, true]) {
+      if (edited) await writeFile(skillFile, "---\nname: example\ndescription: Adopted skill\n---\nLocal edits\n");
+      expect(await scanSkills(agentRoot)).toEqual([expect.objectContaining({
+        name: "example",
+        enabled: location === "active",
+        authors: [],
+        lockEntry: entry,
+        recordedSource: entry,
+        provenance: { kind: "source", source: entry.source, sourceUrl: entry.sourceUrl },
+      })]);
+      expect(await readFile(paths.lockFile, "utf8")).toBe(lock);
+      await expect(lstat(path.join(agentRoot, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(await readFile(skillFile, "utf8")).toContain("Local edits");
   });
 
   it("bounds large previews and reports the truncation without changing the source", async () => {

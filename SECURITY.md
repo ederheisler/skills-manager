@@ -20,7 +20,7 @@ The app reads skills as untrusted data. It must not execute frontmatter, infer o
 
 App locks coordinate app instances, not external editors, filesystem moves, or Git commands. Do not run those operations concurrently with an app action. Stale checks are not atomic pathname guards. Processes running as your user can replace the app, alter saved state, or move already-open files; the app does not claim protection against those actions.
 
-Saved source receipts are continuity metadata, not publisher authentication or proof that a user previously approved a source. An untrusted restore over the same installation can forge those associations. Review the source destination before each remote check or update, and review staged content separately before import.
+Saved source receipts and Vercel installer lock entries are continuity metadata, not publisher authentication or proof of prior approval or unchanged local content. An untrusted restore over the same installation can forge those associations. Review the source destination before each remote check or update, and review staged content separately before import.
 
 Ambiguous recovery state is retained for inspection. The app must not delete foreign locks or overwrite foreign files merely to make recovery succeed.
 
@@ -28,7 +28,7 @@ Ambiguous recovery state is retained for inspection. The app must not delete for
 
 Linux mutations require Landlock ABI 5 or later and mount-aware `statx`. If the required boundary is unavailable, the app refuses the mutation rather than allowing unrestricted writes.
 
-The app inspects only the selected installation. Project-local directories require explicit selection. Onboarding previews a linked directory's resolved target. Adoption does not copy, merge, move, or relink skills, create Git state, or rewrite an installer's lock. A missing directory does not authorize creating it automatically.
+The app inspects only the selected installation. Project-local directories require explicit selection. Onboarding previews a linked directory's resolved target. Completed setup is reused for an unchanged root, but every launch freshly validates its physical identity. A new or changed root requires setup again. Adoption does not copy, merge, move, or relink skills, create Git state, or rewrite an installer's lock. A missing directory does not authorize creating it automatically.
 
 Manual and tool-installed skills use the same local scan. Invalid metadata and broken links remain visible. Separate installations remain separate, even when skill names match. Active entries live at `<skills-dir>/<name>`. Disabled entries live at `<skills-dir>/.disabled_skills/<name>`. The app does not automatically migrate an existing sibling `.disabled_skills` directory.
 
@@ -56,7 +56,7 @@ Push and pull reviews require complete, original history. Shallow repositories a
 
 The Application updates menu offers separate checks for skills-manager and the Vercel `skills` CLI. Both automatic checks default to off. Each requires its own persistent opt-in for the disclosed host. You can disable either check independently. Disabling a check cancels its pending requests in the current session.
 
-After opt-in, the app can check after startup and during a long-running session. Automatic attempts occur at most once every 24 hours per component and host.
+Explicit opt-in starts a check and permits later daily checks for that component and host. With permission on and no completed result, startup checks even when an older attempt timestamp exists. The menu shows when a check is in progress.
 
 A manual check authorizes one bounded request and does not enable automatic checks. The app check contacts `https://api.github.com/repos/ederheisler/skills-manager/commits/main`. The CLI check contacts the configured npm registry, which defaults to `registry.npmjs.org`. Each host sees the IP address of the connection.
 
@@ -64,7 +64,9 @@ npm can protect a registry URL with embedded credentials in a user or global `.n
 
 Consent for one host does not authorize checks on the other. Neither check authorizes an update. Ordinary quit does not start an update.
 
-The app stores explicit consent in configuration and authorized check metadata in cache, outside the selected skills directory. Invalid, unreadable, or unwritable consent fails closed. If saving an opt-out fails, automatic checks stop in the current session, but an earlier saved opt-in can apply on a later launch. The app reports the save failure.
+The app stores explicit consent in configuration and completed check results in a private cache, outside the selected skills directory. The cache stores the checked commit or version, or a sanitized error, with its check time. It does not store registry credentials or a saved current-status verdict. Invalid, unreadable, or unwritable consent fails closed. If saving an opt-out fails, automatic checks stop in the current session, but an earlier saved opt-in can apply on a later launch. The app reports the save failure.
+
+The app saves completed directory setup separately in `$XDG_CONFIG_HOME/skills-manager/config.json` when `XDG_CONFIG_HOME` is absolute, or `~/.config/skills-manager/config.json` otherwise. This private configuration records the selected directory and its identity. It does not authorize later writes, Git actions, or network requests. App and CLI update consent remains separate.
 
 The app compares the running build's full commit with `main`. Different commits do not establish which build is newer. The CLI check compares the resolved CLI version with the registry's `latest` tag. The tag is not a compatibility guarantee or a tested-version gate. An unknown build or CLI version, an offline request, or an invalid response is not a match.
 
@@ -78,7 +80,7 @@ The helper does not directly install into your checkout, running package, shared
 
 The helper prints the workspace path before installation and keeps the workspace while the new app runs. If the new app exits with status zero, the helper attempts identity-checked cleanup. If the new app exits abnormally or is interrupted, the helper keeps and reports the workspace because descendant processes can still run. A hard kill or crash can also leave the workspace behind. Before removing a leftover workspace, make sure that no process still uses it.
 
-The new app repeats onboarding and revalidates the selected skills directory. The selected directory is passed as a separate `--skills-dir` argument, not through a shell.
+The new app freshly validates the selected physical skills directory and reuses completed setup for an unchanged root. A new or changed root requires setup again. The selected directory is passed as a separate `--skills-dir` argument, not through a shell.
 
 After shutdown, a failed handoff cannot restore the old app screen. The app reports the failure and a manual recovery command. You can also run this command with your current absolute skills directory:
 
@@ -100,4 +102,4 @@ The boundary confines the upstream process's filesystem access. It is not a gene
 
 The app reviews staged results before importing them into the selected installation. It never temporarily enables live disabled skills to update them. External installer locks remain read-only. Updates and checks using saved sources require a separate review of the source URL and ref before contact. Updates also require staged-content approval before import. Unknown sources require explicit selection.
 
-A matching receipt associates current contents with the same physical installation. Copied or recreated installations can require source re-review. Upstream telemetry is disabled with `DISABLE_TELEMETRY=1` and `DO_NOT_TRACK=1`. Upstream documents that this also disables its security-audit requests. Remote actions still contact their requested services and source hosts. Authentication or network failures are visible, not empty successful results.
+A matching receipt associates a source with the same physical installation. Valid existing Vercel installer lock entries can also provide source tracking without a manager receipt. A saved baseline is not proof of current local content. Version checks compare upstream with the recorded baseline. Copied or recreated installations can require source re-review. Upstream telemetry is disabled with `DISABLE_TELEMETRY=1` and `DO_NOT_TRACK=1`. Upstream documents that this also disables its security-audit requests. Remote actions still contact their requested services and source hosts. Authentication or network failures are visible, not empty successful results.

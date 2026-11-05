@@ -96,8 +96,28 @@ async function inspectRefreshedSession(workspace) {
   assert.equal(runtime.executable, await realpath(runtime.executable));
   assert.ok(runtime.executable.startsWith(`${skillsRoot}${path.sep}`));
 }
+const localGitPrompt = 'Review optional local Git initialization? [y/N] (q to cancel): ';
+const remoteGitPrompt = 'Review optional remote backup? [y/N] (q to cancel): ';
+const startupQuestions = ['Review optional local Git initialization?', 'Review optional remote backup?'];
+const startupPromptMarkers = [
+  'Choose a skills directory.',
+  'Choose [',
+  'Skills directory path',
+  'Manage this resolved target?',
+  ...startupQuestions,
+];
 
-async function browseInTerminal(skillsDir, refresh = false) {
+function startupPrompts(text) {
+  return startupPromptMarkers.flatMap((prompt) => {
+    const matches = [];
+    for (let index = text.indexOf(prompt); index !== -1; index = text.indexOf(prompt, index + prompt.length)) {
+      matches.push({ index, prompt });
+    }
+    return matches;
+  }).sort((a, b) => a.index - b.index).map(({ prompt }) => prompt);
+}
+
+async function browseInTerminal(skillsDir, { saved = false, refresh = false, explicit = !saved } = {}) {
   const relay = fileURLToPath(new URL('./release-smoke-pty.py', import.meta.url));
   let transcript = '';
   let stderr = '';
@@ -107,9 +127,10 @@ async function browseInTerminal(skillsDir, refresh = false) {
   let updateWorkspace;
   const terminal = new xterm.Terminal({ cols: 140, rows: 40, allowProposedApi: true });
   let pending = Promise.resolve();
-  const child = spawn('python3', [relay, cli, '--skills-dir', skillsDir], {
+  const child = spawn('python3', [relay, cli, ...(explicit ? ['--skills-dir', skillsDir] : [])], {
     cwd: work, env: process.env, stdio: ['pipe', 'pipe', 'pipe'],
   });
+
   child.stdin.on('error', () => {});
   terminal.onData((data) => child.stdin.write(data));
   child.stdout.setEncoding('utf8');
@@ -133,15 +154,21 @@ async function browseInTerminal(skillsDir, refresh = false) {
       buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? '').join('\n');
     const browse = screen.includes('x app updates') && !screen.includes('Keyboard help')
       && !screen.includes('Application updates');
-    if (step === 0 && text.includes('Review optional local Git initialization? [y/N]')) {
+    if (step <= 2) {
+      const prompts = startupPrompts(text);
+      const expected = saved ? [] : startupQuestions;
+      assert.deepEqual(prompts, expected.slice(0, prompts.length), 'Unexpected startup prompt or prompt order');
+      assert.ok(prompts.length <= (saved ? 0 : Math.min(step + 1, expected.length)), 'A startup question appeared before the previous answer');
+    }
+    if (!saved && step === 0 && text.includes(localGitPrompt)) {
       step = 1;
       child.stdin.write('\n');
-    }
-    if (step === 1 && text.includes('Review optional remote backup? [y/N]')) {
+    } else if (!saved && step === 1 && text.includes(remoteGitPrompt)) {
       step = 2;
       child.stdin.write('\n');
-    }
-    if (step === 2 && /Skills\s+1\s+shown/.test(screen) && browse) {
+    } else if (((saved && step === 0) || (!saved && step === 2)) && /Skills\s+1\s+shown/.test(screen) && browse) {
+      assert.deepEqual(startupPrompts(text), saved ? [] : startupQuestions, 'Incorrect startup questions before browsing');
+      if (!saved) assert.ok(text.includes('Selected skills directory:'), 'The first launch must show its selected directory');
       step = 3;
       stageStart = transcript.length;
       child.stdin.write('?');
@@ -155,8 +182,7 @@ async function browseInTerminal(skillsDir, refresh = false) {
       child.stdin.write('x');
     } else if (step === 5 && screen.includes('Application updates')
       && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)
-      && screen.includes('f refresh CLI only · m manual recovery · Esc close')) {
+      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)) {
       step = 6;
       stageStart = transcript.length;
       child.stdin.write(refresh ? 'f' : '\x1b');
@@ -169,43 +195,29 @@ async function browseInTerminal(skillsDir, refresh = false) {
       step = 8;
       stageStart = transcript.length;
       child.stdin.write('y');
-    } else if (step === 8 && text.includes('Installing the approved update in a private session.')
-      && text.includes('Starting the new application.')
-      && text.includes('Selected skills directory:')
-      && text.includes('Review optional local Git initialization? [y/N]')) {
-      const match = /Update workspace \(manual cleanup if interrupted\): ("[^\r\n]*")/.exec(text);
-      if (!match) {
-        failure = new Error('The update helper did not print its workspace before starting the new application');
-        child.kill('SIGTERM');
-        return;
-      }
-      try {
+    } else if (step === 8) {
+      assert.deepEqual(startupPrompts(text), [], 'The refreshed child must not show startup prompts for the unchanged root');
+      const marker = 'Starting the new application.';
+      const started = text.indexOf(marker);
+      const childOutput = started === -1 ? '' : text.slice(started + marker.length);
+      if (childOutput.trim() && /Skills\s+1\s+shown/.test(screen) && browse) {
+        assert.ok(text.includes('Installing the approved update in a private session.'));
+        const match = /Update workspace \(manual cleanup if interrupted\): ("[^\r\n]*")/.exec(text);
+        assert.ok(match, 'The update helper must print its workspace before starting the new application');
         updateWorkspace = JSON.parse(match[1]);
         assert.ok(path.isAbsolute(updateWorkspace));
         assert.equal(path.dirname(updateWorkspace), temporary);
         assert.ok(path.basename(updateWorkspace).startsWith('skills-manager-update-'));
-      } catch (error) {
-        failure = error;
-        child.kill('SIGTERM');
-        return;
+        step = 12;
+        void inspectRefreshedSession(updateWorkspace).then(() => {
+          step = 13;
+          stageStart = transcript.length;
+          child.stdin.write('?');
+        }).catch((error) => {
+          failure = error;
+          child.kill('SIGTERM');
+        });
       }
-      step = 10;
-      stageStart = transcript.length;
-      child.stdin.write('\n');
-    } else if (step === 10 && text.includes('Review optional remote backup? [y/N]')) {
-      step = 11;
-      stageStart = transcript.length;
-      child.stdin.write('\n');
-    } else if (step === 11 && /Skills\s+1\s+shown/.test(screen) && browse) {
-      step = 12;
-      void inspectRefreshedSession(updateWorkspace).then(() => {
-        step = 13;
-        stageStart = transcript.length;
-        child.stdin.write('?');
-      }).catch((error) => {
-        failure = error;
-        child.kill('SIGTERM');
-      });
     } else if (step === 13 && screen.includes('Keyboard help') && /x\s+Application updates/.test(screen)) {
       step = 14;
       stageStart = transcript.length;
@@ -216,8 +228,7 @@ async function browseInTerminal(skillsDir, refresh = false) {
       child.stdin.write('x');
     } else if (step === 15 && screen.includes('Application updates')
       && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)
-      && screen.includes('f refresh CLI only · m manual recovery · Esc close')) {
+      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)) {
       step = 16;
       stageStart = transcript.length;
       child.stdin.write('\x1b');
@@ -298,30 +309,51 @@ async function run() {
   assert.equal(runtime.executable, await realpath(runtime.executable));
   assert.ok(runtime.executable.startsWith(`${runtime.packageRoot}${path.sep}`), 'Skills executable must be inside its package');
 
-
-  // Adoption is read-only, including when both optional Git questions default to no.
+  // Adoption is read-only apart from the separate, isolated startup configuration.
   const browseRoot = path.join(work, 'browse');
   const browseText = '---\nname: browse\ndescription: Existing skill\n---\n\n# Existing\n';
   await put(path.join(browseRoot, 'browse', 'SKILL.md'), browseText);
   const browseBefore = await snapshot(browseRoot);
+  const configDirectory = path.join(work, 'config');
+  const configFile = path.join(configDirectory, 'skills-manager', 'config.json');
+  await missing(configFile);
   await browseInTerminal(browseRoot);
-  assert.deepEqual(await snapshot(browseRoot), browseBefore);
-  assert.deepEqual(await readdir(home), []);
-  for (const name of ['config', 'cache', 'data', 'state']) assert.deepEqual(await readdir(path.join(work, name)), []);
-  await missing(path.join(browseRoot, '.git'));
-  await missing(path.join(browseRoot, '.skills-manager'));
-  assert.deepEqual(await snapshot(outside), outsideBefore);
-  assert.deepEqual(await readFile(externalLock), lockBefore);
-
-  if (previousEnv.RELEASE_EXPECTED_COMMIT !== undefined) {
-    await browseInTerminal(browseRoot, true);
+  const configBytes = await readFile(configFile);
+  const canonicalBrowseRoot = await realpath(browseRoot);
+  const configRelative = path.relative(canonicalBrowseRoot, await realpath(configFile));
+  assert.ok(configRelative === '..' || configRelative.startsWith(`..${path.sep}`) || path.isAbsolute(configRelative),
+    'Saved startup configuration must be outside the selected skills root');
+  assert.deepEqual(JSON.parse(configBytes.toString('utf8')), {
+    kind: 'skills-manager-setup',
+    version: 1,
+    selectedPath: browseRoot,
+    canonicalRoot: canonicalBrowseRoot,
+    identity: (await boundary.approveSkillsRoot(canonicalBrowseRoot)).identity,
+  });
+  const expectedConfig = [
+    ['skills-manager', 'directory'],
+    ['skills-manager/config.json', 'file', configBytes.toString('hex')],
+  ];
+  async function assertBrowseSafety() {
     assert.deepEqual(await snapshot(browseRoot), browseBefore);
     assert.deepEqual(await readdir(home), []);
-    for (const name of ['config', 'cache', 'data', 'state']) assert.deepEqual(await readdir(path.join(work, name)), []);
+    assert.deepEqual(await snapshot(configDirectory), expectedConfig);
+    for (const name of ['cache', 'data', 'state']) assert.deepEqual(await readdir(path.join(work, name)), []);
     await missing(path.join(browseRoot, '.git'));
     await missing(path.join(browseRoot, '.skills-manager'));
     assert.deepEqual(await snapshot(outside), outsideBefore);
     assert.deepEqual(await readFile(externalLock), lockBefore);
+  }
+  await assertBrowseSafety();
+
+  // A normal launch without --skills-dir restores the saved root without questions.
+  await browseInTerminal(browseRoot, { saved: true });
+  await assertBrowseSafety();
+
+  if (previousEnv.RELEASE_EXPECTED_COMMIT !== undefined) {
+    // The refresh and its child also reuse the unchanged configuration, even with an explicit root.
+    await browseInTerminal(browseRoot, { saved: true, refresh: true, explicit: true });
+    await assertBrowseSafety();
   }
 
   // Exercise the installed native boundary with independently reviewed source bytes.

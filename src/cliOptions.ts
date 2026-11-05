@@ -8,10 +8,10 @@ export const helpText = `Usage: skills-manager [--skills-dir <path>]
 Manage skills in a selected directory without moving or merging installations.
 
 Options:
-  --skills-dir <path>  Select the skills directory directly (default: ~/.agents/skills)
+  --skills-dir <path>  Select the skills directory directly
   -h, --help           Show this help and exit
 
-Without --skills-dir, choose a documented global location or enter a path.
+Reuse saved setup for an unchanged directory; otherwise choose a directory.
 Local Git setup and remote backup are optional.
 Application and skills CLI updates have separate manual checks.
 Background checks are separately opt-in and off by default.

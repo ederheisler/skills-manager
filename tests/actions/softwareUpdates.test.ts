@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -78,7 +79,7 @@ describe("software update consent and checks", () => {
     expect(updates.results.cli?.status).toBe("different");
     expect(updates.preferences).toEqual({ app: false, cli: false });
     await expect(lstat(config)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(lstat(cache)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await lstat(cache)).isDirectory()).toBe(true);
   }, 30_000);
 
   it("persists independent consent and only permits automatic CLI requests to the approved registry", async () => {
@@ -92,6 +93,7 @@ describe("software update consent and checks", () => {
     await first.start();
     await first.setAutomatic("cli", true);
     await vi.waitFor(() => expect(requests).toHaveLength(1), { timeout: 10_000 });
+    await vi.waitFor(() => expect(first.results.cli?.available).toBe("999.0.0"), { timeout: 10_000 });
     expect(first.preferences).toEqual({ app: false, cli: true });
     await first.dispose();
 
@@ -203,6 +205,7 @@ describe("software update consent and checks", () => {
     const first = service(skills);
     await first.start();
     await first.setAutomatic("app", true);
+    await vi.waitFor(() => expect(first.results.app?.available).toBe("2".repeat(40)), { timeout: 10_000 });
     await first.dispose();
     let secondObserving = false;
     let thirdObserving = false;
@@ -223,7 +226,7 @@ describe("software update consent and checks", () => {
     expect(third.preferences).toEqual({ app: true, cli: false });
   }, 30_000);
 
-  it("enforces a rolling 24-hour interval for automatic attempts across restarts", async () => {
+  it("enforces a rolling 24-hour interval after a completed check across restarts", async () => {
     const { skills } = await fixture();
     const start = Date.parse("2030-01-01T12:00:00Z");
     vi.setSystemTime(start);
@@ -236,6 +239,7 @@ describe("software update consent and checks", () => {
     await first.start();
     await first.setAutomatic("app", true);
     await vi.waitFor(() => expect(requests).toHaveLength(1), { timeout: 10_000 });
+    await vi.waitFor(() => expect(first.results.app?.available).toBe("6".repeat(40)), { timeout: 10_000 });
     await first.dispose();
 
     vi.setSystemTime(start + 23 * 60 * 60 * 1000);
@@ -255,12 +259,16 @@ describe("software update consent and checks", () => {
   }, 30_000);
 
   it("coordinates automatic attempts across separate app processes", async () => {
-    const { skills, base } = await fixture();
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ sha: "5".repeat(40) }), { status: 200 })));
-    const initial = service(skills);
-    await initial.start();
-    await initial.setAutomatic("app", true);
-    await initial.dispose();
+    const { skills, base, cache, config } = await fixture();
+    await mkdir(path.join(config, "skills-manager"), { recursive: true, mode: 0o700 });
+    await writeFile(path.join(config, "skills-manager", "app.json"), JSON.stringify({
+      kind: "skills-manager-update-consent", version: 1, enabled: true, scope: "https://api.github.com",
+    }), { mode: 0o600 });
+    await mkdir(path.join(cache, "skills-manager"), { recursive: true, mode: 0o700 });
+    const hash = createHash("sha256").update("https://api.github.com").digest("hex");
+    await writeFile(path.join(cache, "skills-manager", `attempt-app-${hash}.json`), JSON.stringify({
+      kind: "skills-manager-update-attempt", version: 1, at: Date.now() - 41 * 60 * 1000,
+    }), { mode: 0o600 });
     const log = path.join(base, "requests");
     const moduleUrl = pathToFileURL(path.resolve("src/actions/softwareUpdates.ts")).href;
     const program = `
@@ -275,7 +283,7 @@ describe("software update consent and checks", () => {
       const done = Promise.withResolvers();
       let started = false;
       const updates = new SoftwareUpdateService(process.env.SKILLS_ROOT, {
-        onChange() { if (started) done.resolve(); },
+        onChange() { if (started && !updates.activity().app.checking) done.resolve(); },
       });
       await updates.start();
       started = true;

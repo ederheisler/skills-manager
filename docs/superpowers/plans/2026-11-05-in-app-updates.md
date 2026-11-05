@@ -63,6 +63,10 @@ For CLI-only refresh, retain a known, reproducible full running app SHA and rebu
 For unknown, dirty, or otherwise nonreproducible identity, offer a manual route or an explicit switch to main.
 Never copy or overwrite a user checkout. An unchanged app SHA does not disable CLI checks or refresh.
 
+Amendment, 2026-11-05: The update screen uses the main view's colored letter controls. Enter does not enable automatic checks or approve actions. Automatic-check consent requires an explicit `y`. Both app and CLI update actions remain offered without a successful check or an available version. Do not show raw `latest` or `unknown` placeholders in place of useful status.
+
+New approval starts a check immediately and permits later daily checks for that component and host. Each permission remains off by default and separate. With permission on and no completed result, startup checks even when an old attempt timestamp exists. Save completed successes and failures in the private, host-scoped cache and show checking while a request is in progress. Recompare restored results with the current build or CLI identity. A recorded attempt alone is not a completed check.
+
 ## Implementation slices and dependencies
 
 ### 1. Prove and package build identity
@@ -83,7 +87,7 @@ Update build inputs, copied-source fixtures, package tests, and artifact tests t
 After identity exists, add configuration and checkers for the two components, separate from skill updates.
 Use absolute `XDG_CONFIG_HOME`, or the home configuration fallback, for explicit consent.
 Use absolute `XDG_CACHE_HOME`, or the home cache fallback, for authorized check metadata.
-Do not create configuration on startup. Persist only explicit consent and authorized check metadata.
+Do not create update-consent configuration on startup. For this feature, persist only explicit consent and authorized check metadata.
 Reject unsafe symlinks and overlap with any skills root. Never write to a selected skills directory for this feature.
 Missing consent means off. Invalid, unreadable, or unwritable consent fails closed and is reported.
 
@@ -112,7 +116,9 @@ Block handoff while an action is busy or a prepared review, Git operation, edito
 Do not discard changes or finish a review on the user's behalf.
 Capture the current resolved absolute skills directory at approval, not the original command-line argument.
 Pass it as a separate `--skills-dir` argument without a shell or unknown forwarded arguments.
-The new app must repeat onboarding and revalidate directory identity. Old approval is not new authorization.
+The original approval required the new app to repeat onboarding and revalidate directory identity. This prevented an old approval from becoming new authorization.
+
+Amendment, 2026-11-05: The user superseded repeated onboarding with persisted completed setup. Every launch, including the update child, must freshly validate the physical root. Reuse completed setup for an unchanged root. Prompt for a new or changed root. Saved setup does not authorize future writes or Git actions. Update-host consent remains independent in `app.json` and `cli.json`, and startup network rules do not change. See [persisted setup](../../decisions/2026-11-03-open-source-portability.md#persisted-setup-and-existing-installer-tracking).
 
 Before implementing handoff, prove [Node 26 `process.execve`](https://nodejs.org/docs/latest-v26.x/api/process.html#processexecvefile-args-env) in real macOS and Linux terminals.
 It is experimental, replaces the process image, skips exit and cleanup handlers, and throws on failure.
@@ -193,7 +199,7 @@ Use disposable homes, caches, skills roots, and outside sentinels. Do not use a 
 - Exercise equal, unequal, unknown, and dirty identity. Exercise timeout, offline, 403, 429, server errors, invalid data, cancellation, and stale-result suppression.
   Complete checks during help, confirmations, busy actions, and shutdown without changing focus or replacing a dialog.
 - Exercise cancel, busy refusal, unresolved reviews, ordinary quit, signals, and Ctrl-C. None can launch an update without explicit approval.
-  Test current switched roots, spaces, quotes, leading hyphens, changed symlinks, and renewed onboarding in the child.
+  Test current switched roots, spaces, quotes, leading hyphens, changed symlinks, physical-root validation, and persisted setup reuse in the child. A new or changed root must prompt.
 - With fake tools and real terminal fixtures, inspect exact argv, environment, private project cwd and cache, process replacement, and cleanup order.
   Exercise missing tools, download and build errors, lifecycle script policy, aborts, exec failure, child failure, and interrupted workspace cleanup.
   Make sure checkout, active installation, skills trees, lockfiles, outside sentinels, and other instances' caches remain unchanged.
@@ -233,6 +239,30 @@ The real-TUI suite allows 30 seconds for each complete workflow, retaining 4-sec
 
 The public verification record is attached to [implementation PR #8](https://github.com/ederheisler/skills-manager/pull/8).
 
+### Local startup and UI checks
+
+`npm run build` passed. The 28 non-TUI test files passed. After correcting an obsolete browse-view Git expectation, all 60 TUI tests passed. The total was 610 passed and 11 skipped across 29 files. `npm audit` reported zero vulnerabilities.
+
+On macOS, a native Node terminal fixture persisted the first setup. A second ordinary launch asked no setup questions and left the configuration bytes unchanged. Both CLI runs exited with status zero. An existing Vercel source association was recognized despite different local content. After explicit source approval, a real GitHub check reported `No updates found`.
+
+Browse help showed Option+↑/↓ without Git operations. Git help showed commit, fetch, pull, and push. Containing-repository information appeared only in Git view. The fixture skills, installer lock, outside sentinel, cache, and working directory stayed unchanged.
+
+A read-only scan of the installed skills found 40 entries, including 20 tracked entries and the `crit-cli` source. The installer lock, `crit-cli` document, and root entries stayed unchanged. The scan created no manager state.
+
+SCB reviewed 17 changed files. It flagged complexity and similar guard shapes. The guards cover different validation and lifecycle operations, so they were kept. This local run did not independently measure startup traffic or test Linux.
+
+### Local update controls and checks
+
+Before the final immutable cache change, the build and full suite passed with 646 tests passed and 11 skipped across 30 files. After that change, the build and 65 focused service and lifecycle tests passed. `npm audit` reported zero vulnerabilities, including development dependencies.
+
+Four native Node terminal sessions on macOS exited with status zero and empty stderr. Fresh default-off startup made no fetch. Tab and Enter did not enable checks. Explicit `y` approval for each component made one request to `api.github.com` or `registry.npmjs.org`, showed checking, and displayed the completed result. The next launch restored both results without a fetch during two seconds of observation.
+
+With existing permissions, recent legacy attempts, and no completed results, startup made one request per host and showed checking and completed results. The next launch restored those results without a fetch during two seconds of observation. The `c`, `a`, `r`, `f`, and `m` controls appeared bold in `#C6A0F6`. Both update actions appeared before results. The consent view fit six rows in a 40-row terminal.
+
+Setup configuration, permission files, and skill hashes stayed unchanged across each pair of sessions. The isolated fixtures were cleaned up. The actual user's skills and cache were untouched. A scoped SCB review of five changed source and test files found no correctness blocker. It retained complexity and duplicate-guard warnings because the guarded operations differ.
+
+CI run [42083344358](https://github.com/ederheisler/skills-manager/actions/runs/42083344358) failed on all three platforms because the release smoke test expected obsolete footer text. The corrected harness passed locally on macOS arm64 with Node 26.13 against installed GitHub commit `42e2a8485ce247aade006f72bf1138aee807979b`. It exercised the real CLI refresh, same-commit restart, and sentinel assertions. The script complexity review found no additional blocker.
+
 ### Graph maintenance
 
 The Graphify AST refresh reported 54 hub renames and 20 disappeared names:
@@ -251,3 +281,8 @@ The corrective test-harness commit needed a second, separately guarded AST refre
 - `repo.ts`, `tree_check_mount_fd`, `tree_same_snapshot`, `types.ts`, `withSkillsLock`
 
 The next test-only AST refresh reported 4 hub renames. No community names disappeared.
+
+The startup and UI fixes required one guarded AST refresh. It reported 42 hub renames. These names disappeared:
+
+- `API reference`, `Engine methods`, `Execution order`, `Implementation slices and dependencies`, `Setup`, `checkUpdates.ts`
+- `git-tree-hash.h`, `git.ts`, `ref_node_fs`, `skills-manager`, `tree.h`

@@ -63,13 +63,13 @@ export async function checkForUpdates(skills: readonly Skill[], fetchTree: TreeF
   for (const skill of skills) {
     const unavailable = (reason: string) => report.unavailable.push({ id: skill.id, name: skill.name, reason });
     if (!skill.lockEntry || skill.provenance.kind !== "source") {
-      unavailable("No matching saved source association; automatic update checks are unavailable.");
+      unavailable("No matching saved source association; update checks are unavailable.");
       continue;
     }
     const entry = skill.lockEntry;
     const repository = githubRepository(entry);
     if (!repository) {
-      unavailable("Automatic update checks are not supported for this source.");
+      unavailable("Update checks are not supported for this source.");
       continue;
     }
     const directory = skillDirectory(entry);

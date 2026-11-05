@@ -10,7 +10,9 @@ These records explain accepted decisions and their reasons. For current behavior
 - [macOS arm64 verification](2026-11-03-open-source-portability.md#macos-arm64-verification).
 - [Upstream skills versions](2026-11-03-open-source-portability.md#upstream-skills-versions).
 - [In-app keyboard help](2026-11-03-open-source-portability.md#in-app-keyboard-help).
+- [Persisted setup and existing installer tracking](2026-11-03-open-source-portability.md#persisted-setup-and-existing-installer-tracking).
 - [Automated releases](2026-11-03-open-source-portability.md#automated-releases).
 - [Main branch protection](2026-11-03-open-source-portability.md#main-branch-protection).
 - [Application update planning](2026-11-03-open-source-portability.md#application-update-planning).
+- [Update controls and check results](2026-11-03-open-source-portability.md#update-controls-and-check-results).
 - [Vercel skills CLI updates](2026-11-03-open-source-portability.md#vercel-skills-cli-updates).

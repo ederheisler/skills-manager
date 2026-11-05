@@ -81,6 +81,20 @@ Date: 2026-11-04
 
 Keyboard help is available in the app with the `?` key. The README does not maintain a keyboard shortcut catalog.
 
+Help stays compact and follows the current view. Git controls and repository status appear only in Git view, including information about a containing repository. The browse footer does not show that information. Shortcut labels use Option on macOS and Alt on Linux.
+
+## Persisted setup and existing installer tracking
+
+Date: 2026-11-05
+
+The user chose to persist completed setup. The implementation saves it in `$XDG_CONFIG_HOME/skills-manager/config.json` when `XDG_CONFIG_HOME` is absolute. Otherwise, the path is `~/.config/skills-manager/config.json`. Later launches reuse completed setup for an unchanged root, including launches by an update child. Each launch must still validate the physical root. A new or changed root requires setup again. An explicit `--skills-dir` takes precedence.
+
+This supersedes the [update plan's original repeat-onboarding requirement](../superpowers/plans/2026-11-05-in-app-updates.md#3-add-review-and-guarded-handoff).
+
+Saved setup does not grant approval for later writes, Git initialization, backup, or other actions. It does not change the separate app and CLI update consent in `app.json` and `cli.json`, or the startup network policy.
+
+Valid existing Vercel installer lock entries can provide source tracking and version checks without skills-manager receipts. The recorded baseline is not proof of ownership, prior review, or unchanged local files. Version checks compare upstream with that baseline, not with current local content. Browsing and checking do not rewrite installer locks or create receipts. Replacement still requires review and the existing path and source safeguards.
+
 ## Automated releases
 
 Date: 2026-11-04
@@ -104,8 +118,16 @@ At that point, the [application update plan](../superpowers/plans/2026-11-05-in-
 The user later explicitly approved implementation of the plan.
 That approval replaces the original no-background-network rule only for separately opted-in app and CLI checks.
 Both automatic checks default to off. Each grants ongoing consent for its disclosed host scope and can be disabled separately.
-The implementation is under verification. Approval does not establish runtime proof or completion of the supported-platform checks.
+The [update plan](../superpowers/plans/2026-11-05-in-app-updates.md#verification) records verification of the prior implementation. That evidence does not establish verification of later changes.
 The latest-main installation, automated releases, and main-branch protection decisions remain unchanged.
+
+## Update controls and check results
+
+Date: 2026-11-05
+
+The user chose update controls that match the main view's colored letter controls. Enter must not enable automatic checks. Approval requires `y` or an intentional click. App and CLI update actions remain available without an available version or a prior check. The screen must not use fake `unknown` or `latest` placeholders.
+
+Automatic checks remain off by default, with separate permission for each host scope. The user requested a check when permission is valid but no completed result exists, even if an old attempt was recorded. Completed results persist. The implementation stores these results in a private, host-scoped cache. A new approval starts a check and permits later daily checks.
 
 ## Vercel skills CLI updates
 
@@ -115,4 +137,4 @@ The user also requested that the Vercel `skills` CLI stay up to date through the
 This request covers the CLI package, not installed skill documents. It does not require a global CLI installation.
 The [upstream version decision](#upstream-skills-versions) remains in force. Tested versions are not an allowlist.
 The user later explicitly approved the [CLI refresh mechanism](../superpowers/plans/2026-11-05-in-app-updates.md#4-refresh-the-vercel-skills-cli).
-Its implementation is under verification. The canonical `npx` app recovery command does not guarantee a fresh CLI.
+The [update plan](../superpowers/plans/2026-11-05-in-app-updates.md#verification) records runtime and platform evidence for the prior CLI refresh. The canonical `npx` app recovery command does not guarantee a fresh CLI.

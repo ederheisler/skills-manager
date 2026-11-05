@@ -68,6 +68,7 @@ describe("Node release artifact", () => {
       expect(files).toContain("package/THIRD_PARTY_NOTICES");
       expect(files).toContain("package/dist/cli.js");
       expect(files).toContain("package/dist/terminalText.js");
+      expect(files).toContain("package/dist/state/config.js");
       expect(files).toContain("package/dist/actions/gitTransaction.js");
       expect(files).toContain("package/dist/actions/gitTransactionWorker.js");
       expect(files).toContain("package/native/skills-boundary");

@@ -1,11 +1,17 @@
+import { lstat, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { execa } from "execa";
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkForUpdates } from "../../src/actions/checkUpdates.js";
+import { scanSkills } from "../../src/state/repo.js";
 import type { LockEntry, Skill } from "../../src/state/types.js";
 
 const installed = "a".repeat(40);
 const upstream = "b".repeat(40);
 const servers: Server[] = [];
+const roots: string[] = [];
 
 function skill(name: string, entry: Partial<LockEntry> = {}): Skill {
   return {
@@ -36,6 +42,7 @@ async function serve(body: unknown): Promise<{ url: string; requests: () => numb
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe("explicit update checks", () => {
@@ -55,11 +62,88 @@ describe("explicit update checks", () => {
     const endpoint = await serve({ tree: [] });
     const unknown = { ...skill("unknown"), lockEntry: null, provenance: { kind: "unknown" } as const };
     const missing = skill("missing", { skillFolderHash: "" });
-    const report = await checkForUpdates([unknown, missing], async () => (await fetch(endpoint.url)).json());
+    const unsupported = skill("unsupported", { sourceType: "git" });
+    const report = await checkForUpdates([unknown, missing, unsupported], async () => (await fetch(endpoint.url)).json());
     expect(report.updated).toEqual([]);
-    expect(report.unavailable.map((entry) => entry.name)).toEqual(["unknown", "missing"]);
+    expect(report.unavailable.map((entry) => entry.name)).toEqual(["unknown", "missing", "unsupported"]);
+    expect(report.unavailable[0].reason).toMatch(/saved source/i);
     expect(report.unavailable[1].reason).toContain("baseline");
+    expect(report.unavailable[2].reason).toMatch(/not supported/i);
+    for (const unavailable of report.unavailable) expect(unavailable.reason).not.toMatch(/automatic/i);
     expect(endpoint.requests()).toBe(0);
+  });
+
+  it("checks a Vercel v3 recorded tree despite local edits and rejects duplicate paths without writing metadata", async () => {
+    const base = await realpath(await mkdtemp(path.join(tmpdir(), "skills-vercel-check-")));
+    roots.push(base);
+    const repository = path.join(base, "repository");
+    const upstreamSkill = path.join(repository, "skills", "example");
+    const skills = path.join(base, "selected");
+    const target = path.join(skills, "example");
+    const lock = path.join(base, ".skill-lock.json");
+    await mkdir(upstreamSkill, { recursive: true });
+    await mkdir(target, { recursive: true });
+    const baseline = "---\nname: example\ndescription: Vercel fixture\n---\n\noriginal upstream content\n";
+    const edited = "---\nname: example\ndescription: Vercel fixture\n---\n\nlocally edited content\n";
+    await writeFile(path.join(upstreamSkill, "SKILL.md"), baseline);
+    const env = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: base, GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_TERMINAL_PROMPT: "0" };
+    const git = async (...args: string[]) => (await execa("git", args, { cwd: repository, env, extendEnv: false })).stdout;
+    await git("init", "-q");
+    await git("add", "--", "skills/example");
+    const baselineTree = await git("write-tree");
+    const baselineHash = await git("rev-parse", `${baselineTree}:skills/example`);
+    await writeFile(path.join(upstreamSkill, "SKILL.md"), edited);
+    await git("add", "--", "skills/example");
+    const editedTree = await git("write-tree");
+    const editedHash = await git("rev-parse", `${editedTree}:skills/example`);
+    expect(editedHash).not.toBe(baselineHash);
+    await writeFile(path.join(target, "SKILL.md"), edited);
+
+    const entry: LockEntry = {
+      source: "owner/repository", sourceType: "github", sourceUrl: "https://github.com/owner/repository.git",
+      skillPath: "skills/example/SKILL.md", skillFolderHash: baselineHash,
+      installedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    };
+    const lockBytes = JSON.stringify({ version: 3, skills: { example: entry } }, null, 2);
+    await writeFile(lock, lockBytes);
+    const [scanned] = await scanSkills(skills);
+    expect(scanned.lockEntry).toEqual(entry);
+    expect(scanned.provenance).toEqual({ kind: "source", source: entry.source, sourceUrl: entry.sourceUrl });
+    expect(await readFile(lock, "utf8")).toBe(lockBytes);
+    await expect(lstat(path.join(skills, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    const unchanged = await serve({ tree: [{ type: "tree", path: "skills/example", sha: baselineHash }] });
+    const changedToLocal = await serve({ tree: [{ type: "tree", path: "skills/example", sha: editedHash }] });
+    for (const [endpoint, updated] of [[unchanged, []], [changedToLocal, [scanned.id]]] as const) {
+      const report = await checkForUpdates([scanned], async (repository, ref) => {
+        expect([repository, ref]).toEqual(["owner/repository", "HEAD"]);
+        return (await fetch(endpoint.url)).json();
+      });
+      expect(report).toEqual({ updated, unavailable: [] });
+    }
+    expect(unchanged.requests()).toBe(1);
+    expect(changedToLocal.requests()).toBe(1);
+    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toBe(edited);
+    const duplicate = path.join(skills, ".disabled_skills", "example");
+    await mkdir(duplicate, { recursive: true });
+    await writeFile(path.join(duplicate, "SKILL.md"), edited);
+    const duplicates = await scanSkills(skills);
+    expect(duplicates).toHaveLength(2);
+    for (const row of duplicates) {
+      expect(row.lockEntry).toBeNull();
+      expect(row.provenance.kind).toBe("unknown");
+    }
+    const ambiguous = await checkForUpdates(duplicates, async () => (await fetch(unchanged.url)).json());
+    expect(ambiguous.updated).toEqual([]);
+    expect(ambiguous.unavailable).toHaveLength(2);
+    for (const unavailable of ambiguous.unavailable) {
+      expect(unavailable.reason).toMatch(/saved source/i);
+      expect(unavailable.reason).not.toMatch(/automatic/i);
+    }
+    expect(unchanged.requests()).toBe(1);
+    expect(await readFile(lock, "utf8")).toBe(lockBytes);
+    await expect(lstat(path.join(skills, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("reports incomplete and malformed trees as unavailable", async () => {
