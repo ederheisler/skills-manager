@@ -2,7 +2,7 @@
 
 Date: 2026-11-05
 
-Status: Approved for implementation. The implementation is under verification. End-to-end runtime proof and supported-platform completion are not recorded here.
+Status: Implemented. Runtime results and supported-platform checks are recorded below.
 
 ## Behavior and evidence when proposed
 
@@ -206,32 +206,32 @@ Use disposable homes, caches, skills roots, and outside sentinels. Do not use a 
   Repeat on local macOS arm64 and the existing CI matrix: Linux arm64, Linux x64, and macOS x64.
   Retain existing installed-package browse, help, quit, and confinement checks. Record platform-specific limits instead of claiming untested support.
 
-### Verification progress
+### Verification
 
 On macOS arm64 with Node.js 26.13 and npm 11.20, `npm run build` passed.
 `npm test` passed 546 tests in 28 files and skipped 11 platform-specific tests.
-`npm audit` reported no vulnerabilities at or above moderate, including development dependencies.
-`npm ls vitest @vitest/mocker vite esbuild --all` reported versions 4.1.12, 4.1.12, 8.3.5, and 0.28.2, respectively.
+`npm audit` found no vulnerabilities, including development dependencies.
+The resolved test tools were Vitest and `@vitest/mocker` 4.1.12, Vite 8.3.5, and esbuild 0.28.2.
 
 An installed tarball passed the real-terminal baseline with `skills` 1.7.6.
-A service exercise passed 33 assertions and observed no startup fetch.
-It covered independent persistent consent and revocation, loopback cancellation, registry host changes, and daily suppression.
-The user sentinel and cache remained unchanged.
-Live HTTP checks returned GitHub main starting with `2084680` and the npm `skills` latest tag at 1.7.6.
+Live service checks covered independent persistent consent, revocation, request cancellation, registry host changes, and daily suppression. Startup made no metadata request.
+The terminal smoke reconstructs the character screen with the development-only `@xterm/headless` 6.0.0 dependency.
 
-A public GitHub install at `51223afa3602a461339d3904752cc396a90c66af` ran prepare and reported that exact clean archive SHA at version 0.1.0.
-A real CLI-only refresh rebuilt that commit, selected `skills` 1.7.6 from its private root `latest` dependency, repeated onboarding, and reached browse, help, and quit.
-The original cache and outside sentinel stayed unchanged; the helper workspace was removed.
-The terminal smoke now reconstructs the real character screen with the development-only `@xterm/headless` 6.0.0 dependency.
+A real CLI-only refresh rebuilt `51223afa3602a461339d3904752cc396a90c66af`, selected `skills` 1.7.6 from its private root `latest` dependency, repeated onboarding, and reached browse, help, and quit.
+A separately approved refresh against a closed local registry produced a real npm `ECONNREFUSED` and exit 1, printed manual recovery, and restored the terminal exactly. It did not restart the app.
+The failed update's workspace was absent and its npm process group was gone after exit; this probe did not independently observe their removal order.
 
-A separately approved refresh against a closed local registry produced a real npm `ECONNREFUSED` and exit 1, printed manual recovery, and restored the terminal exactly.
-It did not restart the app. The original cache, skills, and outside sentinels stayed unchanged.
-The update workspace was absent and the npm process group was gone after exit; this probe did not independently observe their removal order.
+The canonical, unversioned `npx` command fetched public main `4f798cdba8fbd613ab3c52f3fbc61d902bb196f3`, ran prepare and the native compiler, and launched an app reporting that exact clean archive SHA at version 0.1.0.
+A real combined main-and-CLI update fetched the same main commit and selected the registry's latest `skills` 1.7.6 from the fresh installation.
+The helper replaced the old process, then launched the new app in the same foreground terminal. Onboarding, browse, help, and quit completed.
+Before that update, the session switched through a symlink to a root containing spaces, both quote types, and U+0001. The approval, new process arguments, onboarding, and browse all used the switched root.
+During the combined handoff, the original and selected skills, outside sentinels, original npm and XDG caches, and working directory stayed unchanged. Successful update workspaces were removed.
 
-Both Linux CI jobs passed at feature head `6ec633305d371ff382a81b3ae4ed724d028069c1`, including installed-package refresh and restart.
-The remaining macOS x64 failures were four whole-workflow 5-second test deadlines, not failed behavior assertions.
-The real-TUI suite now allows 30 seconds for each complete workflow, while keeping 4-second frame deadlines, explicit phase waits, and the 60-second long-preview exception.
-Canonical cold and warm main proof, a combined main restart, and the macOS x64 gate remain pending.
+[PR #8 checks](https://github.com/ederheisler/skills-manager/actions/runs/42055646923) passed on Linux x64, Linux arm64, and macOS x64, including installed-package refresh and restart.
+The merged commit also passed [main checks](https://github.com/ederheisler/skills-manager/actions/runs/42056669413) and the [automatic release workflow](https://github.com/ederheisler/skills-manager/actions/runs/42057537658).
+The real-TUI suite allows 30 seconds for each complete workflow, retaining 4-second frame deadlines, explicit phase waits, and the 60-second long-preview exception.
+
+The public verification record is attached to [implementation PR #8](https://github.com/ederheisler/skills-manager/pull/8).
 
 ### Graph maintenance
 
