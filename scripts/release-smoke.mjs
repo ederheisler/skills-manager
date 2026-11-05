@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import xterm from '@xterm/headless';
 import { promisify, stripVTControlCharacters } from 'node:util';
 
 const exec = promisify(execFile);
@@ -66,28 +68,59 @@ function successful(result) {
   assert.equal(result.exitCode, 0, `${result.command}: ${result.stderr}`);
 }
 
-async function browseInTerminal(skillsDir) {
+async function inspectRefreshedSession(workspace) {
+  const project = path.join(workspace, 'project');
+  const projectManifest = JSON.parse(await readFile(path.join(project, 'package.json'), 'utf8'));
+  assert.equal(projectManifest.dependencies['skills-manager'], `github:ederheisler/skills-manager#${previousEnv.RELEASE_EXPECTED_COMMIT}`);
+  assert.equal(projectManifest.dependencies.skills, 'latest');
+  assert.equal(projectManifest.overrides.skills, '$skills');
+  const resolveProject = createRequire(path.join(project, 'package.json'));
+  const appRoot = path.dirname(await realpath(resolveProject.resolve('skills-manager/package.json')));
+  const skillsRoot = path.dirname(await realpath(resolveProject.resolve('skills/package.json')));
+  assert.ok(appRoot.startsWith(`${project}${path.sep}`));
+  assert.ok(skillsRoot.startsWith(`${project}${path.sep}`));
+  assert.notEqual(appRoot, installed);
+  const appManifest = JSON.parse(await readFile(path.join(appRoot, 'package.json'), 'utf8'));
+  const skillsManifest = JSON.parse(await readFile(path.join(skillsRoot, 'package.json'), 'utf8'));
+  assert.equal(appManifest.name, 'skills-manager');
+  assert.equal(skillsManifest.name, 'skills');
+  const freshBuild = await import(pathToFileURL(path.join(appRoot, 'dist', 'state', 'appBuild.js')).href);
+  const identity = await freshBuild.readBuildIdentity();
+  assert.equal(identity.version, appManifest.version);
+  assert.equal(identity.commit, previousEnv.RELEASE_EXPECTED_COMMIT, 'Refreshed app must retain the approved commit');
+  assert.equal(identity.dirty, false);
+  const freshSandbox = await import(pathToFileURL(path.join(appRoot, 'dist', 'actions', 'sandbox.js')).href);
+  const runtime = await freshSandbox.inspectSkillsRuntime();
+  assert.equal(runtime.packageRoot, skillsRoot, 'Refreshed app must select the fresh project root dependency');
+  assert.equal(runtime.version, skillsManifest.version);
+  assert.equal(runtime.executable, await realpath(runtime.executable));
+  assert.ok(runtime.executable.startsWith(`${skillsRoot}${path.sep}`));
+}
+
+async function browseInTerminal(skillsDir, refresh = false) {
   const relay = fileURLToPath(new URL('./release-smoke-pty.py', import.meta.url));
   let transcript = '';
   let stderr = '';
   let step = 0;
   let stageStart = 0;
   let failure;
-  let retryHelp;
-  let retryQuit;
+  let updateWorkspace;
+  const terminal = new xterm.Terminal({ cols: 140, rows: 40, allowProposedApi: true });
+  let pending = Promise.resolve();
   const child = spawn('python3', [relay, cli, '--skills-dir', skillsDir], {
     cwd: work, env: process.env, stdio: ['pipe', 'pipe', 'pipe'],
   });
   child.stdin.on('error', () => {});
+  terminal.onData((data) => child.stdin.write(data));
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.on('error', (error) => { failure = error; });
   const timer = setTimeout(() => {
-    failure = new Error('Timed out waiting for the installed CLI to browse, open and close help, and quit');
+    failure = new Error('Timed out waiting for the installed CLI help, application updates menu, and quit');
     child.kill('SIGTERM');
-  }, 90_000);
+  }, refresh ? 900_000 : 90_000);
   child.stderr.on('data', (chunk) => { stderr += chunk; });
-  child.stdout.on('data', (chunk) => {
+  const processOutput = (chunk) => {
     transcript += chunk;
     if (transcript.length > 4 * 1024 * 1024) {
       failure = new Error('Terminal output exceeded the smoke limit');
@@ -95,6 +128,11 @@ async function browseInTerminal(skillsDir) {
       return;
     }
     const text = stripVTControlCharacters(transcript.slice(stageStart));
+    const buffer = terminal.buffer.active;
+    const screen = Array.from({ length: terminal.rows }, (_, row) =>
+      buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? '').join('\n');
+    const browse = screen.includes('x app updates') && !screen.includes('Keyboard help')
+      && !screen.includes('Application updates');
     if (step === 0 && text.includes('Review optional local Git initialization? [y/N]')) {
       step = 1;
       child.stdin.write('\n');
@@ -103,33 +141,114 @@ async function browseInTerminal(skillsDir) {
       step = 2;
       child.stdin.write('\n');
     }
-    if (step === 2 && /Skills\s+1\s+shown/.test(text)) {
+    if (step === 2 && /Skills\s+1\s+shown/.test(screen) && browse) {
       step = 3;
       stageStart = transcript.length;
       child.stdin.write('?');
-      // The first rendered frame can precede completion of asynchronous startup.
-      retryHelp = setInterval(() => child.stdin.write('?'), 250);
-    } else if (step === 3 && text.includes('Keyboard help')) {
-      clearInterval(retryHelp);
+    } else if (step === 3 && screen.includes('Keyboard help') && /x\s+Application updates/.test(screen)) {
       step = 4;
       stageStart = transcript.length;
-      child.stdin.write('\x1b');
-    } else if (step === 4 && /Skills\s+1\s+shown/.test(text)) {
+      child.stdin.write('?');
+    } else if (step === 4 && browse) {
       step = 5;
+      stageStart = transcript.length;
+      child.stdin.write('x');
+    } else if (step === 5 && screen.includes('Application updates')
+      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
+      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)
+      && screen.includes('f refresh CLI only · m manual recovery · Esc close')) {
+      step = 6;
+      stageStart = transcript.length;
+      child.stdin.write(refresh ? 'f' : '\x1b');
+    } else if (step === 6 && !refresh && browse) {
+      step = 7;
       child.stdin.write('q');
-      retryQuit = setInterval(() => child.stdin.write('q'), 250);
+    } else if (step === 6 && refresh && screen.includes('Refresh Vercel skills CLI')
+      && screen.includes(`Rebuild the same app commit ${previousEnv.RELEASE_EXPECTED_COMMIT}`)
+      && screen.includes('[y] Approve')) {
+      step = 8;
+      stageStart = transcript.length;
+      child.stdin.write('y');
+    } else if (step === 8 && text.includes('Installing the approved update in a private session.')
+      && text.includes('Starting the new application.')
+      && text.includes('Selected skills directory:')
+      && text.includes('Review optional local Git initialization? [y/N]')) {
+      const match = /Update workspace \(manual cleanup if interrupted\): ("[^\r\n]*")/.exec(text);
+      if (!match) {
+        failure = new Error('The update helper did not print its workspace before starting the new application');
+        child.kill('SIGTERM');
+        return;
+      }
+      try {
+        updateWorkspace = JSON.parse(match[1]);
+        assert.ok(path.isAbsolute(updateWorkspace));
+        assert.equal(path.dirname(updateWorkspace), temporary);
+        assert.ok(path.basename(updateWorkspace).startsWith('skills-manager-update-'));
+      } catch (error) {
+        failure = error;
+        child.kill('SIGTERM');
+        return;
+      }
+      step = 10;
+      stageStart = transcript.length;
+      child.stdin.write('\n');
+    } else if (step === 10 && text.includes('Review optional remote backup? [y/N]')) {
+      step = 11;
+      stageStart = transcript.length;
+      child.stdin.write('\n');
+    } else if (step === 11 && /Skills\s+1\s+shown/.test(screen) && browse) {
+      step = 12;
+      void inspectRefreshedSession(updateWorkspace).then(() => {
+        step = 13;
+        stageStart = transcript.length;
+        child.stdin.write('?');
+      }).catch((error) => {
+        failure = error;
+        child.kill('SIGTERM');
+      });
+    } else if (step === 13 && screen.includes('Keyboard help') && /x\s+Application updates/.test(screen)) {
+      step = 14;
+      stageStart = transcript.length;
+      child.stdin.write('?');
+    } else if (step === 14 && browse) {
+      step = 15;
+      stageStart = transcript.length;
+      child.stdin.write('x');
+    } else if (step === 15 && screen.includes('Application updates')
+      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
+      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)
+      && screen.includes('f refresh CLI only · m manual recovery · Esc close')) {
+      step = 16;
+      stageStart = transcript.length;
+      child.stdin.write('\x1b');
+    } else if (step === 16 && browse) {
+      step = 17;
+      child.stdin.write('q');
     }
+  };
+  child.stdout.on('data', (chunk) => {
+    pending = pending.then(() => new Promise((resolve) => {
+      terminal.write(chunk, () => {
+        try { processOutput(chunk); }
+        catch (error) { failure = error; child.kill('SIGTERM'); }
+        resolve();
+      });
+    }));
   });
   const result = await new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
+  await pending;
+  const finalBuffer = terminal.buffer.active;
+  const finalScreen = Array.from({ length: terminal.rows }, (_, row) =>
+    finalBuffer.getLine(finalBuffer.viewportY + row)?.translateToString(true) ?? '').join('\n');
+  terminal.dispose();
   clearTimeout(timer);
-  clearInterval(retryHelp);
-  clearInterval(retryQuit);
   const evidence = stripVTControlCharacters(transcript).slice(-12000);
-  const diagnostic = `PTY exit=${result.code} signal=${result.signal}\nstderr:\n${stderr}\nterminal:\n${evidence}`;
+  const diagnostic = `PTY step=${step} exit=${result.code} signal=${result.signal}\nstderr:\n${stderr}\nscreen:\n${finalScreen}\nterminal transcript:\n${evidence}`;
   if (failure) throw new Error(`${failure.message}\n${diagnostic}`);
   assert.equal(result.signal, null, diagnostic);
-  assert.equal(result.code, 0, diagnostic);
-  assert.equal(step, 5, `Did not reach both Git prompts, browse, help, and the restored browse screen.\n${diagnostic}`);
+  assert.equal(result.code, 0, `${diagnostic}\nThe approved commit ${previousEnv.RELEASE_EXPECTED_COMMIT ?? '(not applicable)'} must be fetchable from the canonical GitHub repository for the real refresh.`);
+  assert.equal(step, refresh ? 17 : 7, `Did not complete the installed PTY ${refresh ? 'refresh and restart' : 'browse'} flow.\n${diagnostic}`);
+  if (refresh) await missing(updateWorkspace);
 }
 
 async function run() {
@@ -159,6 +278,26 @@ async function run() {
   const installer = await load('actions/skillsCli.js');
   const repo = await load('state/repo.js');
   const gitApi = await load('actions/git.js');
+  const { readBuildIdentity } = await load('state/appBuild.js');
+  const { inspectSkillsRuntime } = await load('actions/sandbox.js');
+  const identity = await readBuildIdentity();
+  assert.equal(identity.version, manifest.version, 'Installed build identity must use the packaged version');
+  if (previousEnv.RELEASE_EXPECTED_COMMIT !== undefined) {
+    assert.match(previousEnv.RELEASE_EXPECTED_COMMIT, /^[0-9a-f]{40}$/, 'Expected commit must be a full SHA');
+    assert.equal(identity.commit, previousEnv.RELEASE_EXPECTED_COMMIT, 'Installed build identity must match the archived commit');
+    assert.equal(identity.source, 'archive', 'CI build identity must come from the archived source');
+    assert.equal(identity.dirty, false, 'Archived build identity must be clean');
+  }
+  const runtime = await inspectSkillsRuntime();
+  const resolveInstalled = createRequire(path.join(installed, 'dist', 'actions', 'sandbox.js'));
+  const runtimeManifestPath = await realpath(resolveInstalled.resolve('skills/package.json'));
+  const runtimeManifest = JSON.parse(await readFile(runtimeManifestPath, 'utf8'));
+  assert.equal(runtimeManifest.name, 'skills');
+  assert.equal(runtime.packageRoot, path.dirname(runtimeManifestPath));
+  assert.equal(runtime.version, runtimeManifest.version);
+  assert.equal(runtime.executable, await realpath(runtime.executable));
+  assert.ok(runtime.executable.startsWith(`${runtime.packageRoot}${path.sep}`), 'Skills executable must be inside its package');
+
 
   // Adoption is read-only, including when both optional Git questions default to no.
   const browseRoot = path.join(work, 'browse');
@@ -173,6 +312,17 @@ async function run() {
   await missing(path.join(browseRoot, '.skills-manager'));
   assert.deepEqual(await snapshot(outside), outsideBefore);
   assert.deepEqual(await readFile(externalLock), lockBefore);
+
+  if (previousEnv.RELEASE_EXPECTED_COMMIT !== undefined) {
+    await browseInTerminal(browseRoot, true);
+    assert.deepEqual(await snapshot(browseRoot), browseBefore);
+    assert.deepEqual(await readdir(home), []);
+    for (const name of ['config', 'cache', 'data', 'state']) assert.deepEqual(await readdir(path.join(work, name)), []);
+    await missing(path.join(browseRoot, '.git'));
+    await missing(path.join(browseRoot, '.skills-manager'));
+    assert.deepEqual(await snapshot(outside), outsideBefore);
+    assert.deepEqual(await readFile(externalLock), lockBefore);
+  }
 
   // Exercise the installed native boundary with independently reviewed source bytes.
   const localRoot = path.join(work, 'local');

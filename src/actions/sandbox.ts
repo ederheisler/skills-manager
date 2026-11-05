@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { access, readFile, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,8 @@ const execFileAsync = promisify(execFile);
 
 interface RuntimePackage { name: string; root: string }
 interface PackageLocation {
+  version: string;
+  packageRoot: string;
   executable: string;
   relativeExecutable: string;
   packages: RuntimePackage[];
@@ -57,7 +60,8 @@ async function locatePackage(): Promise<PackageLocation> {
   if (!candidate.startsWith(`${root}${path.sep}`)) throw new Error("The skills executable escapes its package.");
   const executable = await realpath(candidate);
   if (!executable.startsWith(`${root}${path.sep}`)) throw new Error("The skills executable escapes its package.");
-  await access(executable);
+  if (!(await stat(executable)).isFile()) throw new Error("The installed skills package has an invalid executable entry.");
+  await access(executable, constants.R_OK);
   const packages = new Map<string, string>([["skills", root]]);
   const queue: RuntimePackage[] = [{ name: "skills", root }];
   for (let index = 0; index < queue.length; index++) {
@@ -77,7 +81,15 @@ async function locatePackage(): Promise<PackageLocation> {
       if (!existing) { packages.set(name, dependencyRoot); queue.push({ name, root: dependencyRoot }); }
     }
   }
-  return { executable, relativeExecutable: path.relative(root, executable), packages: queue };
+  const version = typeof value.version === "string" && value.version.length <= 256
+    && value.version.trim().length > 0 && !/[\p{Cc}\p{Cf}]/u.test(value.version)
+    ? value.version : "unknown";
+  return { version, packageRoot: root, executable, relativeExecutable: path.relative(root, executable), packages: queue };
+}
+
+export async function inspectSkillsRuntime(): Promise<{ version: string; packageRoot: string; executable: string }> {
+  const { version, packageRoot, executable } = await locatePackage();
+  return { version, packageRoot, executable };
 }
 
 function seatbeltString(value: string): string {

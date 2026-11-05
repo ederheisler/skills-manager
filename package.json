@@ -6,8 +6,14 @@
   "engines": {
     "node": ">=26.13.0 <27"
   },
-  "os": ["darwin", "linux"],
-  "cpu": ["arm64", "x64"],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
   "type": "module",
   "files": [
     "dist/cli.js",
@@ -15,6 +21,8 @@
     "dist/onboarding.js",
     "dist/terminalText.js",
     "dist/tui.js",
+    "dist/actions/appUpdateHandoff.js",
+    "dist/actions/appUpdateWorker.js",
     "dist/actions/boundary.js",
     "dist/actions/checkUpdates.js",
     "dist/actions/git.js",
@@ -25,8 +33,11 @@
     "dist/actions/remove.js",
     "dist/actions/sandbox.js",
     "dist/actions/skillsCli.js",
+    "dist/actions/softwareUpdates.js",
     "dist/actions/toggle.js",
     "dist/actions/update.js",
+    "dist/state/appBuild.js",
+    "dist/state/buildIdentity.json",
     "dist/state/filter.js",
     "dist/state/format.js",
     "dist/state/frontmatter.js",
@@ -47,7 +58,7 @@
     "skills-manager": "./dist/cli.js"
   },
   "scripts": {
-    "build": "node scripts/check-package.mjs --before-build && node scripts/build-boundary.mjs && tsc -p tsconfig.json",
+    "build": "node scripts/build.mjs",
     "prepare": "npm run build && node scripts/check-package.mjs",
     "dev": "tsx src/cli.ts",
     "test": "vitest run"
@@ -60,6 +71,7 @@
   },
   "devDependencies": {
     "@types/node": "26.6.6",
+    "@xterm/headless": "^6.0.0",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
     "vitest": "4.1.12"

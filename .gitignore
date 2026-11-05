@@ -1,5 +1,6 @@
 .claude/scheduled_tasks.lock
 .claude/settings.json
+.claude/skills/opentui
 .DS_Store
 node_modules/
 dist/

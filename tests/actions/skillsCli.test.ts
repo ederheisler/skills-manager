@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { approveSkillsRoot, listSkillPaths } from "../../src/actions/boundary.js";
 import { runConfinedSkills } from "../../src/actions/sandbox.js";
@@ -210,6 +212,71 @@ describe("explicit skill search", () => {
     const malformed = await serverFor(200, "not json");
     await expect(findSkills("example", unavailable)).rejects.toThrow("HTTP 503");
     await expect(findSkills("example", malformed)).rejects.toThrow("invalid JSON");
+  });
+});
+
+describe("installed skills runtime", () => {
+  it("inspects the canonical installed package and executable against its manifest", async () => {
+    // Exercise the dynamic import boundary used by installed app updates.
+    const { inspectSkillsRuntime } = await import("../../src/actions/sandbox.js");
+    const manifestPath = await realpath(fileURLToPath(import.meta.resolve("skills/package.json")));
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      name: string;
+      version: string;
+      bin: string | { skills: string };
+    };
+    const root = path.dirname(manifestPath);
+    const bin = typeof manifest.bin === "string" ? manifest.bin : manifest.bin.skills;
+
+    expect(manifest.name).toBe("skills");
+    expect(await inspectSkillsRuntime()).toEqual({
+      version: manifest.version,
+      packageRoot: root,
+      executable: await realpath(path.resolve(root, bin)),
+    });
+  });
+
+  it("rejects a package bin pointing to a directory and accepts a readable non-executable script", async () => {
+    const base = await realpath(await mkdtemp(path.join(tmpdir(), "skills-runtime-test-")));
+    roots.push(base);
+    const actions = path.join(base, "actions");
+    const state = path.join(base, "state");
+    const packageRoot = path.join(base, "node_modules", "skills");
+    const executable = path.join(packageRoot, "nested", "cli");
+    await Promise.all([
+      mkdir(actions, { recursive: true }),
+      mkdir(state, { recursive: true }),
+      mkdir(executable, { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(path.join(base, "package.json"), JSON.stringify({ type: "module" })),
+      writeFile(path.join(packageRoot, "package.json"), JSON.stringify({ name: "skills", version: "1.2.3", bin: { skills: "nested/cli" } })),
+      ...(["actions/sandbox", "state/validation"] as const).map(async (module) => {
+        const source = await readFile(new URL(`../../src/${module}.ts`, import.meta.url), "utf8");
+        await writeFile(path.join(base, `${module}.js`), stripTypeScriptTypes(source));
+      }),
+    ]);
+    // Load the copied module in Node so import.meta.resolve uses the fixture package.
+    const inspect = () => JSON.parse(execFileSync(process.execPath, [
+      "--input-type=module", "-e",
+      `try {
+        const { inspectSkillsRuntime } = await import(process.argv[1]);
+        console.log(JSON.stringify({ runtime: await inspectSkillsRuntime() }));
+      } catch (error) {
+        console.log(JSON.stringify({ error: error.message }));
+      }`,
+      pathToFileURL(path.join(actions, "sandbox.js")).href,
+    ], { encoding: "utf8" })) as { error?: string; runtime?: unknown };
+
+    expect(inspect()).toEqual({ error: "The installed skills package has an invalid executable entry." });
+
+    await rm(executable, { recursive: true });
+    await writeFile(executable, "#!/usr/bin/env node\n");
+    await chmod(executable, 0o644);
+    expect((await stat(executable)).mode & 0o111).toBe(0);
+    expect(inspect()).toEqual({
+      runtime: { version: "1.2.3", packageRoot, executable },
+    });
   });
 });
 

@@ -12,6 +12,8 @@ See GitHub's [reporting process](https://docs.github.com/en/code-security/how-to
 
 The [release plan](docs/superpowers/plans/2026-11-03-portable-open-source-release.md#release-completion) records test results and their limits.
 
+The package preflight is designed to reject unreviewed root `README`, `LICENSE`, `LICENCE`, and `COPYING` variants that npm would otherwise include despite the allowlist. It also rejects TypeScript output and build identity targets with multiple hard links, which can expose another file to a build write.
+
 The app reads skills as untrusted data. It must not execute frontmatter, infer ownership from a missing lock, or use a containing repository for Git actions. Remote preparation requires an operating-system boundary. If that boundary is unavailable, the app must refuse the action.
 
 ## Threat model
@@ -50,11 +52,47 @@ Create a private remote outside the app. The app does not create provider reposi
 
 Push and pull reviews require complete, original history. Shallow repositories and legacy grafts are refused. Resolve those conditions outside the app before retrying. The push review includes all reachable history, not just newly transferred commits. The app never force-pushes. Declining Git setup or a failed remote action leaves local skills available.
 
+## Application and CLI updates
+
+The Application updates menu offers separate checks for skills-manager and the Vercel `skills` CLI. Both automatic checks default to off. Each requires its own persistent opt-in for the disclosed host. You can disable either check independently. Disabling a check cancels its pending requests in the current session.
+
+After opt-in, the app can check after startup and during a long-running session. Automatic attempts occur at most once every 24 hours per component and host.
+
+A manual check authorizes one bounded request and does not enable automatic checks. The app check contacts `https://api.github.com/repos/ederheisler/skills-manager/commits/main`. The CLI check contacts the configured npm registry, which defaults to `registry.npmjs.org`. Each host sees the IP address of the connection.
+
+npm can protect a registry URL with embedded credentials in a user or global `.npmrc`. When the app cannot resolve that origin, CLI checks and the update handoff are unavailable, and automatic CLI checks stay off. GitHub app checks remain available. A credentialed `npm_config_registry` environment override is supported. The app does not display or silently discard credentials.
+
+Consent for one host does not authorize checks on the other. Neither check authorizes an update. Ordinary quit does not start an update.
+
+The app stores explicit consent in configuration and authorized check metadata in cache, outside the selected skills directory. Invalid, unreadable, or unwritable consent fails closed. If saving an opt-out fails, automatic checks stop in the current session, but an earlier saved opt-in can apply on a later launch. The app reports the save failure.
+
+The app compares the running build's full commit with `main`. Different commits do not establish which build is newer. The CLI check compares the resolved CLI version with the registry's `latest` tag. The tag is not a compatibility guarantee or a tested-version gate. An unknown build or CLI version, an offline request, or an invalid response is not a match.
+
+An approved update shuts down the app and replaces its process with a helper in a private temporary workspace. The helper uses a separate private npm project and cache outside the running package, shared caches, checkout, and skills roots. It selects the CLI from the approved registry through the root npm override `{"skills":"$skills"}`.
+
+The combined update fetches `main`, which can change after the check. A CLI-only refresh rebuilds a known, clean, reproducible full app commit. An unknown, dirty, or nonreproducible build requires manual recovery or an explicit switch to `main`. A source checkout, tagged install, or unknown channel also requires that explicit switch for an in-app app update.
+
+The workspace is not a sandbox. npm runs repository and dependency lifecycle scripts with the normal permissions of your user. The helper preserves normal `HOME` and user configuration. Scripts can access your files, credentials, and network, and can contact hosts beyond those used for checks.
+
+The helper does not directly install into your checkout, running package, shared npm cache, or skills roots. It does not directly overwrite installed skill documents, user lockfiles, or the global `skills` CLI. Unrestricted scripts can still alter anything available to your account.
+
+The helper prints the workspace path before installation and keeps the workspace while the new app runs. If the new app exits with status zero, the helper attempts identity-checked cleanup. If the new app exits abnormally or is interrupted, the helper keeps and reports the workspace because descendant processes can still run. A hard kill or crash can also leave the workspace behind. Before removing a leftover workspace, make sure that no process still uses it.
+
+The new app repeats onboarding and revalidates the selected skills directory. The selected directory is passed as a separate `--skills-dir` argument, not through a shell.
+
+After shutdown, a failed handoff cannot restore the old app screen. The app reports the failure and a manual recovery command. You can also run this command with your current absolute skills directory:
+
+```sh
+npx --yes --prefer-online github:ederheisler/skills-manager --skills-dir '/absolute/path/to/skills'
+```
+
+Replace the example path with your directory and quote it for your shell. The command recovers the app from `main`, but it does not guarantee a fresh CLI.
+
 ## Remote actions and privacy
 
 The app uses Vercel's [`skills`](https://www.npmjs.com/package/skills) dependency for explicit remote actions. The dependency requests `latest`, and tests used version 1.7.6. In a source checkout, `npm ci` installs the resolution recorded in the lockfile. The recommended GitHub `npx` command requests the app from `main`, but npm's dependency resolution and cache can retain an earlier `skills` version. A newer `skills` version is not necessarily installed on every launch. The app validates the installed package's declared executable path before use. It does not require a global `skills` installation.
 
-Startup, refresh, and local browsing make no background network requests. Search, remote preparation, update checks, fetch, pull, and push require explicit user actions. Disabling network access does not disable local browsing.
+Running the GitHub `npx` command can contact the network before the app starts. Once the app runs, automatic app and CLI checks require the separate opt-ins described above. Search, remote preparation, skill update checks, fetch, pull, and push require explicit user actions. Disabling network access does not disable local browsing.
 
 Remote preparation runs in a disposable workspace behind an operating-system boundary. macOS uses `sandbox-exec` and the Apple-signed Git in the standard system location for the active Xcode or Command Line Tools installation. The confined installer does not use a custom Homebrew Git or host credential helpers. Linux requires a working Bubblewrap installation and the required kernel permissions. A missing or unusable boundary makes the remote action unavailable. Environment variables alone are not a sandbox. If workspace cleanup cannot be safely confined, the app reports the temporary path and retains it for manual cleanup.
 

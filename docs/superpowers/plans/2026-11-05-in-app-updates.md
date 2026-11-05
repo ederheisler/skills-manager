@@ -2,14 +2,14 @@
 
 Date: 2026-11-05
 
-Status: Proposed. This feature is not implemented. The mechanics below require review before implementation.
+Status: Approved for implementation. The implementation is under verification. End-to-end runtime proof and supported-platform completion are not recorded here.
 
-## Current behavior and evidence
+## Behavior and evidence when proposed
 
-The [README](../../../README.md#quick-start) directs users to run `npx --yes --prefer-online github:ederheisler/skills-manager` for latest `main`.
-A running app does not notify users of application updates or update itself. Local browsing makes no background network requests.
-The [portability decisions](../../decisions/2026-11-03-open-source-portability.md#implementation-choices) require explicit network actions today.
-This proposal changes that policy only for users who explicitly enable automatic application checks.
+The [README](../../../README.md#quick-start) directed users to run `npx --yes --prefer-online github:ederheisler/skills-manager` for latest `main`.
+Before implementation, a running app did not notify users of application updates or update itself. Local browsing made no background network requests.
+The earlier [portability decisions](../../decisions/2026-11-03-open-source-portability.md#implementation-choices) required explicit network actions.
+The later approval changed that policy only for users who explicitly enable automatic checks for the relevant hosts.
 
 A prior cold and warm run used this same command and the same npm cache on macOS arm64 with Node 26.13.0 and npm 11.20.0.
 The runs used main commits `289af86f428ec8554802434c3be483c3b1faffcd` and `68fe67310dee87d3fa653816151d02029c8791b6`.
@@ -27,29 +27,41 @@ A main commit is not necessarily a successful post-merge build or release.
 The CLI creates the renderer after onboarding and `app.start()` completes startup, not the app lifetime ([CLI](../../../src/cli.ts)).
 The TUI destroy handler starts asynchronous cleanup without awaiting it ([TUI](../../../src/tui.ts)).
 Existing `u`, `p`, and `v` actions concern skills. Application updates need separate state and controls.
+The app resolves the bundled Vercel `skills` CLI relative to its own sandbox module, not through `PATH` or a global installation.
+The dependency specifies `latest`, but an existing lockfile or installed package can retain an older version.
+A fresh `npx` cache alone does not guarantee that the CLI resolves to the current registry tag.
+The CLI is separate from the user's installed skill documents and the skill actions above.
 
-## Proposed user flow
+## Approved user flow
 
-1. Add a distinct Application updates menu in browse mode and make it discoverable from `?` help.
-   Keep existing skill shortcuts unchanged and label skill actions clearly.
-2. Offer Check now, automatic notifications on or off, review update, and a copyable manual command.
-   Default automatic notifications to off. Check now permits one bounded request and does not enable future checks.
-3. Explain that an automatic check contacts the fixed GitHub host, exposes the user's IP address, and sends no app telemetry.
-   Explain the daily cadence and how to turn it off before saving explicit consent.
-4. Display a persistent, nonmodal badge for a different build. Do not steal focus, replace a dialog, or install automatically.
+1. Add an Application updates menu in browse mode and make it discoverable from `?` help.
+   Show separate rows for skills-manager and the Vercel `skills` CLI. Keep existing skill shortcuts unchanged.
+2. Offer separate Check now actions and automatic notification controls for the app and CLI.
+   Default both automatic controls to off. A one-shot check grants one bounded request for the disclosed host scope.
+3. Explain the GitHub host for app checks and the npm registry host for CLI checks.
+   Explain IP address exposure, the daily cadence, and how to disable checks before saving consent.
+   Automatic CLI checks require registry consent. GitHub consent alone does not authorize them.
+4. Show the running app version and build SHA, the checked main SHA, and the check time.
+   Show the CLI package version actually resolved by the running app and the registry's latest tag version.
+   The latest tag is informational, not a compatibility guarantee or a tested-version gate.
+   Unknown identity, offline checks, and invalid responses never mean that either component is current.
+5. Display a persistent, nonmodal badge for available or different builds without stealing focus.
    Keep the badge separate from temporary status messages. Do not use desktop notifications.
-5. In review, show the running version and short build SHA, the checked main SHA, and the time of the check.
-   Say "different build available" for unequal SHAs. Unequal commits do not prove that one is newer.
-   An unknown or dirty identity cannot establish that the running build matches main.
-6. Offer Update and restart with Cancel selected by default. Explain the isolated new session and its requirements before approval.
-   Downloads and build scripts need network access, Node, npm, Git, and a C compiler.
-   Explain that trusted repository and npm dependency code runs with normal user permissions.
-7. Also offer the canonical manual command with a safely shell-quoted current absolute skills directory and clipboard copy.
-   Never execute that display string, or start an update on ordinary quit, Ctrl-C, or renderer destruction.
+6. Offer review and an explicit CLI-only refresh even when the app SHA matches main or the CLI check failed.
+   A user can approve a fresh CLI refresh without a successful prior check.
+   Offer Update and restart to refresh both the app and CLI. Select Cancel by default.
+7. Explain the isolated session, registry and GitHub access, and required Node, npm, Git, and C compiler.
+   Explain that repository and dependency scripts run with normal user permissions. Do not install automatically.
+8. Offer the canonical manual app command with a safely shell-quoted current absolute skills directory and clipboard copy.
+   This command does not guarantee a fresh CLI. Offer CLI refresh through the controlled helper or documented manual instructions.
+   Never execute the display string or start an update on ordinary quit, Ctrl-C, or renderer destruction.
 
 A source checkout, tagged install, or install with unknown origin defaults to the manual route.
 An explicit switch-to-main choice can launch the same new session, but must not imply an in-place channel conversion.
 The same commit can arrive through different channels, so a SHA alone cannot identify the installation channel.
+For CLI-only refresh, retain a known, reproducible full running app SHA and rebuild that same SHA.
+For unknown, dirty, or otherwise nonreproducible identity, offer a manual route or an explicit switch to main.
+Never copy or overwrite a user checkout. An unchanged app SHA does not disable CLI checks or refresh.
 
 ## Implementation slices and dependencies
 
@@ -68,21 +80,26 @@ Update build inputs, copied-source fixtures, package tests, and artifact tests t
 
 ### 2. Add consent, scheduling, and comparison
 
-After identity exists, add an application-specific configuration store and checker separate from skill updates.
+After identity exists, add configuration and checkers for the two components, separate from skill updates.
 Use absolute `XDG_CONFIG_HOME`, or the home configuration fallback, for explicit consent.
 Use absolute `XDG_CACHE_HOME`, or the home cache fallback, for authorized check metadata.
 Do not create configuration on startup. Persist only explicit consent and authorized check metadata.
 Reject unsafe symlinks and overlap with any skills root. Never write to a selected skills directory for this feature.
 Missing consent means off. Invalid, unreadable, or unwritable consent fails closed and is reported.
 
-For each authorized check, request only `https://api.github.com/repos/ederheisler/skills-manager/commits/main`.
-Bound request time and response size, validate the full returned SHA, and escape untrusted output for the terminal.
-Compare full SHAs and show short SHAs only for display. Equality means a match at check time, not a release guarantee.
+For an authorized app check, request only `https://api.github.com/repos/ederheisler/skills-manager/commits/main`.
+For an authorized CLI check, request latest-tag metadata from the disclosed npm registry.
+Use the public npm registry by default. A custom registry must use matching check and install origins.
+If the install origin cannot be established or differs, report it as unknown or disclose the actual origin before approval.
+Never log registry tokens or credentials.
+Bound request time and response size, validate responses, and escape untrusted output for the terminal.
+Compare full app SHAs and show short SHAs only for display. Equality means a match at check time, not a release guarantee.
+Unequal app SHAs mean different builds, not necessarily newer builds.
 Treat offline, timeout, cancellation, HTTP errors, rate limits, and invalid responses as unavailable, never up to date.
 Do not present an old cached result as a current check.
 
-After valid opt-in, schedule a nonblocking check after startup and at most one attempt per 24 hours.
-Record attempt time in the cache and schedule another check during a long-running session once the interval expires.
+After valid opt-in for each component and host scope, schedule a nonblocking check after startup and at most one attempt per 24 hours.
+Record attempt times per component and requested hosts. Schedule another check during a long-running session once the interval expires.
 Serialize attempt claims across app instances and write cache metadata atomically. Keep this coordination separate from skills locks.
 On disable or exit, abort pending requests and invalidate their results.
 Disabling takes effect in the current session even if saving fails. Report that failure and the risk of retaining old consent on future launches.
@@ -111,26 +128,55 @@ Abort checkers, await app-owned pending cancellation, clipboard and markdown cle
 Destroy the renderer and restore the terminal before replacing the process. Resolve required executables before handoff.
 Before shutdown starts, a failure leaves the old app usable. After terminal teardown, an exec failure must show an error and manual recovery command.
 
-Copy a minimal independent helper into a private app-owned temporary workspace outside the current package and cache.
+Copy a minimal independent helper into a private app-owned temporary workspace outside the current package, caches, checkout, and skills roots.
 Replace the old process image with that helper before npm starts. The helper uses argument vectors, not a shell.
-Run the GitHub main command with a separate private npm cache and neutral working directory.
-Preserve normal `HOME` and legitimate user configuration. This launches a new session.
-It does not replace a checkout, global install, or normal npm cache.
-The helper waits for the new npx process tree to exit before cleaning only its own workspace.
-An interruption or hard kill can leave that workspace. Report its exact path for manual cleanup and never delete other active caches.
+Preserve normal `HOME` and legitimate user configuration. The helper starts a new session and does not replace the current installation.
+Keep the workspace for the new app's lifetime. If the new app exits with status zero, attempt identity-checked cleanup of only that workspace.
+If the new app exits abnormally or is interrupted, retain and report the workspace because descendant processes can still run.
+A hard kill or crash can also leave the workspace. Print its exact path before installation for possible manual cleanup.
 
-The unpinned command can obtain a later main commit than the reviewed SHA. Explain this before approval.
+The combined update can obtain a later main commit than the reviewed SHA. Explain this before approval.
 The new build displays its actual identity. A child process starting is not proof that the app reached browsing.
 After process replacement, report launch or build failures in readable terminal text with the primary manual recovery command.
 Do not promise restoration of the old UI, rollback, reproducible builds, pinned transitive dependencies, or a hostile-code sandbox.
-Never pull, reset, stash, install, or build in a user checkout. Never alter Vercel skills, user lockfiles, or user symlinks for application updates.
+Never pull, reset, stash, install, or build in a user checkout.
+Do not alter installed skill documents, the global CLI, user lockfiles, or user symlinks. A staged private CLI package is in scope.
 
-### 4. Update affected interfaces and documentation
+### 4. Refresh the Vercel skills CLI
 
-Update CLI lifetime callers, TUI construction and teardown callers, help, tests, build metadata generation, and strict package allowlists.
+This slice depends on the consent, identity, and guarded handoff slices. Its implementation is under verification and the supported-platform proof remains required.
+After approved shutdown and process replacement, the helper creates a new private npm project with no existing lockfile.
+The project is outside the running app, shared npm caches, checkout, and skills roots. Give it a separate private npm cache.
+Declare root dependencies on `skills-manager` from GitHub and `skills` at `latest`.
+Use main for the combined update and the full running app SHA for a CLI-only refresh.
+Use the root override `{"skills":"$skills"}` to refer to the root `latest` dependency and select it for nested dependencies.
+Run `npm install --prefer-online` with argument vectors, the private project as the actual working directory, its private cache, and the approved registry.
+The private project has no prepare script of its own. The root override applies only to this disposable project, not the source manifest or lockfile.
+Do not run npm install inside the installed app package. Its prepare script can require build scripts that are not shipped.
+An explicit install is required. A new cache or a plain `npx` launch is not evidence of a fresh CLI.
+
+Before launch, use the new app's actual module-relative resolver to identify `skills/package.json`.
+Make sure its canonical package root is the one selected by the explicit refresh. Refuse a different package visibly.
+Apply the existing package identity, bin containment, and dependency-closure checks before starting the new app.
+Keep the operating-system sandbox, schema, and provenance checks unchanged. Report the resolved version as metadata, not an allowlist gate.
+Launch the new app through its declared bin without guessing from `PATH` or npm cache internals.
+The override approach does not require external path injection if the implementation gates prove it.
+
+A local feasibility probe used a synthetic Git app and controlled registry on macOS arm64 with Node 26.13 and npm 11.20.
+The Git app lock selected `skills` 1.0.0 during prepare. The root dependency and override selected 2.0.0 from the app module.
+After the registry tag advanced, a new session selected 3.0.0 while the first session retained 2.0.0. Both selected bins ran.
+The probe used canonical paths for containment. It did not use the real app, Vercel CLI, complete dependency closure, or sandbox.
+Also prove the public GitHub app and current `skills` latest tag with the stale source lockfile, cold and warm caches, and actual confined CLI execution.
+Test all supported platform combinations before claiming support. Until then, do not present the mechanism as proven or claim supported-platform completion.
+Manual CLI refresh instructions must preserve these boundaries and must not use global npm installation or `skills update`.
+The existing canonical `npx` command remains an app recovery route, not a complete CLI refresh.
+
+### 5. Update affected interfaces and documentation
+
+Update CLI lifetime callers, TUI construction and teardown callers, configuration and help callers, tests, build metadata generation, and strict package allowlists.
 At implementation time, update the README, security policy, CLI help, and decision record for default-off consent and network behavior.
-Document the isolated-session limits, manual recovery, and main-versus-tag distinction. Keep the existing release and protected-main policies unchanged.
-Do not claim an implementation or policy change before the implementation and its review land.
+Document the isolated-session limits, manual recovery, and main-versus-tag distinction. Keep existing release and protected-main policies unchanged.
+Describe the approved implementation and policy accurately. Do not claim runtime proof before the acceptance results are recorded.
 
 ## Acceptance and runtime verification
 
@@ -141,15 +187,67 @@ Use disposable homes, caches, skills roots, and outside sentinels. Do not use a 
   Repeat cold and warm with one npm cache. Move main during preparation and make sure identity remains the fetched source, not live main.
 - Exercise archive substitution, a verified checkout, dirty inputs, missing Git, enclosing unrelated repositories, copied packages, and invalid metadata.
   Exercise tagged and source installs without inferring their channel from SHA. Check the packed artifact and strict allowlist.
-- Prove no application-check network requests occur on startup, onboarding, browse, help, or quit without valid opt-in.
-  Check one-shot authorization, daily cadence including a long session, persisted consent, revocation, malformed and unwritable storage, and unsafe paths.
+- Prove no app or CLI check requests occur without valid consent for that component and host.
+  Check separate one-shot scopes, registry and GitHub consent, daily per-component cadence, revocation, invalid storage, and unsafe paths.
+  Check public and custom registry origins, mismatches, disclosure, and that credentials never enter logs.
 - Exercise equal, unequal, unknown, and dirty identity. Exercise timeout, offline, 403, 429, server errors, invalid data, cancellation, and stale-result suppression.
   Complete checks during help, confirmations, busy actions, and shutdown without changing focus or replacing a dialog.
 - Exercise cancel, busy refusal, unresolved reviews, ordinary quit, signals, and Ctrl-C. None can launch an update without explicit approval.
   Test current switched roots, spaces, quotes, leading hyphens, changed symlinks, and renewed onboarding in the child.
-- With fake tools and real terminal fixtures, inspect exact argv, environment, separate cache, neutral cwd, process replacement, and cleanup order.
-  Exercise missing tools, download and build errors, aborts, exec failure, child failure, and interrupted workspace cleanup.
-  Make sure checkout, skills trees, lockfiles, outside sentinels, and other instances' caches remain unchanged by the app.
+- With fake tools and real terminal fixtures, inspect exact argv, environment, private project cwd and cache, process replacement, and cleanup order.
+  Exercise missing tools, download and build errors, lifecycle script policy, aborts, exec failure, child failure, and interrupted workspace cleanup.
+  Make sure checkout, active installation, skills trees, lockfiles, outside sentinels, and other instances' caches remain unchanged.
+  Failure must not claim a successful refresh or mutate those installations.
+  Exercise a fixed app SHA as the registry tag advances beyond the locked version, including offline and failed checks.
+  Approve CLI refresh without a prior successful check. Exercise unknown and dirty identities and explicit switch to main.
+  Test cold and warm caches, the stale source lockfile, nested package resolution, wrong package identity, and malformed or escaping bins.
+  Run the selected CLI through the same adapter and macOS or Linux sandbox. Preserve schema and provenance checks.
 - Run the actual approved in-app handoff through renderer-ready browsing in a real terminal. Observe the new build identity and manual recovery on failure.
   Repeat on local macOS arm64 and the existing CI matrix: Linux arm64, Linux x64, and macOS x64.
   Retain existing installed-package browse, help, quit, and confinement checks. Record platform-specific limits instead of claiming untested support.
+
+### Verification progress
+
+On macOS arm64 with Node.js 26.13 and npm 11.20, `npm run build` passed.
+`npm test` passed 546 tests in 28 files and skipped 11 platform-specific tests.
+`npm audit` reported no vulnerabilities at or above moderate, including development dependencies.
+`npm ls vitest @vitest/mocker vite esbuild --all` reported versions 4.1.12, 4.1.12, 8.3.5, and 0.28.2, respectively.
+
+An installed tarball passed the real-terminal baseline with `skills` 1.7.6.
+A service exercise passed 33 assertions and observed no startup fetch.
+It covered independent persistent consent and revocation, loopback cancellation, registry host changes, and daily suppression.
+The user sentinel and cache remained unchanged.
+Live HTTP checks returned GitHub main starting with `2084680` and the npm `skills` latest tag at 1.7.6.
+
+A public GitHub install at `51223afa3602a461339d3904752cc396a90c66af` ran prepare and reported that exact clean archive SHA at version 0.1.0.
+A real CLI-only refresh rebuilt that commit, selected `skills` 1.7.6 from its private root `latest` dependency, repeated onboarding, and reached browse, help, and quit.
+The original cache and outside sentinel stayed unchanged; the helper workspace was removed.
+The terminal smoke now reconstructs the real character screen with the development-only `@xterm/headless` 6.0.0 dependency.
+
+A separately approved refresh against a closed local registry produced a real npm `ECONNREFUSED` and exit 1, printed manual recovery, and restored the terminal exactly.
+It did not restart the app. The original cache, skills, and outside sentinels stayed unchanged.
+The update workspace was absent and the npm process group was gone after exit; this probe did not independently observe their removal order.
+
+Both Linux CI jobs passed at feature head `6ec633305d371ff382a81b3ae4ed724d028069c1`, including installed-package refresh and restart.
+The remaining macOS x64 failures were four whole-workflow 5-second test deadlines, not failed behavior assertions.
+The real-TUI suite now allows 30 seconds for each complete workflow, while keeping 4-second frame deadlines, explicit phase waits, and the 60-second long-preview exception.
+Canonical cold and warm main proof, a combined main restart, and the macOS x64 gate remain pending.
+
+### Graph maintenance
+
+The Graphify AST refresh reported 54 hub renames and 20 disappeared names:
+
+- `.close`, `.write`, `Audio capture and recording`, `Drawing inventory`, `Field compiler callbacks`
+- `Intercept callbacks`, `Key binding pipeline callbacks`, `Public registration APIs`, `React and Solid handoff`, `SSH`
+- `Services and registrations`, `Solid plugin slots`, `StateSession`, `Stream and recorder members`, `checkUpdates.ts`
+- `interruptedFixture`, `list-boundary.h`, `skillsCli.ts`, `tree_check_mount_entry`, `tree_walk_entry`
+
+The graph includes the final handoff test. Its manifest and file modification times both matched `1793889714.8341844`.
+
+The corrective test-harness commit needed a second, separately guarded AST refresh. It reported 48 hub renames and 15 disappeared names:
+
+- `.command`, `.registry`, `React plugin slots`, `Select`, `appUpdateHandoff.test.ts`
+- `getStatus`, `git.test.ts`, `gitBoundary.ts`, `gitTransaction.test.ts`, `release-smoke-pty.py`
+- `repo.ts`, `tree_check_mount_fd`, `tree_same_snapshot`, `types.ts`, `withSkillsLock`
+
+The next test-only AST refresh reported 4 hub renames. No community names disappeared.

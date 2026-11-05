@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 import { helpText, parseCliOptions, runtimeError, type CliOptions } from "./cliOptions.js";
-import { escapeTerminalSingleLine } from "./terminalText.js";
+import { escapeTerminalSingleLine, quoteTerminalPath } from "./terminalText.js";
 import type { DirectorySelectionOptions, OnboardingIO, SkillsOnboardingResult } from "./onboarding.js";
+
+function errorText(error: unknown): string {
+  return escapeTerminalSingleLine(error instanceof Error ? error.message : String(error));
+}
 
 async function main(): Promise<void> {
   let options: CliOptions;
   try {
     options = parseCliOptions(process.argv.slice(2));
   } catch (error) {
-    process.stderr.write(`skills-manager: ${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}\nRun skills-manager --help for usage.\n`);
+    process.stderr.write(`skills-manager: ${errorText(error)}\nRun skills-manager --help for usage.\n`);
     process.exitCode = 2;
     return;
   }
@@ -87,14 +91,69 @@ async function main(): Promise<void> {
     import("./tui.js"),
   ]);
   const renderer = await createCliRenderer({ exitOnCtrlC: true });
+  let rendererDestroyed = renderer.isDestroyed;
+  renderer.once("destroy", () => { rendererDestroyed = true; });
+  let app: InstanceType<typeof SkillsManagerTui> | undefined;
   try {
-    const app = new SkillsManagerTui(renderer, onboarding.root, {
+    app = new SkillsManagerTui(renderer, onboarding.root, {
       initialOnboarding: { reviewInitialize: onboarding.reviewInitialize, reviewBackup: onboarding.reviewBackup },
       selectSkillsDir: (currentSkillsDir) => select({ currentSkillsDir }),
     });
     await app.start();
+    const outcome = await app.waitForExit();
+    if (outcome === null) {
+      await app.shutdown();
+      return;
+    }
+
+    let handoffFailure: { error: unknown } | undefined;
+    try {
+      await app.shutdown();
+      if (!rendererDestroyed && !renderer.isDestroyed) {
+        // Load only after approval so a missing handoff module can report manual recovery.
+        const { executeUpdateHandoff } = await import("./actions/appUpdateHandoff.js");
+        if (!rendererDestroyed && !renderer.isDestroyed) {
+          renderer.destroy();
+          executeUpdateHandoff(outcome.prepared);
+          throw new Error("Update process replacement returned unexpectedly.");
+        }
+      }
+    } catch (error) {
+      handoffFailure = { error };
+      try {
+        renderer.destroy();
+      } catch (destroyError) {
+        process.stderr.write(`skills-manager: Renderer cleanup failed: ${errorText(destroyError)}\n`);
+      }
+    }
+
+    try {
+      await outcome.prepared.cleanup();
+    } catch (error) {
+      process.stderr.write(`skills-manager: Could not clean update workspace ${quoteTerminalPath(outcome.prepared.workspace)}: ${errorText(error)}\n`);
+      process.exitCode = 1;
+    }
+    if (handoffFailure) {
+      process.stderr.write(`skills-manager: Application update could not start: ${errorText(handoffFailure.error)}\nManual recovery: ${escapeTerminalSingleLine(outcome.recoveryCommand)}\n`);
+      process.exitCode = 1;
+    }
   } catch (error) {
-    renderer.destroy();
+    let shutdownFailure: { error: unknown } | undefined;
+    if (app) {
+      try {
+        await app.shutdown();
+      } catch (cleanupError) {
+        shutdownFailure = { error: cleanupError };
+      }
+    }
+    try {
+      renderer.destroy();
+    } catch (destroyError) {
+      process.stderr.write(`skills-manager: Renderer cleanup failed: ${errorText(destroyError)}\n`);
+    }
+    if (shutdownFailure && shutdownFailure.error !== error) {
+      process.stderr.write(`skills-manager: Application cleanup failed: ${errorText(shutdownFailure.error)}\n`);
+    }
     throw error;
   }
 }
@@ -102,6 +161,6 @@ async function main(): Promise<void> {
 try {
   await main();
 } catch (error) {
-  process.stderr.write(`skills-manager: ${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}\n`);
+  process.stderr.write(`skills-manager: ${errorText(error)}\n`);
   process.exitCode = 1;
 }

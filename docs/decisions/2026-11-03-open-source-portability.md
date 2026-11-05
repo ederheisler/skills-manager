@@ -36,7 +36,7 @@ MIT is a permissive license. The copyright name is `Eder Heisler`.
 The project uses Node. The original primary installation route was a tagged GitHub `npx` command. It required neither a manual clone nor npm registry publication. Repository and tarball distribution remain supported. [Latest main installation](#latest-main-installation) supersedes the tagged primary route.
 
 Other choices:
-- Allow network access only after a user action and disable upstream telemetry. Startup and local browsing make no network requests.
+- The original network policy required a user action and kept startup and local browsing offline. [Application update approval](#application-update-planning) later introduced an exception for opted-in checks. Upstream telemetry remains disabled.
 - Allow explicitly reviewed changes for adopted skills with an unknown owner or edit baseline. Unknown status remains visible and does not imply ownership.
 - Target macOS and Linux on arm64 and x86_64, with glibc on Linux. Test each combination before claiming support.
 - Use GitHub private vulnerability reporting as the security contact. It is enabled on the public repository.
@@ -99,7 +99,20 @@ On 2026-11-04, GitHub reported ruleset `26549966` active on `main`. It required 
 
 Date: 2026-11-05
 
-The user requested a plan for in-app application update notifications and an update process. No separate rationale was stated.
-The [application update plan](../superpowers/plans/2026-11-05-in-app-updates.md) is proposed and the feature is not implemented.
-Its opt-in, daily cadence, and handoff mechanics are recommendations, not approved decisions.
-The existing explicit-network policy and latest-main installation route remain current.
+The user first requested a plan for in-app application update notifications and an update process. No separate rationale was stated.
+At that point, the [application update plan](../superpowers/plans/2026-11-05-in-app-updates.md) was a proposal, not an approval.
+The user later explicitly approved implementation of the plan.
+That approval replaces the original no-background-network rule only for separately opted-in app and CLI checks.
+Both automatic checks default to off. Each grants ongoing consent for its disclosed host scope and can be disabled separately.
+The implementation is under verification. Approval does not establish runtime proof or completion of the supported-platform checks.
+The latest-main installation, automated releases, and main-branch protection decisions remain unchanged.
+
+## Vercel skills CLI updates
+
+Date: 2026-11-05
+
+The user also requested that the Vercel `skills` CLI stay up to date through the application update plan.
+This request covers the CLI package, not installed skill documents. It does not require a global CLI installation.
+The [upstream version decision](#upstream-skills-versions) remains in force. Tested versions are not an allowlist.
+The user later explicitly approved the [CLI refresh mechanism](../superpowers/plans/2026-11-05-in-app-updates.md#4-refresh-the-vercel-skills-cli).
+Its implementation is under verification. The canonical `npx` app recovery command does not guarantee a fresh CLI.

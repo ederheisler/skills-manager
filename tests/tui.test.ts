@@ -1,5 +1,6 @@
-import { execFile } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile, spawnSync } from "node:child_process";
+import { watch } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,13 +10,22 @@ import { RGBA, type ClipboardService } from "@opentui/core";
 import { createTestRenderer as createOpenTuiTestRenderer, MouseButtons } from "@opentui/core/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { approveSkillsRoot, fingerprintContents, type ApprovedSkillsRoot } from "../src/actions/boundary.js";
-import { SkillsManagerTui } from "../src/tui.js";
+import { SkillsManagerTui, type ApplicationUpdateHandoff } from "../src/tui.js";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
+const applications: SkillsManagerTui[] = [];
+const renderers: Array<Awaited<ReturnType<typeof createOpenTuiTestRenderer>>["renderer"]> = [];
+
+function createTrackedTui(...args: ConstructorParameters<typeof SkillsManagerTui>): SkillsManagerTui {
+  const app = new SkillsManagerTui(...args);
+  applications.push(app);
+  return app;
+}
 
 async function createTestRenderer(options: Parameters<typeof createOpenTuiTestRenderer>[0]) {
   const setup = await createOpenTuiTestRenderer(options);
+  renderers.push(setup.renderer);
   return {
     ...setup,
     async waitFor(predicate: () => boolean | Promise<boolean>, timeout = 4_000): Promise<void> {
@@ -51,6 +61,17 @@ async function fixture(directoryName = "chosen-skills"): Promise<{ home: string;
   const home = await realpath(await mkdtemp(path.join(tmpdir(), "skills-manager-tui-")));
   roots.push(home);
   const skillsDir = path.join(home, directoryName);
+  vi.stubEnv("XDG_CONFIG_HOME", path.join(home, "config"));
+  vi.stubEnv("XDG_CACHE_HOME", path.join(home, "cache"));
+  for (const [name, value] of Object.entries({
+    registry: "https://registry.npmjs.org/",
+    cache: path.join(home, "npm-cache"),
+    userconfig: path.join(home, "user.npmrc"),
+    globalconfig: path.join(home, "global.npmrc"),
+  })) {
+    vi.stubEnv(`npm_config_${name}`, value);
+    vi.stubEnv(`NPM_CONFIG_${name.toUpperCase()}`, value);
+  }
   await mkdir(path.join(skillsDir, "alpha"), { recursive: true });
   await mkdir(path.join(skillsDir, ".disabled_skills", "beta"), { recursive: true });
   await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), "---\nname: alpha\ndescription: Alpha description\nauthors: [Ada, Grace]\n---\n\n# Alpha body\n\nLocal content for selection.\n");
@@ -105,13 +126,31 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
+function cliRefreshTitle(frame: string): string | null {
+  for (const title of ["Refresh CLI: switch to main", "Refresh Vercel skills CLI"]) {
+    if (frame.includes(title)) return title;
+  }
+  return null;
+}
+
 afterEach(async () => {
+  for (const renderer of renderers.splice(0)) {
+    if (!renderer.isDestroyed) renderer.destroy();
+  }
+  // Renderer destruction starts shutdown asynchronously; drain it before the
+  // fixture environment and directories can be reused by the next test.
+  const shutdowns = await Promise.allSettled(applications.splice(0).map((app) => app.shutdown()));
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  const failures = shutdowns.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failures.length) throw new AggregateError(failures.map((result) => result.reason), "TUI shutdown failed");
 });
 
-describe("SkillsManagerTui", () => {
+// These real-renderer workflows include npm and Git subprocesses. On macOS x64
+// CI, valid Git cases took 6–13 s and the long commit preview took 31 s; the
+// default 5 s unit-test budget is too short for an entire workflow.
+describe("SkillsManagerTui", { timeout: 30_000 }, () => {
   it("browses the selected directory without network or adoption writes on startup and reload", async () => {
     const { skillsDir } = await fixture();
     const rootBefore = await lstat(skillsDir);
@@ -119,7 +158,7 @@ describe("SkillsManagerTui", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      const app = new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir));
+      const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir));
       await app.start();
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
@@ -144,6 +183,32 @@ describe("SkillsManagerTui", () => {
     }
   });
 
+  it("opens the default-off update menu without requests or home and XDG writes", async () => {
+    const { home, skillsDir } = await fixture();
+    const shellHome = path.join(home, "shell-home");
+    await mkdir(shellHome);
+    vi.stubEnv("HOME", shellHome);
+    const before = (await readdir(home)).sort();
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
+    const setup = await createTestRenderer({ width: 180, height: 30 });
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir));
+    try {
+      await app.start();
+      await setup.mockInput.typeText("x");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Application updates"));
+      expect(setup.captureCharFrame()).toContain("skills-manager (app) · automatic: off");
+      expect(setup.captureCharFrame()).toContain("Vercel skills CLI · automatic: off");
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await readdir(shellHome)).toEqual([]);
+      expect((await readdir(home)).sort()).toEqual(before);
+      expect(await exists(path.join(home, "config"))).toBe(false);
+      expect(await exists(path.join(home, "cache"))).toBe(false);
+    } finally {
+      setup.renderer.destroy();
+      await app.shutdown();
+    }
+  });
+
   it("escapes terminal controls and distinguishes literal path escapes in captured frames", async () => {
     const { home, skillsDir } = await fixture();
     const newlineRoot = path.join(home, "choice\nname");
@@ -155,7 +220,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(backslashRoot, "gamma", "SKILL.md"), "---\nname: gamma\n---\n\nOther root.\n");
     const setup = await createTestRenderer({ width: 200, height: 40 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(newlineRoot), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(newlineRoot), {
         selectSkillsDir: async () => ({ root: await approveSkillsRoot(backslashRoot), reviewInitialize: false, reviewBackup: false }),
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("BODY\\x07"));
@@ -184,7 +249,7 @@ describe("SkillsManagerTui", () => {
     vi.stubEnv("PATH", path.join(skillsDir, "missing-executables"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, approved).start();
+      await createTrackedTui(setup.renderer, approved).start();
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
       expect(frame).toContain("Git unavailable");
@@ -202,9 +267,10 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
+      expect(frame).toContain("x app updates · open");
       expect(frame).toContain("scope: all · state: all");
       expect(frame).not.toContain("s cope: all");
       expect(frame).not.toContain("s tate: all");
@@ -216,6 +282,8 @@ describe("SkillsManagerTui", () => {
       expect(frame).not.toContain("t oggle rendering");
       expect(frame).toContain("Files · [ ] navigate");
       const spans = setup.captureSpans().lines;
+      const applicationUpdates = spans.find((line) => line.spans.map((span) => span.text).join("").includes("x app updates"));
+      expect(applicationUpdates?.spans.some((span) => span.text === "x" && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
       const header = spans.find((line) => line.spans.map((span) => span.text).join("").includes("scope · enabled"));
       expect(header?.spans.some((span) => span.text === "s" && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
       expect(header?.spans.some((span) => span.text === "e" && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
@@ -236,13 +304,294 @@ describe("SkillsManagerTui", () => {
     }
   });
 
+  it("keeps component checks separate, defers results during help and review, and retains its nonmodal badge", async () => {
+    const { skillsDir } = await fixture();
+    const response = Promise.withResolvers<Response>();
+    const another = Promise.withResolvers<Response>();
+    const fetch = vi.spyOn(globalThis, "fetch").mockReturnValue(response.promise);
+    const setup = await createTestRenderer({ width: 180, height: 30 });
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir));
+    try {
+      await app.start();
+      await setup.mockInput.typeText("x");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Application updates"));
+      let frame = setup.captureCharFrame();
+      expect(frame).toContain("skills-manager (app) · automatic: off");
+      expect(frame).toContain("Vercel skills CLI · automatic: off");
+      expect(frame).toContain("Running version:");
+      expect(fetch).not.toHaveBeenCalled();
+
+      await setup.mockInput.typeText("2c");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Check Vercel skills CLI now"));
+      expect(setup.captureCharFrame()).toContain("https://registry.npmjs.org");
+      setup.mockInput.pressEnter();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Check Vercel skills CLI now"));
+      expect(fetch).not.toHaveBeenCalled();
+
+      await setup.mockInput.typeText("c");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Check Vercel skills CLI now"));
+      await setup.mockInput.typeText("y");
+      await setup.waitFor(() => setup.captureCharFrame().includes("checking..."));
+      await setup.waitFor(() => fetch.mock.calls.length === 1);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(String(fetch.mock.calls[0]![0])).toBe("https://registry.npmjs.org/skills/latest");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Application updates"));
+      await setup.mockInput.typeText("?");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Keyboard help"));
+      response.resolve(new Response(JSON.stringify({ name: "skills", version: "9999.0.0" }), { status: 200 }));
+      await delay(20);
+      expect(setup.captureCharFrame()).toContain("Keyboard help");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => setup.captureCharFrame().includes("Different Vercel skills CLI · x review"));
+      await setup.mockInput.typeText("r");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Different Vercel skills CLI · x review"));
+      await setup.mockInput.typeText("x");
+      await setup.waitFor(() => setup.captureCharFrame().includes("registry latest: 9999.0.0"));
+      frame = setup.captureCharFrame();
+      expect(frame).toContain("Vercel skills CLI · automatic: off");
+      expect(frame).toContain("skills-manager (app) · automatic: off");
+      fetch.mockReturnValueOnce(another.promise);
+      await setup.mockInput.typeText("c");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Check Vercel skills CLI now"));
+      await setup.mockInput.typeText("y");
+      await setup.waitFor(() => setup.captureCharFrame().includes("checking..."));
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Application updates"));
+      await setup.mockInput.typeText("d");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Remove skill"));
+      await setup.waitFor(() => fetch.mock.calls.length === 2);
+      another.resolve(new Response(JSON.stringify({ name: "skills", version: "9999.0.1" }), { status: 200 }));
+      await delay(20);
+      expect(setup.captureCharFrame()).toContain("Remove skill");
+      setup.mockInput.pressEnter();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Remove skill"));
+      expect(await exists(path.join(skillsDir, "alpha", "SKILL.md"))).toBe(true);
+      await setup.mockInput.typeText("x");
+      await setup.waitFor(() => setup.captureCharFrame().includes("registry latest: 9999.0.1"));
+    } finally {
+      response.resolve(new Response(null, { status: 503 }));
+      another.resolve(new Response(null, { status: 503 }));
+      setup.renderer.destroy();
+      await app.shutdown();
+    }
+  });
+
+  it("requires separate explicit consent and remembers the app setting across sessions", async () => {
+    const { skillsDir } = await fixture();
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ sha: "a".repeat(40) }), { status: 200 }));
+    const first = await createTestRenderer({ width: 180, height: 30 });
+    const app = createTrackedTui(first.renderer, await approveSkillsRoot(skillsDir));
+    try {
+      await app.start();
+      await first.mockInput.typeText("x");
+      await first.waitFor(() => first.captureCharFrame().includes("skills-manager (app) · automatic: off"));
+      await first.mockInput.typeText("a");
+      await first.waitFor(() => first.captureCharFrame().includes("Enable automatic skills-manager checks"));
+      expect(first.captureCharFrame()).toContain("https://api.github.com");
+      expect(first.captureCharFrame()).toContain("IP address");
+      first.mockInput.pressEnter();
+      await first.waitFor(() => !first.captureCharFrame().includes("Enable automatic skills-manager checks"));
+      expect(fetch).not.toHaveBeenCalled();
+
+      await first.mockInput.typeText("a");
+      await first.waitFor(() => first.captureCharFrame().includes("Enable automatic skills-manager checks"));
+      await first.mockInput.typeText("y");
+      await first.waitFor(() => first.captureCharFrame().includes("skills-manager (app) · automatic: on"));
+      await first.waitFor(() => fetch.mock.calls.length > 0);
+      expect(fetch.mock.calls.every(([url]) => String(url).startsWith("https://api.github.com/"))).toBe(true);
+      expect(first.captureCharFrame()).toContain("Vercel skills CLI · automatic: off");
+    } finally {
+      first.renderer.destroy();
+      await app.shutdown();
+    }
+    const second = await createTestRenderer({ width: 180, height: 30 });
+    const restarted = createTrackedTui(second.renderer, await approveSkillsRoot(skillsDir));
+    try {
+      await restarted.start();
+      await second.mockInput.typeText("x");
+      await second.waitFor(() => second.captureCharFrame().includes("skills-manager (app) · automatic: on"));
+      expect(second.captureCharFrame()).toContain("Vercel skills CLI · automatic: off");
+      await second.mockInput.typeText("a");
+      await second.waitFor(() => second.captureCharFrame().includes("skills-manager (app) · automatic: off"));
+    } finally {
+      second.renderer.destroy();
+      await restarted.shutdown();
+    }
+  });
+
+  it("copies a safe manual command for the newly selected directory and never updates on cancel or quit", async () => {
+    const { home, skillsDir } = await fixture();
+    const switched = path.join(home, "new 'skills'\n");
+    await mkdir(switched);
+    let copied = "";
+    const clipboard = {
+      writeText: async (text: string) => {
+        copied = text;
+        return { host: { status: "written" }, terminal: { status: "not-attempted" } };
+      },
+      dispose: async () => {},
+    } as unknown as ClipboardService;
+    const setup = await createTestRenderer({ width: 180, height: 30 });
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      clipboard,
+      selectSkillsDir: async () => ({ root: await approveSkillsRoot(switched), reviewInitialize: false, reviewBackup: false }),
+    });
+    try {
+      await app.start();
+      await setup.mockInput.typeText("i");
+      await setup.waitFor(() => setup.captureCharFrame().includes("new 'skills'\\n"));
+      await setup.mockInput.typeText("x");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Application updates"));
+      await setup.mockInput.typeText("m");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Manual app recovery"));
+      await setup.mockInput.typeText("c");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Command copied to the host clipboard."));
+      const parsed = spawnSync("/bin/sh", ["-c", `npx() { printf '%s\\0' "$@"; }\n${copied}`], { encoding: "utf8" });
+      expect(parsed.status).toBe(0);
+      expect(parsed.stdout.split("\0").slice(-2)).toEqual([switched, ""]);
+      expect(copied).toContain("github:ederheisler/skills-manager");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Manual app recovery"));
+      await setup.mockInput.typeText("f");
+      await setup.waitFor(() => cliRefreshTitle(setup.captureCharFrame()) !== null);
+      const title = cliRefreshTitle(setup.captureCharFrame())!;
+      let exited = false;
+      void app.waitForExit().then(() => { exited = true; });
+      setup.mockInput.pressEnter();
+      await setup.waitFor(() => !setup.captureCharFrame().includes(title));
+      expect(exited).toBe(false);
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Application updates"));
+      expect(exited).toBe(false);
+      await setup.mockInput.typeText("q");
+      expect(await app.waitForExit()).toBeNull();
+    } finally {
+      setup.renderer.destroy();
+      await app.shutdown();
+    }
+  });
+
+  it.each(["renderer destruction", "quit"] as const)("drains an update prepared after %s instead of handing it off", async (stop) => {
+    const { home, skillsDir } = await fixture();
+    await lstat(path.resolve("dist/actions/appUpdateWorker.js"));
+    const temporary = path.join(home, "tmp");
+    const bin = path.join(home, "bin");
+    const started = path.join(home, "npm-started");
+    const release = path.join(home, "npm-release");
+    await mkdir(temporary);
+    await mkdir(bin);
+    const npm = path.join(bin, "npm");
+    await writeFile(npm, [
+      "#!/bin/sh",
+      'if [ "$1" = config ] && [ "$2" = list ] && [ "$3" = --long ]; then',
+      '  : > "$SM_UPDATE_STARTED"',
+      '  while [ ! -e "$SM_UPDATE_RELEASE" ]; do /bin/sleep 0.02; done',
+      '  printf \'; "env" config from environment\\n; cache = "%s" ; overridden by cli\\n\' "$SM_UPDATE_CACHE"',
+      "else",
+      '  printf "%s\\n" "https://registry.npmjs.org/"',
+      "fi",
+      "",
+    ].join("\n"), { mode: 0o700 });
+    await chmod(npm, 0o700);
+    const setup = await createTestRenderer({ width: 180, height: 30 });
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir));
+    const events: string[] = [];
+    const watcher = watch(temporary, (_event, filename) => { if (filename) events.push(filename.toString()); });
+    try {
+      await app.start();
+      vi.stubEnv("PATH", `${bin}${path.delimiter}${process.env.PATH ?? ""}`);
+      vi.stubEnv("TMPDIR", temporary);
+      vi.stubEnv("SM_UPDATE_STARTED", started);
+      vi.stubEnv("SM_UPDATE_RELEASE", release);
+      vi.stubEnv("SM_UPDATE_CACHE", path.join(home, "npm-cache"));
+      await setup.mockInput.typeText("x");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Application updates"));
+      await setup.mockInput.typeText("r");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Update and restart both"));
+      await setup.mockInput.typeText("y");
+      await setup.waitFor(() => exists(started));
+      expect(setup.captureCharFrame()).toContain("Preparing update session; q quits without starting it.");
+      if (stop === "quit") await setup.mockInput.typeText("q");
+      else setup.renderer.destroy();
+      expect(await app.waitForExit()).toBeNull();
+      let drained = false;
+      const shutdown = app.shutdown().then(() => { drained = true; });
+      await delay(30);
+      expect(drained).toBe(false);
+      await writeFile(release, "");
+      await shutdown;
+      await delay(30);
+      expect(events.some((entry) => entry.startsWith("skills-manager-update-"))).toBe(true);
+      expect(await readdir(temporary)).toEqual([]);
+    } finally {
+      await writeFile(release, "");
+      setup.renderer.destroy();
+      await app.shutdown();
+      watcher.close();
+    }
+  });
+
+  it("prepares a CLI refresh for the current directory and registry without a prior check", async () => {
+    const { home, skillsDir } = await fixture();
+    await lstat(path.resolve("dist/actions/appUpdateWorker.js"));
+    const switched = path.join(home, "second installation");
+    const temporary = path.join(home, "tmp");
+    const registry = "https://registry.example.invalid/team/";
+    await mkdir(switched);
+    await mkdir(temporary);
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
+    const setup = await createTestRenderer({ width: 180, height: 30 });
+    const app = createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      selectSkillsDir: async () => ({ root: await approveSkillsRoot(switched), reviewInitialize: false, reviewBackup: false }),
+    });
+    let prepared: ApplicationUpdateHandoff | null = null;
+    try {
+      await app.start();
+      await setup.mockInput.typeText("i");
+      await setup.waitFor(() => setup.captureCharFrame().includes("second installation"));
+      vi.stubEnv("TMPDIR", temporary);
+      vi.stubEnv("npm_config_registry", registry);
+      vi.stubEnv("NPM_CONFIG_REGISTRY", registry);
+      await setup.mockInput.typeText("x");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Application updates"));
+      await setup.mockInput.typeText("f");
+      await setup.waitFor(() => cliRefreshTitle(setup.captureCharFrame()) !== null);
+      const review = setup.captureCharFrame();
+      const switchesToMain = review.includes("Refresh CLI: switch to main");
+      expect(review).toContain(switchesToMain ? "explicitly switches" : "Rebuild the same app commit");
+      expect(review).toContain("https://registry.example.invalid");
+      await setup.mockInput.typeText("y");
+      let resolved = false;
+      void app.waitForExit().then(() => { resolved = true; });
+      await setup.waitFor(() => resolved, 10_000);
+      prepared = await app.waitForExit();
+      expect(prepared).not.toBeNull();
+      if (!prepared) throw new Error("An explicitly approved refresh did not prepare a handoff.");
+      expect(prepared.prepared.args).toContain("cli");
+      expect(prepared.prepared.args.some((arg) => switchesToMain ? arg === "main" : /^[0-9a-f]{40}$/i.test(arg))).toBe(true);
+      expect(prepared.prepared.args).toContain(switched);
+      expect(prepared.prepared.env.SKILLS_MANAGER_UPDATE_REGISTRY).toBe(registry);
+      expect(prepared.recoveryCommand).toContain(switched);
+      expect(fetch).not.toHaveBeenCalled();
+      await app.shutdown();
+      setup.renderer.destroy();
+      await prepared.prepared.cleanup();
+      prepared = null;
+    } finally {
+      setup.renderer.destroy();
+      await app.shutdown();
+      if (prepared) await prepared.prepared.cleanup();
+    }
+  });
+
   it("opens help from browsing and returns to the same filter and selected file with either close key", async () => {
     const { skillsDir } = await fixture();
     const notes = ["Notes from the selected file.", ...Array.from({ length: 70 }, (_, index) => `Notes line ${index + 1}`)];
     await writeFile(path.join(skillsDir, "alpha", "notes.txt"), `${notes.join("\n")}\n`);
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("quit · ? help");
       const controls = setup.captureSpans().lines.find((line) =>
@@ -268,6 +617,7 @@ describe("SkillsManagerTui", () => {
       expect(frame).toContain("Navigation");
       expect(frame).toContain("?/Esc close");
       expect(frame).toContain("PgUp/PgDn");
+      expect(frame).toContain("x   Application updates");
       setup.mockInput.pressEscape();
       await setup.waitFor(() => !setup.captureCharFrame().includes("Keyboard help"));
       frame = setup.captureCharFrame();
@@ -295,7 +645,7 @@ describe("SkillsManagerTui", () => {
     const betaBefore = await readFile(beta, "utf8");
     const setup = await createTestRenderer({ width: 140, height: 24 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       const rows = setup.captureCharFrame().split("\n");
       const betaRow = rows.findIndex((row) => row.includes("[off] [unknown] beta"));
@@ -328,7 +678,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 60, height: 10 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("?");
       await setup.waitFor(() => setup.captureCharFrame().includes("Keyboard help"));
       expect(confirmationText(setup.captureCharFrame(), "Keyboard help")).toContain("Navigation");
@@ -388,7 +738,7 @@ describe("SkillsManagerTui", () => {
     const statusBefore = await git(skillsDir, "status", "--porcelain");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       expect(setup.captureCharFrame()).toContain("? help");
@@ -479,7 +829,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 20_000);
+  });
 
   it("retains the selected file's total line count across rendering modes, scrolling and file changes", async () => {
     const { skillsDir } = await fixture();
@@ -487,7 +837,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), `---\nname: alpha\n---\n${body}\n`);
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("48 lines"));
       await setup.mockInput.typeText("t");
       await setup.waitFor(() => setup.captureCharFrame().includes("Raw · toggle rendering"));
@@ -514,7 +864,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), `---\nname: alpha\nmetadata:\n${metadata}\n---\n\nBody.\n`);
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Skill details · ,/. scroll"));
       await setup.mockInput.typeText(".".repeat(50));
       await setup.waitFor(() => setup.captureCharFrame().includes("Key44: value-44"));
@@ -530,7 +880,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(skillsDir, "invalid", "SKILL.md"), "---js\nthrow new Error('not data')\n---\n");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("[off] [unknown] beta"));
       let rows = setup.captureCharFrame().split("\n");
       let row = rows.findIndex((line) => line.includes("[on] [unknown] broken"));
@@ -556,7 +906,7 @@ describe("SkillsManagerTui", () => {
     const disabled = path.join(skillsDir, ".disabled_skills", "alpha", "SKILL.md");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText(" ");
       await setup.waitFor(() => setup.captureCharFrame().includes("Disable skill"));
       expect(confirmationText(setup.captureCharFrame(), "Disable skill")).toContain(`From: "${path.join(skillsDir, "alpha")}"`);
@@ -581,7 +931,7 @@ describe("SkillsManagerTui", () => {
     const file = path.join(skillsDir, "alpha", "SKILL.md");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("d");
       await setup.waitFor(() => setup.captureCharFrame().includes("Remove skill"));
       expect(confirmationText(setup.captureCharFrame(), "Remove skill")).toContain(`Path: "${path.dirname(file)}"`);
@@ -603,7 +953,7 @@ describe("SkillsManagerTui", () => {
     const displaced = path.join(home, "original-skills");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, approved).start();
+      await createTrackedTui(setup.renderer, approved).start();
       await rename(skillsDir, displaced);
       await mkdir(path.join(skillsDir, "alpha"), { recursive: true });
       const replacement = path.join(skillsDir, "alpha", "SKILL.md");
@@ -625,7 +975,7 @@ describe("SkillsManagerTui", () => {
     const displaced = path.join(home, "approved-skills");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, approved).start();
+      await createTrackedTui(setup.renderer, approved).start();
       await setup.mockInput.typeText("d");
       await setup.waitFor(() => setup.captureCharFrame().includes("Remove skill"));
       await rename(skillsDir, displaced);
@@ -651,7 +1001,7 @@ describe("SkillsManagerTui", () => {
     await symlink(outside, path.join(skillsDir, "linked"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       let rows = setup.captureCharFrame().split("\n");
       let row = rows.findIndex((line) => line.includes("[on] [unknown] linked"));
@@ -676,7 +1026,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("u");
       await setup.waitFor(() => setup.captureCharFrame().includes("Replacement source for alpha:"));
       await setup.mockInput.typeText("owner/repository@alpha");
@@ -697,7 +1047,7 @@ describe("SkillsManagerTui", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText(key);
       await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
       const review = confirmationText(setup.captureCharFrame(), "Review saved sources");
@@ -718,7 +1068,7 @@ describe("SkillsManagerTui", () => {
     const { file, receipt } = await savedSourceFixture(skillsDir);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText(key);
       await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
       await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, ref: "changed-ref" } }));
@@ -737,7 +1087,7 @@ describe("SkillsManagerTui", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ sha: "a".repeat(40), tree: [] }), { status: 200 }));
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("v");
       await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
       await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, source: "other/project", sourceUrl: "https://github.com/other/project", ref: "other" } }));
@@ -768,7 +1118,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, source: url, sourceUrl: url, sourceType: "git" } }));
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText(key);
       await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
       expect(confirmationText(setup.captureCharFrame(), "Review saved sources")).toContain(`URL: "${url}"`);
@@ -788,7 +1138,7 @@ describe("SkillsManagerTui", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("v");
       await setup.waitFor(() => setup.captureCharFrame().includes("Update check"));
       expect(setup.captureCharFrame()).toContain("some checks were unavailable");
@@ -803,7 +1153,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("i");
@@ -822,7 +1172,7 @@ describe("SkillsManagerTui", () => {
     const { skillsDir } = await fixture();
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: true, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Initialize Git"));
@@ -845,7 +1195,7 @@ describe("SkillsManagerTui", () => {
     const { home, skillsDir } = await fixture(directoryName);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: true, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Initialize Git"));
@@ -880,7 +1230,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", "https://person:secret-token@example.invalid/private/repo.git");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: false, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Review push"));
@@ -906,7 +1256,7 @@ describe("SkillsManagerTui", () => {
     const before = await git(skillsDir, "rev-parse", "HEAD");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: false, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Backup review unavailable:"));
@@ -926,7 +1276,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", "https://example.invalid/private/repo.git");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         initialOnboarding: { reviewInitialize: false, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Backup review unavailable:"));
@@ -943,7 +1293,7 @@ describe("SkillsManagerTui", () => {
     const missing = path.join(home, "missing-skills");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, { path: missing, identity: null }, {
+      await createTrackedTui(setup.renderer, { path: missing, identity: null }, {
         initialOnboarding: { reviewInitialize: true, reviewBackup: true },
       }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Git setup and backup are unavailable"));
@@ -960,7 +1310,7 @@ describe("SkillsManagerTui", () => {
     await initGit(skillsDir);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("n");
@@ -995,7 +1345,7 @@ describe("SkillsManagerTui", () => {
     const before = await git(skillsDir, "rev-parse", "HEAD");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("f");
@@ -1029,7 +1379,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", "https://example.invalid/backup.git");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("f");
@@ -1061,7 +1411,7 @@ describe("SkillsManagerTui", () => {
     const staged = await git(home, "diff", "--cached", "--name-only");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("Containing repository:");
       await setup.mockInput.typeText("g");
@@ -1087,7 +1437,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "add", "--", "unrelated.txt");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("(unborn)");
       await setup.mockInput.typeText("g");
@@ -1113,7 +1463,7 @@ describe("SkillsManagerTui", () => {
       setup.mockInput.pressEnter();
       await setup.waitFor(() => setup.captureCharFrame().includes("Review commit"));
       await setup.mockInput.typeText("y");
-      await setup.waitFor(() => !setup.captureCharFrame().includes("Review commit"));
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Review commit"), 15_000);
       await setup.waitFor(async () => {
         try { await git(skillsDir, "rev-parse", "--verify", "HEAD"); return true; } catch { return false; }
       });
@@ -1125,7 +1475,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 20_000);
+  });
 
   it("identifies blocker paths separately in a directory-to-file commit preview", async () => {
     const { skillsDir } = await fixture();
@@ -1136,7 +1486,7 @@ describe("SkillsManagerTui", () => {
     const before = await git(skillsDir, "rev-parse", "HEAD");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("c");
@@ -1169,7 +1519,7 @@ describe("SkillsManagerTui", () => {
     await initGit(skillsDir);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"), 30_000);
       await setup.mockInput.typeText("c");
@@ -1198,7 +1548,7 @@ describe("SkillsManagerTui", () => {
     await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), "---\nname: alpha\n---\n\nChanged diff body.\n");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree · all · status") && setup.captureCharFrame().includes("alpha/SKILL.md"));
       const rows = setup.captureCharFrame().split("\n");
@@ -1232,7 +1582,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", "https://person:secret-token@example.invalid/private/repo.git");
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("p");
@@ -1264,7 +1614,7 @@ describe("SkillsManagerTui", () => {
     await git(skillsDir, "remote", "add", "backup", bare);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.mockInput.typeText("g");
       await setup.waitFor(() => setup.captureCharFrame().includes("Working tree"));
       await setup.mockInput.typeText("p");
@@ -1283,7 +1633,7 @@ describe("SkillsManagerTui", () => {
     } finally {
       setup.renderer.destroy();
     }
-  }, 30_000); // The aggregate waits and real Git setup need more than the default whole-test budget.
+  });
 
   it("revisits installation selection without changing the old installation", async () => {
     const { home, skillsDir } = await fixture();
@@ -1294,7 +1644,7 @@ describe("SkillsManagerTui", () => {
     const { promise: pending, resolve: finish } = Promise.withResolvers<ApprovedSkillsRoot | null>();
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         selectSkillsDir: async () => {
           const root = await pending;
           return root ? { root, reviewInitialize: false, reviewBackup: false } : null;
@@ -1311,6 +1661,7 @@ describe("SkillsManagerTui", () => {
       expect(await exists(path.join(skillsDir, ".skills-manager"))).toBe(false);
       expect(await exists(path.join(other, ".skills-manager"))).toBe(false);
     } finally {
+      finish(null);
       setup.renderer.destroy();
     }
   });
@@ -1320,7 +1671,7 @@ describe("SkillsManagerTui", () => {
     const root = await approveSkillsRoot(skillsDir);
     const setup = await createTestRenderer({ width: 200, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, root, {
+      await createTrackedTui(setup.renderer, root, {
         selectSkillsDir: async () => ({ root, reviewInitialize: true, reviewBackup: false }),
       }).start();
       await setup.mockInput.typeText("i");
@@ -1345,7 +1696,7 @@ describe("SkillsManagerTui", () => {
     const opener = vi.fn(async () => promise);
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), {
         fileOpener: opener,
         selectSkillsDir: async () => ({ root: next, reviewInitialize: false, reviewBackup: false }),
       }).start();
@@ -1369,7 +1720,7 @@ describe("SkillsManagerTui", () => {
     const missing = path.join(home, "future-skills");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, { path: missing, identity: null }, {
+      await createTrackedTui(setup.renderer, { path: missing, identity: null }, {
         selectSkillsDir: async () => ({ root: await approveSkillsRoot(missing), reviewInitialize: false, reviewBackup: false }),
       }).start();
       await setup.renderOnce();
@@ -1402,7 +1753,7 @@ describe("SkillsManagerTui", () => {
     } as unknown as ClipboardService;
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
-      await new SkillsManagerTui(setup.renderer, await approveSkillsRoot(skillsDir), { clipboard }).start();
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), { clipboard }).start();
       await setup.waitFor(() => setup.captureCharFrame().includes("Local content for selection."));
       const rows = setup.captureCharFrame().split("\n");
       const row = rows.findIndex((line) => line.includes("Local content for selection."));

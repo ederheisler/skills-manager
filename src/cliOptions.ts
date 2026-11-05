@@ -12,7 +12,9 @@ Options:
   -h, --help           Show this help and exit
 
 Without --skills-dir, choose a documented global location or enter a path.
-Local Git setup and remote backup are optional. Network actions are manual.
+Local Git setup and remote backup are optional.
+Application and skills CLI updates have separate manual checks.
+Background checks are separately opt-in and off by default.
 `;
 
 export function parseCliOptions(args: readonly string[]): CliOptions {

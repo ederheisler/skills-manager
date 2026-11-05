@@ -13,3 +13,4 @@ These records explain accepted decisions and their reasons. For current behavior
 - [Automated releases](2026-11-03-open-source-portability.md#automated-releases).
 - [Main branch protection](2026-11-03-open-source-portability.md#main-branch-protection).
 - [Application update planning](2026-11-03-open-source-portability.md#application-update-planning).
+- [Vercel skills CLI updates](2026-11-03-open-source-portability.md#vercel-skills-cli-updates).

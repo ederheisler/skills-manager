@@ -1,3 +1,4 @@
+/// <reference lib="es2024.promise" />
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -42,6 +43,8 @@ import { filterSkills } from "./state/filter.js";
 import { countSkillFileLines, listSkillFiles, readSkillFile, readSkillSource, readSkillText, scanSkills } from "./state/repo.js";
 import type { Skill, SkillFile } from "./state/types.js";
 import { checkForUpdates } from "./actions/checkUpdates.js";
+import { SoftwareUpdateService, type SoftwareUpdateCheck, type UpdateComponent } from "./actions/softwareUpdates.js";
+import { prepareUpdateHandoff, type PreparedUpdateHandoff, type UpdateTarget } from "./actions/appUpdateHandoff.js";
 import type { SkillsOnboardingResult, SkillsRootSelection } from "./onboarding.js";
 import { escapeTerminalMultiline, escapeTerminalSingleLine, quoteTerminalPath } from "./terminalText.js";
 
@@ -91,6 +94,25 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+function manualRecoveryCommand(skillsDir: string): string {
+  const command = "npx --yes --prefer-online github:ederheisler/skills-manager";
+  if (escapeTerminalSingleLine(skillsDir) === skillsDir) return `${command} --skills-dir ${shellQuote(skillsDir)}`;
+  const octal = [...Buffer.from(skillsDir)].map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`).join("");
+  return `skills_dir=$(printf '%b' '${octal}_'); ${command} --skills-dir "\${skills_dir%_}"`;
+}
+
+function registryOrigin(registry: string): string {
+  try { return new URL(registry).origin; } catch { return "unknown"; }
+}
+
+function checkSummary(check: SoftwareUpdateCheck | undefined): string {
+  if (!check) return "not checked";
+  const state = check.status === "match" ? "matches at check time"
+    : check.status === "different" ? "different"
+      : check.status === "unknown" ? "identity unknown" : "unavailable";
+  return `${state} · ${new Date(check.checkedAt).toISOString()}${check.message ? ` · ${check.message}` : ""}`;
+}
+
 interface FrontmatterItem {
   key: string;
   value: string;
@@ -115,7 +137,7 @@ function formatFrontmatter(skill: Skill | null | undefined): FrontmatterItem[] {
   ];
 }
 
-type Mode = "browse" | "search" | "add" | "replace-source" | "search-results" | "git" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch" | "confirm" | "help";
+type Mode = "browse" | "search" | "add" | "replace-source" | "search-results" | "git" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch" | "confirm" | "help" | "software-updates";
 type DetailRendering = "markdown" | "raw";
 
 interface GitFile {
@@ -126,11 +148,17 @@ interface GitFile {
 interface Confirmation {
   title: string;
   lines: string[];
-  returnMode: "browse" | "git" | "search-results";
+  returnMode: "browse" | "git" | "search-results" | "software-updates";
   approve: () => Promise<void>;
   cancel?: () => Promise<void>;
   after?: () => Promise<void>;
   informational?: boolean;
+  copyText?: string;
+}
+
+export interface ApplicationUpdateHandoff {
+  prepared: PreparedUpdateHandoff;
+  recoveryCommand: string;
 }
 
 
@@ -194,6 +222,18 @@ export class SkillsManagerTui {
   #parserWorkspace: string | null = null;
   #skillsDir: string;
   #selection: SkillsRootSelection;
+  #softwareUpdates: SoftwareUpdateService;
+  #softwareUpdateSelection: UpdateComponent = "app";
+  #softwareChecks = new Set<UpdateComponent>();
+  #softwareBadge: TextRenderable | null = null;
+  #softwareContent: ScrollBoxRenderable | null = null;
+  #copyNotice: TextRenderable | null = null;
+  #preparingHandoff = false;
+  #handoffPending = false;
+  #pendingActions = new Set<Promise<void>>();
+  #startPromise: Promise<void> | null = null;
+  #shutdownPromise: Promise<void> | null = null;
+  #exit = Promise.withResolvers<ApplicationUpdateHandoff | null>();
 
   constructor(
     private readonly renderer: CliRenderer,
@@ -202,6 +242,7 @@ export class SkillsManagerTui {
   ) {
     this.#selection = { ...selection };
     this.#skillsDir = selection.path;
+    this.#softwareUpdates = new SoftwareUpdateService(this.#skillsDir, { onChange: () => this.#softwareUpdatesChanged() });
     this.#root = new BoxRenderable(renderer, {
       width: "100%",
       height: "100%",
@@ -220,37 +261,25 @@ export class SkillsManagerTui {
     renderer.keyInput.on("keypress", this.#onKeyPress);
     renderer.on("selection", this.#onSelection);
     renderer.once("destroy", () => {
-      this.#destroyed = true;
-      this.#revision++;
-      renderer.keyInput.off("keypress", this.#onKeyPress);
-      renderer.off("selection", this.#onSelection);
-      const cancel = this.#confirmation?.cancel;
-      if (cancel) void cancel().catch((error) => {
-        process.stderr.write(`Prepared change cleanup failed: ${escapeTerminalSingleLine(redactGitUrl(errorMessage(error)))}\n`);
+      this.#exit.resolve(null);
+      void this.shutdown().catch((error) => {
+        process.stderr.write(`Application cleanup failed: ${escapeTerminalSingleLine(redactGitUrl(errorMessage(error)))}\n`);
       });
-      void this.#clipboard?.dispose().catch(() => {});
-      const client = this.#treeSitterClient;
-      const workspace = this.#parserWorkspace;
-      this.#treeSitterClient = null;
-      this.#parserWorkspace = null;
-      if (workspace) void (async () => {
-        try {
-          if (client) await client.destroy();
-          await rm(workspace, { recursive: true, force: true });
-        } catch (error) {
-          process.stderr.write(`Temporary Markdown workspace cleanup failed: ${escapeTerminalSingleLine(errorMessage(error))}\n`);
-        }
-      })();
-      clearTimeout(this.#transientMessageTimer);
-      clearTimeout(this.#searchDebounceTimer);
     });
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (!this.#startPromise) this.#startPromise = this.#start();
+    return this.#startPromise;
+  }
+
+  async #start(): Promise<void> {
     if (this.#busy || this.#destroyed) return;
     this.#busy = true;
     let markdownError: unknown;
     try {
+      await this.#softwareUpdates.start();
+      if (this.#destroyed) return;
       try {
         if (!this.#treeSitterClient) await this.#initializeMarkdown();
       } catch (error) {
@@ -268,6 +297,54 @@ export class SkillsManagerTui {
     if (!this.#destroyed && this.options.initialOnboarding) {
       await this.#presentOnboardingIntents(this.options.initialOnboarding);
     }
+  }
+
+  waitForExit(): Promise<ApplicationUpdateHandoff | null> {
+    return this.#exit.promise;
+  }
+
+  shutdown(): Promise<void> {
+    if (!this.#shutdownPromise) this.#shutdownPromise = this.#shutdown();
+    return this.#shutdownPromise;
+  }
+
+  async #shutdown(): Promise<void> {
+    this.#destroyed = true;
+    this.#revision++;
+    this.#updateRevision++;
+    this.renderer.keyInput.off("keypress", this.#onKeyPress);
+    this.renderer.off("selection", this.#onSelection);
+    clearTimeout(this.#transientMessageTimer);
+    clearTimeout(this.#searchDebounceTimer);
+    const cancel = this.#confirmation?.cancel;
+    this.#confirmation = null;
+    const failures: unknown[] = [];
+    const settle = async (action: () => Promise<void>): Promise<void> => {
+      try { await action(); } catch (error) { failures.push(error); }
+    };
+    await Promise.all([
+      settle(() => this.#softwareUpdates.dispose()),
+      ...(cancel ? [settle(cancel)] : []),
+    ]);
+    await this.#startPromise?.catch(() => {});
+    while (this.#pendingActions.size) await Promise.all([...this.#pendingActions]);
+    const client = this.#treeSitterClient;
+    const workspace = this.#parserWorkspace;
+    this.#treeSitterClient = null;
+    this.#parserWorkspace = null;
+    await Promise.all([
+      settle(async () => { await this.#clipboard?.dispose(); }),
+      settle(async () => {
+        if (client) await client.destroy();
+        if (workspace) await rm(workspace, { recursive: true, force: true });
+      }),
+    ]);
+    if (failures.length) throw new Error(failures.map(errorMessage).join("; "));
+  }
+
+  #track(action: Promise<void>): void {
+    const pending = action.catch((error) => this.#showError(error)).finally(() => this.#pendingActions.delete(pending));
+    this.#pendingActions.add(pending);
   }
 
   async #initializeMarkdown(): Promise<void> {
@@ -315,7 +392,7 @@ export class SkillsManagerTui {
   }
 
   #onKeyPress = (key: KeyEvent): void => {
-    void this.#handleKey(key).catch((error) => this.#showError(error));
+    this.#track(this.#handleKey(key));
   };
 
   #onSelection = (selection: Selection): void => {
@@ -323,7 +400,7 @@ export class SkillsManagerTui {
     const text = selection.getSelectedText();
     if (text === "") return;
     const revision = this.#revision;
-    void (async () => {
+    this.#track((async () => {
       let reason = "host unavailable";
       let tryTerminal = true;
       if (this.#clipboard) {
@@ -354,7 +431,7 @@ export class SkillsManagerTui {
         }
       }
       this.#showInlineNotice(`Clipboard unavailable (${reason}). Selection remains available.`);
-    })();
+    })());
   };
 
   #showInlineNotice(message: string): void {
@@ -366,7 +443,11 @@ export class SkillsManagerTui {
   }
 
   async #handleKey(key: KeyEvent): Promise<void> {
-    if (this.#busy) return;
+    if (key.name === "q" && (this.#preparingHandoff || this.#handoffPending || (this.#mode === "software-updates" && this.#busy))) {
+      this.renderer.destroy();
+      return;
+    }
+    if (this.#busy || this.#destroyed || this.#handoffPending) return;
     if (this.#mode === "help") {
       key.stopPropagation();
       if (key.name === "escape" || key.name === "?" || key.sequence === "?") {
@@ -375,6 +456,7 @@ export class SkillsManagerTui {
         this.#helpOverlay = null;
         this.#helpContent = null;
         if (this.#screen) this.#screen.opacity = 1;
+        this.#syncSoftwareBadge();
       } else if (key.name === "pageup" || key.name === "pagedown") {
         this.#helpContent?.scrollBy(key.name === "pageup" ? -1 : 1, "viewport");
       } else if (key.name === "up" || key.name === "down") {
@@ -383,7 +465,9 @@ export class SkillsManagerTui {
       return;
     }
     if (this.#mode === "confirm") {
-      if (key.name === "pageup" || key.name === "pagedown") {
+      if (key.name === "c" && this.#confirmation?.copyText) {
+        await this.#copyManualCommand(this.#confirmation.copyText);
+      } else if (key.name === "pageup" || key.name === "pagedown") {
         this.#confirmationContent?.scrollBy(key.name === "pageup" ? -1 : 1, "viewport");
       } else if (key.name === "up" || key.name === "down") {
         this.#confirmationContent?.scrollBy(key.name === "up" ? -1 : 1);
@@ -404,6 +488,25 @@ export class SkillsManagerTui {
       } else if (key.name === "n" || key.name === "escape" || key.name === "return") {
         await this.#finishConfirmation(false);
       }
+      return;
+    }
+    if (this.#mode === "software-updates") {
+      if (key.name === "escape") {
+        this.#mode = "browse";
+        this.#render();
+      } else if (key.name === "up" || key.name === "k" || key.name === "1") {
+        this.#softwareUpdateSelection = "app";
+        this.#render();
+      } else if (key.name === "down" || key.name === "j" || key.name === "2") {
+        this.#softwareUpdateSelection = "cli";
+        this.#render();
+      } else if (key.name === "pageup" || key.name === "pagedown") {
+        this.#softwareContent?.scrollBy(key.name === "pageup" ? -1 : 1, "viewport");
+      } else if (key.name === "c") this.#reviewSoftwareCheck(this.#softwareUpdateSelection);
+      else if (key.name === "a") await this.#toggleSoftwareAutomatic(this.#softwareUpdateSelection);
+      else if (key.name === "r") await this.#reviewSoftwareHandoff("all");
+      else if (key.name === "f") await this.#reviewSoftwareHandoff("cli");
+      else if (key.name === "m") this.#showManualRecovery();
       return;
     }
     if (key.name === "q" && this.#mode === "browse") {
@@ -498,6 +601,10 @@ export class SkillsManagerTui {
     else if (key.name === "p") await this.#updateAll();
     else if (key.name === "u" && this.#selected && !this.#selected.orphaned) await this.#updateSelected();
     else if (key.name === "v") await this.#reviewUpdateCheck();
+    else if (key.name === "x") {
+      this.#mode = "software-updates";
+      this.#render();
+    }
     else if (key.name === "r") await this.#reload();
     else if (key.name === "i" && this.options.selectSkillsDir) await this.#chooseSkillsDir();
     else if (key.name === "g") {
@@ -570,7 +677,7 @@ export class SkillsManagerTui {
   #scheduleSearchFilter(): void {
     clearTimeout(this.#searchDebounceTimer);
     this.#searchDebounceTimer = setTimeout(() => {
-      void this.#applySearchFilter().catch((error) => this.#showError(error));
+      this.#track(this.#applySearchFilter());
     }, 150);
   }
 
@@ -612,9 +719,9 @@ export class SkillsManagerTui {
 
   #confirm(confirmation: Confirmation): void {
     if (this.#destroyed) {
-      if (confirmation.cancel) void confirmation.cancel().catch((error) => {
+      if (confirmation.cancel) this.#track(confirmation.cancel().catch((error) => {
         process.stderr.write(`Prepared change cleanup failed: ${escapeTerminalSingleLine(redactGitUrl(errorMessage(error)))}\n`);
-      });
+      }));
       return;
     }
     this.#confirmation = confirmation;
@@ -632,6 +739,203 @@ export class SkillsManagerTui {
     if (!this.#destroyed && confirmation.after) await confirmation.after();
   }
 
+  #softwareUpdatesChanged(): void {
+    if (this.#destroyed || this.#busy) return;
+    if (this.#mode === "software-updates") this.#render();
+    else if (this.#mode !== "help" && this.#mode !== "confirm") this.#syncSoftwareBadge();
+  }
+
+  #softwareBadgeText(): string {
+    const different: string[] = [];
+    if (this.#softwareUpdates.results.app?.status === "different") different.push("skills-manager");
+    if (this.#softwareUpdates.results.cli?.status === "different") different.push("Vercel skills CLI");
+    const notices = different.length ? [`Different ${different.join(" and ")} · x review`] : [];
+    if (this.#softwareUpdates.errors.length) notices.push("Update settings need attention · x review");
+    return notices.join(" · ");
+  }
+
+  #syncSoftwareBadge(): void {
+    if (this.#softwareBadge) this.#softwareBadge.content = this.#softwareBadgeText();
+  }
+
+  #reviewSoftwareCheck(component: UpdateComponent): void {
+    const label = component === "app" ? "skills-manager" : "Vercel skills CLI";
+    const registry = component === "cli" ? this.#softwareUpdates.registry : undefined;
+    const host = component === "app" ? "https://api.github.com" : registryOrigin(registry ?? "");
+    if (host === "unknown") {
+      this.#softwareNotice("The npm registry could not be established. No CLI check or refresh will run until it is known.");
+      return;
+    }
+    this.#confirm({
+      title: `Check ${label} now`,
+      lines: [
+        `Contact ${host} once for ${component === "app" ? "the current main commit" : "the latest skills CLI tag"}.`,
+        "The host can see your IP address. This one-shot check does not enable automatic checks.",
+      ],
+      returnMode: "software-updates",
+      approve: async () => this.#startSoftwareCheck(component, registry),
+    });
+  }
+
+  #startSoftwareCheck(component: UpdateComponent, expectedRegistry?: string): void {
+    if (this.#softwareChecks.has(component)) return;
+    this.#softwareChecks.add(component);
+    this.#track(this.#softwareUpdates.check(component, expectedRegistry).catch((error) => {
+      this.#message = `Update check failed: ${redactGitUrl(errorMessage(error))}`;
+    }).finally(() => {
+      this.#softwareChecks.delete(component);
+      this.#softwareUpdatesChanged();
+    }));
+  }
+
+  async #toggleSoftwareAutomatic(component: UpdateComponent): Promise<void> {
+    if (this.#softwareUpdates.preferences[component]) {
+      await this.#runExclusive(() => this.#softwareUpdates.setAutomatic(component, false));
+      return;
+    }
+    const label = component === "app" ? "skills-manager" : "Vercel skills CLI";
+    const registry = component === "cli" ? this.#softwareUpdates.registry : undefined;
+    const host = component === "app" ? "https://api.github.com" : registryOrigin(registry ?? "");
+    if (host === "unknown") {
+      this.#softwareNotice("The npm registry could not be established. Automatic CLI checks remain off.");
+      return;
+    }
+    this.#confirm({
+      title: `Enable automatic ${label} checks`,
+      lines: [
+        `Allow ${label} checks at ${host}. The host can see your IP address.`,
+        "The app may check at startup and at most once per 24 hours while running.",
+        "Consent is saved for future sessions. Select this component and press a again to disable it.",
+        "Each component has its own consent; this choice does not enable the other check.",
+      ],
+      returnMode: "software-updates",
+      approve: async () => this.#softwareUpdates.setAutomatic(component, true, registry),
+    });
+  }
+
+  #softwareNotice(message: string): void {
+    this.#confirm({
+      title: "Application updates",
+      lines: [message],
+      returnMode: "software-updates",
+      informational: true,
+      approve: async () => {},
+    });
+  }
+
+  async #reviewSoftwareHandoff(target: UpdateTarget): Promise<void> {
+    if (this.#pendingActions.size > this.#softwareChecks.size) {
+      this.#softwareNotice("Another action is still finishing. Wait for it to complete before starting an update.");
+      return;
+    }
+    await this.#runExclusive(async () => {
+      this.#status = "Resolving npm registry for the update review...";
+      this.#render();
+      try {
+        await this.#softwareUpdates.refreshRegistry();
+      } finally {
+        this.#status = "";
+      }
+    });
+    if (this.#destroyed) return;
+    const registry = this.#softwareUpdates.registry;
+    const origin = registryOrigin(registry);
+    if (origin === "unknown") {
+      this.#softwareNotice("The npm registry could not be established. Use the manual app recovery command instead.");
+      return;
+    }
+    const build = { ...this.#softwareUpdates.build };
+    const reproducible = !build.dirty && build.source !== "unknown" && /^[0-9a-f]{40}$/i.test(build.commit ?? "");
+    const switchToMain = target === "all" || !reproducible;
+    const selection = { ...this.#selection };
+    const skillsDir = this.#skillsDir;
+    const recoveryCommand = manualRecoveryCommand(skillsDir);
+    this.#confirm({
+      title: target === "all" ? "Update and restart both" : switchToMain ? "Refresh CLI: switch to main" : "Refresh Vercel skills CLI",
+      lines: [
+        `Current skills directory: ${quoteTerminalPath(skillsDir)}. The new session repeats onboarding and approval.`,
+        target === "all"
+          ? "Start a new session from GitHub main and refresh the Vercel skills CLI. Main may advance beyond the last checked SHA."
+          : switchToMain
+            ? "The running app has no reproducible clean SHA. Approving explicitly switches the new session to GitHub main."
+            : `Rebuild the same app commit ${build.commit} and refresh the Vercel skills CLI.`,
+        ...(target === "cli" && !switchToMain ? ["The running commit may not exist on GitHub; if it cannot be fetched, use manual recovery."] : []),
+        "This creates a separate temporary session; it does not convert or overwrite the current installation or a checkout.",
+        `It contacts GitHub and the npm registry at ${origin}. Your IP address is visible to those hosts.`,
+        "Node, npm, Git and a C compiler are required. Repository and dependency scripts run with normal user permissions.",
+        "The private project and cache are kept until the new session exits successfully.",
+        "The workspace path is printed before downloads; failed, interrupted, or hard-killed sessions may require manual cleanup.",
+        "After terminal shutdown, failures print a manual recovery command; the old interface cannot be restored automatically.",
+      ],
+      returnMode: "software-updates",
+      approve: async () => {
+        this.#preparingHandoff = true;
+        try {
+          this.#status = "Preparing update session; q quits without starting it.";
+          this.#render();
+          if (selection.identity !== null) await assertApprovedSkillsRoot(selection);
+          const prepared = await prepareUpdateHandoff({
+            target, skillsDir, build, registry, allowSwitchToMain: switchToMain,
+            excludedRoots: this.#softwareUpdates.knownSkillsRoots,
+          });
+          let transferred = false;
+          try {
+            if (selection.identity !== null) await assertApprovedSkillsRoot(selection);
+            if (this.#destroyed) return;
+            this.#handoffPending = true;
+            this.#exit.resolve({ prepared, recoveryCommand });
+            transferred = true;
+          } finally {
+            if (!transferred) {
+              try {
+                await prepared.cleanup();
+              } catch (error) {
+                const notice = `Could not clean update workspace ${quoteTerminalPath(prepared.workspace)}: ${redactGitUrl(errorMessage(error))}`;
+                if (this.#destroyed) process.stderr.write(`${escapeTerminalSingleLine(notice)}\n`);
+                throw new Error(notice);
+              }
+            }
+          }
+        } finally {
+          this.#status = "";
+          this.#preparingHandoff = false;
+        }
+      },
+    });
+  }
+
+  #showManualRecovery(): void {
+    const command = manualRecoveryCommand(this.#skillsDir);
+    this.#confirm({
+      title: "Manual app recovery",
+      lines: [
+        "Run this command in a terminal to request the app from GitHub main:",
+        command,
+        "This app recovery command does not guarantee a fresh Vercel skills CLI. Use the CLI refresh action for that.",
+        "Press c to copy the exact command. The selected directory will be reviewed again during onboarding.",
+      ],
+      returnMode: "software-updates",
+      informational: true,
+      copyText: command,
+      approve: async () => {},
+    });
+  }
+
+  async #copyManualCommand(command: string): Promise<void> {
+    let notice = "Clipboard unavailable; select and copy the displayed command.";
+    try {
+      const result = await this.#clipboard?.writeText(command, { destination: "best-available" });
+      if (result?.host.status === "written") notice = "Command copied to the host clipboard.";
+      else if (result?.terminal.status === "attempted") notice = "Command sent to terminal clipboard; acceptance is not confirmed.";
+      else if ((!result || result.terminal.status === "not-attempted") && this.renderer.copyToClipboardOSC52(command)) {
+        notice = "Command sent to terminal clipboard; acceptance is not confirmed.";
+      }
+    } catch {
+      // The command remains visible and selectable when clipboard access fails.
+    }
+    if (!this.#destroyed && this.#confirmation?.copyText === command && this.#copyNotice) this.#copyNotice.content = notice;
+  }
+
   async #chooseSkillsDir(): Promise<void> {
     if (!this.options.selectSkillsDir) return;
     const outcome: { result: SkillsOnboardingResult | null } = { result: null };
@@ -645,6 +949,12 @@ export class SkillsManagerTui {
         this.renderer.resume();
       }
       if (!selected || this.#destroyed || (selected.path === this.#skillsDir && selected.identity === this.#selection.identity)) return;
+      try {
+        await this.#softwareUpdates.setSkillsDirectory(selected.path);
+      } catch (error) {
+        outcome.result = null;
+        throw error;
+      }
       this.#revision++;
       this.#fileRevision++;
       this.#updateRevision++;
@@ -1522,6 +1832,9 @@ export class SkillsManagerTui {
     this.#detailContent = null;
     this.#metadataContent = null;
     this.#confirmationContent = null;
+    this.#softwareContent = null;
+    this.#copyNotice = null;
+    this.#softwareBadge = null;
     this.#confirmCancelButton = null;
     this.#confirmApproveButton = null;
     this.#entryInput = null;
@@ -1538,7 +1851,7 @@ export class SkillsManagerTui {
       width: "100%",
       height: "100%",
       flexDirection: "column",
-      opacity: this.#mode === "confirm" || this.#mode === "search-results" || this.#mode === "help" ? 0.1 : 1,
+      opacity: this.#mode === "confirm" || this.#mode === "search-results" || this.#mode === "help" || this.#mode === "software-updates" ? 0.1 : 1,
     });
     this.#root.add(screen);
     this.#screen = screen;
@@ -1596,6 +1909,7 @@ export class SkillsManagerTui {
     if (this.#contextMenu) this.#root.add(this.#createContextMenu());
     if (this.#mode === "confirm") this.#root.add(this.#createConfirmationDialog());
     if (this.#mode === "search-results") this.#root.add(this.#createSearchResultsDialog());
+    if (this.#mode === "software-updates") this.#root.add(this.#createSoftwareUpdatesDialog());
     if (this.#mode === "help") {
       this.#helpOverlay = this.#createHelpDialog(helpScrollTop);
       this.#root.add(this.#helpOverlay);
@@ -1607,7 +1921,7 @@ export class SkillsManagerTui {
     const notice = this.#status || this.#transientMessage || this.#message;
     const footer = new BoxRenderable(this.renderer, {
       width: "100%",
-      height: 3,
+      height: 4,
       flexDirection: "column",
       backgroundColor: colors.background,
     });
@@ -1659,7 +1973,7 @@ export class SkillsManagerTui {
       controls.add(entry);
     } else {
       controls.add(new TextRenderable(this.renderer, {
-        content: t`${fg(colors.accent)(bold("o"))}pen · ${fg(colors.accent)(bold("space"))} enable/disable · ${fg(colors.accent)(bold("r"))}efresh · ${fg(colors.accent)(bold("u"))}pdate · u${fg(colors.accent)(bold("p"))}date all · ${fg(colors.accent)(bold("v"))} check · ${fg(colors.accent)(bold("a"))}dd · ${fg(colors.accent)(bold("d"))}elete · ${fg(colors.accent)(bold("g"))}it${this.options.selectSkillsDir ? " · i installation" : ""} · ${fg(colors.accent)(bold("q"))}uit`,
+        content: t`${fg(colors.accent)(bold("x"))} app updates · ${fg(colors.accent)(bold("o"))}pen · ${fg(colors.accent)(bold("space"))} enable/disable · ${fg(colors.accent)(bold("r"))}efresh · ${fg(colors.accent)(bold("u"))}pdate · u${fg(colors.accent)(bold("p"))}date all · ${fg(colors.accent)(bold("v"))} check · ${fg(colors.accent)(bold("a"))}dd · ${fg(colors.accent)(bold("d"))}elete · ${fg(colors.accent)(bold("g"))}it${this.options.selectSkillsDir ? " · i installation" : ""} · ${fg(colors.accent)(bold("q"))}uit`,
         fg: colors.muted,
         height: 1,
         minWidth: 0,
@@ -1673,6 +1987,10 @@ export class SkillsManagerTui {
       }));
     }
     footer.add(controls);
+    this.#softwareBadge = new TextRenderable(this.renderer, {
+      content: this.#softwareBadgeText(), fg: colors.warning, height: 1, wrapMode: "none", selectable: false,
+    });
+    footer.add(this.#softwareBadge);
     this.#noticeText = new TextRenderable(this.renderer, {
       content: escapeTerminalSingleLine(notice), fg: colors.warning, height: 1, wrapMode: "none", selectable: false,
     });
@@ -1726,8 +2044,8 @@ export class SkillsManagerTui {
         fg: skill.orphaned ? colors.warning : skill.enabled ? colors.enabled : colors.disabled,
         attributes: selected ? TextAttributes.BOLD : 0,
         onMouseDown: (event) => {
-          if (event.button === RIGHT_MOUSE_BUTTON) void this.#openContextMenu(index, event.x, event.y).catch((error) => this.#showError(error));
-          else void this.#selectIndex(index).catch((error) => this.#showError(error));
+          if (event.button === RIGHT_MOUSE_BUTTON) this.#track(this.#openContextMenu(index, event.x, event.y));
+          else this.#track(this.#selectIndex(index));
         },
         width: "100%",
         selectable: false,
@@ -1781,8 +2099,8 @@ export class SkillsManagerTui {
         wrapMode: "char",
         onMouseDown: file.kind === "file"
           ? (event) => {
-              if (event.button === RIGHT_MOUSE_BUTTON) void this.#openFileContextMenu(index, event.x, event.y).catch((error) => this.#showError(error));
-              else void this.#selectFile(index).catch((error) => this.#showError(error));
+              if (event.button === RIGHT_MOUSE_BUTTON) this.#track(this.#openFileContextMenu(index, event.x, event.y));
+              else this.#track(this.#selectFile(index));
             }
           : undefined,
       }));
@@ -1832,7 +2150,7 @@ export class SkillsManagerTui {
         attributes: selected ? TextAttributes.BOLD : 0,
         height: 1,
         selectable: false,
-        onMouseDown: () => { void this.#runContextMenuAction(action).catch((error) => this.#showError(error)); },
+        onMouseDown: () => { this.#track(this.#runContextMenuAction(action)); },
       }));
     }
     return panel;
@@ -1889,7 +2207,7 @@ export class SkillsManagerTui {
         width: "100%",
         selectable: false,
         wrapMode: "none",
-        onMouseDown: () => { void this.#selectGitFile(index).catch((error) => this.#showError(error)); },
+        onMouseDown: () => { this.#track(this.#selectGitFile(index)); },
       }));
       list.add(row);
     });
@@ -2076,6 +2394,62 @@ export class SkillsManagerTui {
     return column;
   }
 
+  #createSoftwareUpdatesDialog(): BoxRenderable {
+    const overlay = new BoxRenderable(this.renderer, {
+      position: "absolute", width: "100%", height: "100%", flexDirection: "column",
+      justifyContent: "center", alignItems: "center", paddingX: 1, paddingY: 1,
+      onMouse: (event) => event.stopPropagation(),
+    });
+    const dialog = new BoxRenderable(this.renderer, {
+      width: "100%", height: "100%", minWidth: 1, minHeight: 1, maxWidth: 110, maxHeight: 24,
+      flexDirection: "column", border: true, borderColor: colors.accent,
+      title: "Application updates", titleColor: colors.accent, backgroundColor: colors.panel,
+    });
+    const content = new ScrollBoxRenderable(this.renderer, {
+      width: "100%", flexGrow: 1, flexBasis: 0, minHeight: 0,
+      contentOptions: { backgroundColor: colors.panel, paddingX: 1 },
+      viewportOptions: { backgroundColor: colors.panel },
+      scrollbarOptions: { trackOptions: { foregroundColor: colors.accent, backgroundColor: colors.panel } },
+    });
+    this.#softwareContent = content;
+    const updates = this.#softwareUpdates;
+    const app = updates.results.app;
+    const cli = updates.results.cli;
+    const build = updates.build;
+    const lines = [
+      ...(this.#preparingHandoff ? ["Preparing update session; q quits without starting it.", ""] : []),
+      `${this.#softwareUpdateSelection === "app" ? ">" : " "} skills-manager (app) · automatic: ${updates.preferences.app ? "on" : "off"}`,
+      `  Running: ${build.version} · SHA: ${build.commit ?? "unknown"} (${build.source}${build.dirty ? ", dirty" : ""})`,
+      `  GitHub main SHA: ${app?.available ?? "unknown"}`,
+      `  Check: ${this.#softwareChecks.has("app") ? "checking..." : checkSummary(app)}`,
+      "",
+      `${this.#softwareUpdateSelection === "cli" ? ">" : " "} Vercel skills CLI · automatic: ${updates.preferences.cli ? "on" : "off"}`,
+      `  Running version: ${updates.cliVersion ?? "unknown"} · registry latest: ${cli?.available ?? "unknown"}`,
+      `  Check: ${this.#softwareChecks.has("cli") ? "checking..." : checkSummary(cli)}`,
+      "",
+      `App check: https://api.github.com · CLI check and install: ${registryOrigin(updates.registry)}`,
+      "Automatic checks are separate and off by default. Different does not necessarily mean newer.",
+      "Registry latest is informational, not a compatibility guarantee.",
+      ...updates.errors.map((error) => `Update settings: ${error}`),
+      ...(this.#message ? [`Notice: ${this.#message}`] : []),
+    ];
+    content.add(new TextRenderable(this.renderer, {
+      content: lines.map(escapeTerminalSingleLine).join("\n"),
+      width: "100%", height: "auto", fg: colors.text, wrapMode: "word",
+    }));
+    dialog.add(content);
+    dialog.add(new TextRenderable(this.renderer, {
+      content: " Up/down or 1/2 select · c check · a automatic on/off · PgUp/PgDn scroll",
+      fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
+    }));
+    dialog.add(new TextRenderable(this.renderer, {
+      content: " r update and restart both · f refresh CLI only · m manual recovery · Esc close",
+      fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
+    }));
+    overlay.add(dialog);
+    return overlay;
+  }
+
   #createHelpDialog(scrollTop = 0): BoxRenderable {
     const overlay = new BoxRenderable(this.renderer, {
       position: "absolute",
@@ -2135,6 +2509,7 @@ export class SkillsManagerTui {
         "u   Update selected        p   Update all",
         "v   Review update check    a   Search and add skills",
         "r   Refresh                i   Select installation, if available",
+        "x   Application updates",
         "g   Open Git               q   Quit",
         "",
         "Git",
@@ -2213,6 +2588,12 @@ export class SkillsManagerTui {
       wrapMode: "word",
     }));
     dialog.add(content);
+    if (confirmation.copyText) {
+      this.#copyNotice = new TextRenderable(this.renderer, {
+        content: "c copy command", fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
+      });
+      dialog.add(this.#copyNotice);
+    }
     const buttons = new BoxRenderable(this.renderer, {
       width: "100%",
       height: 1,
@@ -2225,7 +2606,7 @@ export class SkillsManagerTui {
       bg: this.#confirmationSelection === "cancel" ? colors.selection : colors.panel,
       height: 1,
       selectable: false,
-      onMouseDown: () => { void this.#finishConfirmation(false).catch((error) => this.#showError(error)); },
+      onMouseDown: () => { this.#track(this.#finishConfirmation(false)); },
     });
     buttons.add(this.#confirmCancelButton);
     if (!confirmation.informational) {
@@ -2235,7 +2616,7 @@ export class SkillsManagerTui {
       bg: this.#confirmationSelection === "approve" ? colors.selection : colors.panel,
       height: 1,
       selectable: false,
-      onMouseDown: () => { void this.#finishConfirmation(true).catch((error) => this.#showError(error)); },
+      onMouseDown: () => { this.#track(this.#finishConfirmation(true)); },
       });
       buttons.add(this.#confirmApproveButton);
     }
@@ -2284,7 +2665,7 @@ export class SkillsManagerTui {
           height: 3,
           flexDirection: "column",
           backgroundColor: selected ? colors.selection : colors.panel,
-          onMouseDown: () => { void this.#installSelectedSearchResult(index).catch((error) => this.#showError(error)); },
+          onMouseDown: () => { this.#track(this.#installSelectedSearchResult(index)); },
         });
         row.add(new TextRenderable(this.renderer, {
           content: escapeTerminalSingleLine(result.identifier),

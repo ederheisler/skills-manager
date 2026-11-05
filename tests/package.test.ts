@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -29,6 +29,10 @@ describe("Node release artifact", () => {
       for (const name of ["src", "scripts", "package.json", "tsconfig.json", "LICENSE", "THIRD_PARTY_NOTICES", "README.md"]) {
         await cp(path.join(project, name), path.join(source, name), { recursive: true });
       }
+      const template = path.join(source, "scripts", "build-identity.template");
+      expect((await lstat(template)).isFile()).toBe(true);
+      // This copied fixture is unsourced, even when the test itself runs from an archive.
+      await writeFile(template, "$Format:%H$\n$Format:%T$\n");
       await mkdir(path.join(source, "native"));
       for (const name of await readdir(path.join(project, "native"))) {
         if (name.endsWith(".c") || name.endsWith(".h")) {
@@ -41,6 +45,16 @@ describe("Node release artifact", () => {
       await writeFile(path.join(source, ".claude", "settings.json"), "private settings\n");
       await writeFile(path.join(source, "private-backup.txt"), "private backup\n");
       await writeFile(path.join(source, "dist", "actions", "personal.js"), "private generated file\n");
+
+      for (const name of ["README.private", "readme.private", "LICENSE.private", "LICENCE.private", "COPYING.private", "COPYING"]) {
+        const privateFile = path.join(source, name);
+        await writeFile(privateFile, "private root document\n");
+        await expect(run("npm", ["pack", "--foreground-scripts"], { cwd: source, env, maxBuffer: 10 * 1024 * 1024 }))
+          .rejects.toThrow(/unexpected implicitly included package file/i);
+        expect((await readdir(source)).filter((entry) => entry.endsWith(".tgz"))).toEqual([]);
+        expect(await readFile(privateFile, "utf8")).toBe("private root document\n");
+        await rm(privateFile);
+      }
 
       await run("npm", ["pack", "--json"], { cwd: source, env, maxBuffer: 10 * 1024 * 1024 });
       const archives = (await readdir(source)).filter((name) => name.endsWith(".tgz"));
@@ -84,6 +98,12 @@ describe("Node release artifact", () => {
       await writeFile(outside, "outside unchanged\n");
       await run("tar", ["-xzf", archive, "-C", extracted], { env });
       const installed = path.join(extracted, "package");
+      const manifest = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"));
+      const appBuild = pathToFileURL(path.join(installed, "dist", "state", "appBuild.js")).href;
+      // Import the module from the freshly extracted archive.
+      const readIdentity = "const { readBuildIdentity } = await import(process.argv[1]); console.log(JSON.stringify(await readBuildIdentity()));";
+      const { stdout: identity } = await run(process.execPath, ["--input-type=module", "-e", readIdentity, appBuild], { cwd: temporary, env });
+      expect(JSON.parse(identity)).toEqual({ version: manifest.version, commit: null, dirty: false, source: "unknown" });
       const metadataFile = path.join(installed, "native", "skills-boundary.platform.json");
       const boundary = pathToFileURL(path.join(installed, "dist", "actions", "boundary.js")).href;
       // The module is selected from this test's freshly extracted archive.
@@ -115,6 +135,28 @@ describe("Node release artifact", () => {
       expect(await readFile(outside, "utf8")).toBe("outside unchanged\n");
       await rm(builtGit);
       await cp(path.join(installed, "dist", "actions", "git.js"), builtGit);
+
+      const outputs = [
+        "dist/actions/git.js",
+        "dist/state/buildIdentity.json",
+      ];
+      for (const [index, relative] of outputs.entries()) {
+        const target = path.join(source, relative);
+        const backup = path.join(temporary, `output-${index}`);
+        await cp(target, backup);
+        await rm(target);
+        await link(outside, target);
+        await expect(run("npm", ["run", "build"], {
+          cwd: source,
+          env: { ...env, CC: path.join(temporary, "compiler-must-not-run") },
+          maxBuffer: 10 * 1024 * 1024,
+        })).rejects.toThrow(relative === "dist/state/buildIdentity.json"
+          ? /refusing unsafe build identity output/i
+          : /build output must not be a link or multiply linked file/i);
+        expect(await readFile(outside, "utf8")).toBe("outside unchanged\n");
+        await rm(target);
+        await cp(backup, target);
+      }
 
       await writeFile(path.join(source, "src", "state", "private-unreviewed.ts"), "export const privateData = 'sentinel';\n");
       await expect(run("npm", ["pack", "--foreground-scripts"], { cwd: source, env, maxBuffer: 10 * 1024 * 1024 }))

@@ -23,6 +23,9 @@ describe("CLI options", () => {
     expect(help.status).toBe(0);
     expect(help.stdout).toContain("Usage: skills-manager");
     expect(help.stderr).not.toContain("OPENTUI_LIBC");
+    expect(help.stdout).toContain("Application and skills CLI updates have separate manual checks.");
+    expect(help.stdout).toContain("Background checks are separately opt-in and off by default.");
+    expect(help.stdout).not.toContain("Network actions are manual");
     expect(help.stderr).not.toContain("Missing OpenTUI asset");
 
     const missing = spawnSync(process.execPath, ["--import", "tsx", "src/cli.ts", "--skills-dir"], { encoding: "utf8", env });
