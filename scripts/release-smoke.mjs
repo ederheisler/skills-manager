@@ -406,9 +406,21 @@ async function run() {
     ['skills-manager', 'directory'],
     ['skills-manager/config.json', 'file', configBytes.toString('hex')],
   ];
-  async function assertBrowseSafety() {
+  async function assertBrowseSafety({ refreshed = false } = {}) {
     assert.deepEqual(await snapshot(browseRoot), browseBefore);
-    assert.deepEqual(await readdir(home), []);
+    if (!refreshed) {
+      assert.deepEqual(await readdir(home), []);
+    } else {
+      let directory = home;
+      for (const name of ['Library', 'Caches', 'node-gyp']) {
+        const entries = await readdir(directory);
+        if (entries.length === 0) break;
+        assert.deepEqual(entries, [name], 'Only the node-gyp cache may be created in HOME');
+        directory = path.join(directory, name);
+        const entry = await lstat(directory);
+        assert.ok(entry.isDirectory() && !entry.isSymbolicLink(), 'The node-gyp cache path must contain only directories');
+      }
+    }
     assert.deepEqual(await snapshot(configDirectory), expectedConfig);
     assert.deepEqual(await snapshot(installed), installedBefore, 'The initial package must not be changed');
     assert.deepEqual(await snapshot(unrelatedPackage), unrelatedBefore);
@@ -442,11 +454,11 @@ async function run() {
     // A local package must first offer a reviewed global install. The second
     // pass starts from that persistent installation and reviews an update.
     const globalCli = await browseInTerminal(browseRoot, { saved: true, refresh: true, explicit: true });
-    await assertBrowseSafety();
+    await assertBrowseSafety({ refreshed: true });
     await browseInTerminal(browseRoot, {
       saved: true, refresh: true, explicit: true, startingCli: globalCli, updateMode: 'update',
     });
-    await assertBrowseSafety();
+    await assertBrowseSafety({ refreshed: true });
   }
 
   // Exercise the installed native boundary with independently reviewed source bytes.
