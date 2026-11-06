@@ -73,6 +73,8 @@ The hosted repository was replaced at the same URL before public release because
 
 The installed app passed native macOS arm64 tests locally, while the corresponding GitHub jobs could not acquire a runner. Local native verification was considered sufficient, so hosted CI retains Linux arm64, Linux x86_64, and macOS x86_64.
 
+On 2026-11-06, the user removed the hosted macOS x86_64 and Linux arm64 jobs. Hosted CI now runs Linux x86_64 only, including the Linux upstream-ref and update tests that previously ran on arm64. macOS is verified locally on the maintainer's arm64 machine.
+
 ## Upstream skills versions
 
 Date: 2026-11-04

@@ -45,8 +45,8 @@ and the Vercel `skills` dependency behind an operating-system boundary.
 ## PR publishing and CI
 
 - After every push to a PR branch, watch its checks until they finish:
-  `gh pr checks <number> --watch`. Native portability runs Linux arm64,
-  Linux x64, and macOS x64, and catches failures that local macOS arm64 runs miss.
+  `gh pr checks <number> --watch`. Native portability runs Linux x64 only;
+  there is no hosted macOS or Linux arm64 job. Verify macOS locally.
 - Do not report a PR as published, ready, or merged while any required check
   is pending or failing. If a check fails, read its log
   (`gh run view <run-id> --log-failed`), fix the root cause, push, and watch again.
