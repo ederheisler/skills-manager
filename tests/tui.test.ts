@@ -1018,8 +1018,8 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       const handoff = await app.waitForExit();
       expect(prepare).toHaveBeenCalledOnce();
       expect(prepare.mock.calls[0]![0].installation).toEqual(installation);
-      expect(handoff?.recoveryCommand).toContain(`'${installation.prefix}/bin/skills-manager'`);
-      expect(handoff?.recoveryCommand).toContain(`--prefix '${installation.prefix}'`);
+      expect(handoff?.recoveryCommand).toContain("npx --yes github:ederheisler/skills-manager#main");
+      expect(handoff?.recoveryCommand).toContain(`--skills-dir '${skillsDir}'`);
     } finally {
       setup.renderer.destroy();
       await app.shutdown();

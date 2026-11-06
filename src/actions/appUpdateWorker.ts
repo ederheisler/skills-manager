@@ -282,9 +282,15 @@ function resultCode(result: ChildResult): number {
   return result.code ?? 1;
 }
 
+function safeOutput(value: string): string {
+  if (registry) value = value.replaceAll(registry, "[redacted]");
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]|\p{Cf}/gu, " ");
+}
+
 async function main(): Promise<void> {
   let code = 1;
-  let phase = "preparing the update";
+  let phase = "Preparing the update";
+  let reason = "Unknown error";
   let childSignal: NodeJS.Signals | null = null;
   let cleaned = false;
   try {
@@ -298,6 +304,7 @@ async function main(): Promise<void> {
       throw new Error("Invalid approved update");
     }
     checkInterrupted();
+    await report("Updating skills-manager…\n");
     await assertDestination();
     const pack = path.join(workspace, "pack");
     const cache = path.join(workspace, "cache");
@@ -307,8 +314,8 @@ async function main(): Promise<void> {
       await chmod(directory, 0o700);
     }
     const env = npmEnvironment(cache, temporary);
-    phase = "preparing the update";
-    await report("Updating…\n");
+    phase = "Downloading and building";
+    await report(`Downloading and building from GitHub (${revision})…\n`);
     // Pack before global installation: npm's Git prepare must run in the
     // source staging directory, not inherit the global install mode.
     const packed = await runChild(npmExecutable, [
@@ -318,9 +325,9 @@ async function main(): Promise<void> {
     if (packed.code !== 0 || packed.signal || interrupted) {
       code = resultCode(packed);
       childSignal = packed.signal;
-      throw new Error("Package preparation failed");
+      throw new Error(`npm ${packed.signal ? `was stopped by ${packed.signal}` : `exited with code ${packed.code ?? 1}`}`);
     }
-    if (!await ownsWorkspace()) throw new Error("Workspace changed");
+    if (!await ownsWorkspace()) throw new Error("Temporary update files changed");
     checkInterrupted();
     const archives = await readdir(pack);
     if (archives.length !== 1 || !archives[0].endsWith(".tgz")) throw new Error("Invalid prepared package");
@@ -330,41 +337,42 @@ async function main(): Promise<void> {
       throw new Error("Invalid prepared package");
     }
     await assertDestination();
-    phase = "installing the global update";
+    phase = "Installing skills-manager";
+    await report(`Installing to ${displayPath(prefix)}…\nRefreshing Vercel skills CLI…\n`);
     const installation = await runChild(npmExecutable, [
       "install", "--global", "--prefix", prefix, archive, "--no-audit", "--no-fund",
     ], env);
     if (installation.code !== 0 || installation.signal || interrupted) {
       code = resultCode(installation);
       childSignal = installation.signal;
-      throw new Error("Global installation failed");
+      throw new Error(`npm ${installation.signal ? `was stopped by ${installation.signal}` : `exited with code ${installation.code ?? 1}`}`);
     }
-    phase = "validating the global installation";
-    if (!await ownsWorkspace()) throw new Error("Workspace changed");
+    phase = "Validating the installation";
+    if (!await ownsWorkspace()) throw new Error("Temporary update files changed");
     checkInterrupted();
     const executable = await installedApp();
     checkInterrupted();
-    phase = "cleaning up the update";
-    if (!await ownsWorkspace()) throw new Error("Workspace changed");
+    phase = "Cleaning up";
+    if (!await ownsWorkspace()) throw new Error("Temporary update files changed");
     await rm(workspace, { recursive: true });
     cleaned = true;
     checkInterrupted();
-    phase = "starting the global installation";
-    await report("Starting…\n");
+    phase = "Restarting skills-manager";
+    await report("Done. Restarting skills-manager…\n");
     if (typeof process.execve !== "function") throw new Error("Process replacement is unavailable");
     process.execve(process.execPath, [process.execPath, executable, "--skills-dir", skillsDir], process.env);
     throw new Error("Process replacement returned unexpectedly");
-  } catch {
-    // Do not print npm or package output: it can contain credentials or terminal controls.
+  } catch (error) {
+    reason = safeOutput(error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim();
   } finally {
     if (!cleaned && cleanupSafe && await ownsWorkspace()) {
       try { await rm(workspace, { recursive: true }); cleaned = true; } catch { /* Report below. */ }
     }
     if (!cleaned) {
-      await report(`Update staging may remain at ${displayPath(workspace)}; wait for any remaining processes before manual cleanup.\n`);
+      await report(`Temporary update files may remain at ${displayPath(workspace)}; wait for any remaining processes before manual cleanup.\n`);
     }
     if (code === 0) code = 1;
-    await report(`The update could not be completed while ${phase}.\nTo reinstall and start the app again, run:\n${recoveryCommand()}\n`);
+    await report(`${phase} failed: ${reason}\nTo reinstall and start the app again, run:\n${recoveryCommand()}\n`);
   }
   const finalSignal = interrupted ?? signals.find((signal) => signal === childSignal);
   if (finalSignal) {

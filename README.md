@@ -41,6 +41,8 @@ The app check compares the running build's full commit SHA with GitHub `main`. T
 
 Update and restart installs the app from `main` and refreshes the CLI. A CLI-only refresh keeps a verified, clean app commit and selects the latest CLI. Both actions update the persistent npm-global installation and restart the app. An update from a checkout or temporary installation requires explicit approval before global installation. The app does not overwrite the checkout.
 
+After approval, the terminal shows download, build, installation, and restart progress. If a step fails, it shows the reason and a recovery command.
+
 npm runs repository and dependency scripts with your normal permissions. Approve only trusted code. The update does not use `sudo`. After a failed update of an existing persistent installation, start the app again with `skills-manager --skills-dir /absolute/path/to/skills`. See the [security policy](SECURITY.md#application-and-cli-updates) for details.
 
 ## Development

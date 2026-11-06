@@ -417,6 +417,15 @@ describe("persistent global application update worker", () => {
     });
     expect(await realpath(f.bin)).toBe(path.join(f.app, "dist", "cli.js"));
     expect(JSON.parse(await readFile(path.join(f.app, "dist", "state", "buildIdentity.json"), "utf8")).commit).toBe(commit);
+    expect(result.stderr).toBe([
+      "Updating skills-manager…",
+      `Downloading and building from GitHub (${revision})…`,
+      `Installing to ${JSON.stringify(f.prefix)}…`,
+      "Refreshing Vercel skills CLI…",
+      "Done. Restarting skills-manager…",
+      "",
+    ].join("\n"));
+    expect(result.stdout).toBe("");
     expect(result.stdout + result.stderr).not.toContain("update-secret");
     expect(result.stdout + result.stderr).not.toContain("\x1b");
     await expectMissing(f.workspace);
@@ -446,7 +455,8 @@ describe("persistent global application update worker", () => {
     const previous = await installExisting(f);
     const result = await startWorker(f, { mode: "update", ...previous, npmMode: "install-failure" }).result;
     expect(result.code).toBe(23);
-    expect(result.stderr).toContain("while installing the global update");
+    expect(result.stderr).toContain("Installing skills-manager failed: npm exited with code 23");
+    expect(result.stderr).not.toContain("UNTRUSTED");
     expect(result.stderr).toContain(`/skills '"'"' with spaces'`);
     expect(result.stderr).not.toContain("update-secret");
     expect(result.stdout + result.stderr).not.toContain("\x1b");
@@ -458,6 +468,17 @@ describe("persistent global application update worker", () => {
     expect((await startWorker(f, { mode: "update", ...previous }).result).code).toBe(0);
     expect(JSON.parse(await readFile(f.launch, "utf8")).runtime.version).toBe("1.2.3");
     await expectMissing(f.workspace);
+  });
+
+  it("reports a download failure and the npm exit code without npm output", async () => {
+    const f = await updateFixture();
+    const result = await startWorker(f, { npmMode: "failure" }).result;
+    expect(result.code).toBe(23);
+    expect(result.stderr).toContain("Downloading and building failed: npm exited with code 23");
+    expect(result.stderr).not.toContain("UNTRUSTED");
+    expect(result.stderr).not.toContain("Installing to ");
+    expect(result.stderr).toContain("To reinstall and start the app again, run:");
+    await expectMissing(f.installRecord);
   });
 
   it("escapes control and Unicode format characters in paths and manual recovery", async () => {
@@ -500,7 +521,7 @@ describe("persistent global application update worker", () => {
     await stageRuntime(f, options);
     const result = await startWorker(f).result;
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain("while validating the global installation");
+    expect(result.stderr).toContain("Validating the installation failed:");
     await expectMissing(f.launch);
     await expectMissing(f.workspace);
   });
@@ -510,7 +531,7 @@ describe("persistent global application update worker", () => {
     await stageRuntime(f, { identityCommit: "1111111111111111111111111111111111111111" });
     const result = await startWorker(f, { target: "cli", revision: commit }).result;
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain("while validating the global installation");
+    expect(result.stderr).toContain("Validating the installation failed:");
     await expectMissing(f.launch);
     await expectMissing(f.workspace);
   });

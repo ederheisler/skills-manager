@@ -93,13 +93,14 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function manualRecoveryCommand(skillsDir: string, prefix: string): string {
-  const entry = path.join(prefix, "bin", "skills-manager");
-  if ([skillsDir, prefix].every((value) => escapeTerminalSingleLine(value) === value)) {
-    return `npm install --global --prefix ${shellQuote(prefix)} github:ederheisler/skills-manager && ${shellQuote(entry)} --skills-dir ${shellQuote(skillsDir)}`;
+// Keep this one-time launch command in sync with appUpdateWorker.ts recoveryCommand.
+function manualRecoveryCommand(skillsDir: string, revision: string): string {
+  const appRevision = revision === "main" || /^[0-9a-f]{40}$/i.test(revision) ? revision : "main";
+  if (escapeTerminalSingleLine(skillsDir) === skillsDir) {
+    return `npx --yes github:ederheisler/skills-manager#${appRevision} --skills-dir ${shellQuote(skillsDir)}`;
   }
-  const octal = (value: string) => [...Buffer.from(value)].map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`).join("");
-  return `prefix_dir=$(printf '%b' '${octal(prefix)}_'); prefix_dir="\${prefix_dir%_}"; skills_dir=$(printf '%b' '${octal(skillsDir)}_'); npm install --global --prefix "$prefix_dir" github:ederheisler/skills-manager && "$prefix_dir/bin/skills-manager" --skills-dir "\${skills_dir%_}"`;
+  const octal = [...Buffer.from(skillsDir)].map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`).join("");
+  return `SM_SKILLS_DIR=$(printf '%b.' '${octal}'); SM_SKILLS_DIR=\${SM_SKILLS_DIR%.}; npx --yes github:ederheisler/skills-manager#${appRevision} --skills-dir "$SM_SKILLS_DIR"`;
 }
 
 function registryOrigin(registry: string): string {
@@ -922,7 +923,7 @@ export class SkillsManagerTui {
     const switchToMain = target === "all" || !reproducible;
     const selection = { ...this.#selection };
     const skillsDir = this.#skillsDir;
-    const recoveryCommand = manualRecoveryCommand(skillsDir, approvedInstallation.prefix);
+    const recoveryCommand = manualRecoveryCommand(skillsDir, switchToMain ? "main" : build.commit!);
     this.#confirm({
       title: target === "all" ? "Update app and CLI" : switchToMain ? "Update Vercel skills CLI · switch to main" : "Update Vercel skills CLI",
       approveLabel: approvedInstallation.mode === "install" ? "install" : "update",
