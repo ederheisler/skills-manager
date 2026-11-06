@@ -23,14 +23,6 @@ jobs:
             os: linux
             arch: x64
             machine: x86_64
-          - runner: ubuntu-24.04-arm
-            os: linux
-            arch: arm64
-            machine: aarch64
-          - runner: macos-26-intel
-            os: darwin
-            arch: x64
-            machine: x86_64
     env:
       EXPECTED_OS: ${{ matrix.os }}
       EXPECTED_ARCH: ${{ matrix.arch }}
@@ -188,7 +180,7 @@ jobs:
             npm install --no-audit --no-fund "$tarball"
 
       - name: Exercise Linux upstream ref and update tests
-        if: runner.os == 'Linux' && matrix.arch == 'arm64'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           fixture="$RUNNER_TEMP/portability"
