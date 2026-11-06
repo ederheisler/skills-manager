@@ -5,6 +5,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   BoxRenderable,
+  CodeRenderable,
   MarkdownRenderable,
   createClipboard,
   createHostClipboard,
@@ -19,6 +20,7 @@ import {
   TextAttributes,
   TextRenderable,
   TreeSitterClient,
+  type BaseRenderable,
   type ClipboardService,
   type CliRenderer,
   type KeyEvent,
@@ -69,6 +71,11 @@ const markdownStyle = SyntaxStyle.fromStyles({
   "markup.heading.1": { fg: RGBA.fromHex(colors.accent), bold: true },
   default: { fg: RGBA.fromHex(colors.text) },
 });
+
+function showPendingCode(node: BaseRenderable): void {
+  if (node instanceof CodeRenderable && !node.drawUnstyledText) node.drawUnstyledText = true;
+  for (const child of node.getChildren()) showPendingCode(child);
+}
 
 export interface SkillsManagerTuiOptions {
   fileOpener?: (file: string) => Promise<void>;
@@ -2306,8 +2313,15 @@ export class SkillsManagerTui {
         content: escapeTerminalMultiline(this.#selectedText || (selectedFile?.kind === "file" ? "Empty file." : "No SKILL.md body.")),
         conceal: true,
         syntaxStyle: markdownStyle,
+        streaming: true,
         treeSitterClient: this.#treeSitterClient ?? undefined,
         width: "100%",
+        renderNode: (token, context) => {
+          if (token.type !== "code" && token.type !== "list" && token.type !== "blockquote") return undefined;
+          const block = context.defaultRender();
+          if (block) showPendingCode(block);
+          return block;
+        },
         tableOptions: { wrapMode: "word" },
       }));
     } else {

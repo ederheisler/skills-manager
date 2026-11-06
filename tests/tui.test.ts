@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { setImmediate as nextTurn, setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { RGBA, type ClipboardService } from "@opentui/core";
+import { RGBA, TreeSitterClient, type ClipboardService } from "@opentui/core";
 import { createTestRenderer as createOpenTuiTestRenderer, MouseButtons } from "@opentui/core/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { approveSkillsRoot, fingerprintContents } from "../src/actions/boundary.js";
@@ -445,6 +445,33 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
     } finally {
       setup.renderer.destroy();
       await app.shutdown();
+    }
+  });
+
+  it("shows Markdown prose on the first frame while syntax highlighting is pending", async () => {
+    const { skillsDir } = await fixture();
+    await writeFile(path.join(skillsDir, "alpha", "SKILL.md"), [
+      "---", "name: alpha", "---", "", "# Alpha body", "", "Local content for selection.", "",
+      "```typescript", "const topLevel = 123;", "```", "",
+      "- Nested example:", "", "  ```typescript", "  const nestedCode = 456;", "  ```",
+    ].join("\n"));
+    const pending = Promise.withResolvers<{ highlights: [] }>();
+    const highlight = vi.spyOn(TreeSitterClient.prototype, "highlightOnce").mockReturnValue(pending.promise);
+    const setup = await createTestRenderer({ width: 180, height: 30 });
+    try {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.renderOnce();
+      expect(highlight).toHaveBeenCalled();
+      expect(setup.captureCharFrame()).toContain("Alpha body");
+      expect(setup.captureCharFrame()).toContain("Local content for selection.");
+      expect(setup.captureCharFrame()).toContain("const topLevel = 123;");
+      expect(setup.captureCharFrame()).toContain("const nestedCode = 456;");
+      await setup.mockInput.typeText("]");
+      await setup.waitFor(() => setup.captureCharFrame().includes("┌─notes.txt"));
+      expect(setup.captureCharFrame()).toContain("Notes from the selected file.");
+    } finally {
+      pending.resolve({ highlights: [] });
+      setup.renderer.destroy();
     }
   });
 
