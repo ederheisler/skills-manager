@@ -5,6 +5,14 @@
 
 ## Release completion
 
+On 2026-11-06, local macOS arm64 checks passed a warning-free build and 724 tests. Eleven operating-system-specific tests were skipped. The dependency audit reported zero vulnerabilities, including development dependencies.
+
+Native character and color captures passed 143 checks at 180×30, 100×30, and 80×24. They covered shortcut colors, list markers and their legend, help wrapping, Markdown tables, file names, pane widths, and update controls. Both update hosts returned mocked HTTP 503 responses. These captures do not establish a successful network check or installation.
+
+Terminal runs of the built CLI covered first-run onboarding, a missing directory in read-only mode, and a saved setup. With 139 skills, the populated screen appeared about 1 second after launch. Before the platform-check fix, the same fixture took about 10.6 seconds.
+
+SCB review covered the changed source and test files. All findings were complexity and duplication advisories. The retained branches keep validation, input handling, and cleanup ordering explicit.
+
 On 2026-11-05, local macOS arm64 checks with Node 26.13.0 passed the build and 707 tests. Eleven operating-system-specific tests were skipped. The dependency audit reported zero vulnerabilities. Terminal checks covered help, update controls, and foreground checks at wide and narrow sizes. Public GitHub and npm checks returned valid results without changing automatic-check consent. An isolated containing-repository fixture exercised scoped commit, push to a local bare remote, and refusal of an outside-scope pull. Unrelated staged and unstaged files, configuration, and exclusions remained intact. Scoped source-security review found no actionable boundary issue. SCB complexity and duplication findings were reviewed; explicit validation and transaction ordering were retained rather than refactored solely to reduce metrics. These local results do not establish Linux runtime results.
 
 On 2026-11-04, [Native portability](https://github.com/ederheisler/skills-manager/actions/runs/41889510435) passed on `main` at commit `a5a547c66f44b80c0228acef9b6b23f050c82e32`. Its Linux arm64, Linux x64, and macOS x64 jobs installed a tarball and exercised the app in a terminal. The [release workflow](https://github.com/ederheisler/skills-manager/actions/runs/41889841054) then published [v0.1.0](https://github.com/ederheisler/skills-manager/releases/tag/v0.1.0) at 18:42:55 UTC.
@@ -166,11 +174,11 @@ The following choices were open in the reviewed draft. The later selections appe
 
 The draft compared a [Bun-compiled executable](https://bun.com/docs/bundler#compile) with a Node package. A Bun executable contains its runtime, but the separate upstream `skills` CLI needs Node unless separately bundled and tested. No standalone release is claimed.
 
-The current distribution uses Node and an unpinned GitHub `npx` command to request the latest code on `main` without a manual clone. The [README](../../../README.md) also documents source installation. The project is not published to npm. The package remains private, which prevents npm publication but not repository or tarball distribution.
+The earlier distribution used Node and an unpinned GitHub `npx` command to request code on `main`. The user later selected [persistent installation](../../decisions/2026-11-03-open-source-portability.md#persistent-installation). See the [README](../../../README.md) for the current command. The project is not published to npm.
 
 The [unscoped `skills-manager` package](https://registry.npmjs.org/skills-manager/latest) belongs to another project. Do not run `npx skills-manager` for this app. Test the exact command and package contents before documenting another distribution.
 
-An uncached `npx` download needs network access. A cached package does not guarantee offline use because npm can make other requests. The documented command uses `--yes` to skip the npm download prompt. The prompt does not review install scripts. npm also assumes consent in non-interactive use. See the [`npx` documentation](https://docs.npmjs.com/cli/v11/commands/npx/) and [npm exec](https://docs.npmjs.com/cli/v11/commands/npm-exec/).
+The earlier `npx` command used `--yes` to skip the npm download prompt. That prompt did not review install scripts. npm also assumes consent in non-interactive use. See the [`npx` documentation](https://docs.npmjs.com/cli/v11/commands/npx/) and [npm exec](https://docs.npmjs.com/cli/v11/commands/npm-exec/).
 
 npm also accepts [repository and tarball package specifications](https://docs.npmjs.com/cli/v11/using-npm/package-spec/). A source archive is not automatically a runnable package. Pin a full repository commit or use a verified immutable release tarball when testing those routes.
 

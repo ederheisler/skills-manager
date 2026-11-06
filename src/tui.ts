@@ -5,7 +5,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   BoxRenderable,
-  CodeRenderable,
+  MarkdownRenderable,
   createClipboard,
   createHostClipboard,
   createRendererClipboardAdapter,
@@ -47,8 +47,8 @@ import type { Skill, SkillFile } from "./state/types.js";
 import { readInstalledSource } from "./state/upstreamProvenance.js";
 import { checkForUpdates } from "./actions/checkUpdates.js";
 import { SoftwareUpdateService, type SoftwareUpdateCheck, type UpdateComponent } from "./actions/softwareUpdates.js";
-import { prepareUpdateHandoff, type PreparedUpdateHandoff, type UpdateTarget } from "./actions/appUpdateHandoff.js";
-import type { SkillsOnboardingResult, SkillsRootSelection } from "./onboarding.js";
+import { prepareUpdateHandoff, resolveGlobalUpdate, type GlobalUpdateInstallation, type PreparedUpdateHandoff, type UpdateTarget } from "./actions/appUpdateHandoff.js";
+import type { SkillsRootSelection } from "./onboarding.js";
 import { escapeTerminalMultiline, escapeTerminalSingleLine, quoteTerminalPath } from "./terminalText.js";
 
 const colors = {
@@ -64,8 +64,6 @@ const colors = {
   warning: "#EED49F",
 };
 
-const filePaneWidth = 32;
-const filePaneTextWidth = filePaneWidth - 5;
 
 const markdownStyle = SyntaxStyle.fromStyles({
   "markup.heading.1": { fg: RGBA.fromHex(colors.accent), bold: true },
@@ -73,8 +71,6 @@ const markdownStyle = SyntaxStyle.fromStyles({
 });
 
 export interface SkillsManagerTuiOptions {
-  selectSkillsDir?: (currentSkillsDir: string) => Promise<SkillsOnboardingResult | null>;
-  initialOnboarding?: Pick<SkillsOnboardingResult, "reviewInitialize">;
   fileOpener?: (file: string) => Promise<void>;
   clipboard?: ClipboardService;
 }
@@ -97,11 +93,13 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function manualRecoveryCommand(skillsDir: string): string {
-  const command = "npx --yes --prefer-online github:ederheisler/skills-manager";
-  if (escapeTerminalSingleLine(skillsDir) === skillsDir) return `${command} --skills-dir ${shellQuote(skillsDir)}`;
-  const octal = [...Buffer.from(skillsDir)].map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`).join("");
-  return `skills_dir=$(printf '%b' '${octal}_'); ${command} --skills-dir "\${skills_dir%_}"`;
+function manualRecoveryCommand(skillsDir: string, prefix: string): string {
+  const entry = path.join(prefix, "bin", "skills-manager");
+  if ([skillsDir, prefix].every((value) => escapeTerminalSingleLine(value) === value)) {
+    return `npm install --global --prefix ${shellQuote(prefix)} github:ederheisler/skills-manager && ${shellQuote(entry)} --skills-dir ${shellQuote(skillsDir)}`;
+  }
+  const octal = (value: string) => [...Buffer.from(value)].map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`).join("");
+  return `prefix_dir=$(printf '%b' '${octal(prefix)}_'); prefix_dir="\${prefix_dir%_}"; skills_dir=$(printf '%b' '${octal(skillsDir)}_'); npm install --global --prefix "$prefix_dir" github:ederheisler/skills-manager && "$prefix_dir/bin/skills-manager" --skills-dir "\${skills_dir%_}"`;
 }
 
 function registryOrigin(registry: string): string {
@@ -194,7 +192,6 @@ export class SkillsManagerTui {
   #helpDialog: BoxRenderable | null = null;
   #helpLayout: BoxRenderable | null = null;
   #helpColumns: BoxRenderable[] = [];
-  #helpColumnRows: number[] = [];
   #helpFooter: TextRenderable | null = null;
   #helpDetailScrollTop = 0;
   #helpMetadataScrollTop = 0;
@@ -327,9 +324,6 @@ export class SkillsManagerTui {
       this.#busy = false;
       if (!this.#destroyed) this.#render();
     }
-    if (!this.#destroyed && this.options.initialOnboarding) {
-      await this.#presentOnboardingIntents(this.options.initialOnboarding);
-    }
   }
 
   waitForExit(): Promise<ApplicationUpdateHandoff | null> {
@@ -398,7 +392,7 @@ export class SkillsManagerTui {
 
   async #recoverInstallation(): Promise<void> {
     if (this.#selection.identity === null) {
-      this.#message = [this.#message, "Directory not yet approved: create it and reselect it before making changes."].filter(Boolean).join(" ");
+      this.#message = [this.#message, "Directory not yet approved: create it and restart the app before making changes."].filter(Boolean).join(" ");
       return;
     }
     const root = this.#approvedRoot();
@@ -421,7 +415,7 @@ export class SkillsManagerTui {
 
   #approvedRoot(): ApprovedSkillsRoot {
     const { path: rootPath, identity } = this.#selection;
-    if (identity === null) throw new Error("Directory is not approved. Create it and reselect it before making changes.");
+    if (identity === null) throw new Error("Directory is not approved. Create it and restart the app before making changes.");
     return { path: rootPath, identity };
   }
 
@@ -508,7 +502,6 @@ export class SkillsManagerTui {
         this.#helpDialog = null;
         this.#helpLayout = null;
         this.#helpColumns = [];
-        this.#helpColumnRows = [];
         this.#helpFooter = null;
         this.#detailContent?.scrollTo(this.#helpDetailScrollTop);
         this.#metadataContent?.scrollTo(this.#helpMetadataScrollTop);
@@ -668,7 +661,6 @@ export class SkillsManagerTui {
       this.#render();
     }
     else if (key.name === "r") await this.#reload();
-    else if (key.name === "i" && this.options.selectSkillsDir) await this.#chooseSkillsDir();
     else if (key.name === "g") {
       this.#mode = "git";
       this.#gitResult = "";
@@ -814,6 +806,10 @@ export class SkillsManagerTui {
     if (this.#softwareUpdates.results.app?.status === "different") different.push("skills-manager");
     if (this.#softwareUpdates.results.cli?.status === "different") different.push("Vercel skills CLI");
     const notices = different.length ? [`Different ${different.join(" and ")} · x review`] : [];
+    const failed: string[] = [];
+    if (this.#softwareUpdates.results.app?.status === "unavailable" || this.#softwareCheckErrors.app) failed.push("App");
+    if (this.#softwareUpdates.results.cli?.status === "unavailable" || this.#softwareCheckErrors.cli) failed.push("Vercel skills CLI");
+    if (failed.length) notices.push(`${failed.join(" and ")} update check failed · x review`);
     if (this.#softwareUpdates.errors.length) notices.push("Update settings need attention · x review");
     return notices.join(" · ");
   }
@@ -903,34 +899,57 @@ export class SkillsManagerTui {
       this.#softwareNotice("The npm registry could not be established. The update cannot start.");
       return;
     }
+    const resolution: { installation?: GlobalUpdateInstallation; error?: string } = {};
+    await this.#runExclusive(async () => {
+      this.#status = "Resolving global installation for the update review...";
+      this.#render();
+      try {
+        resolution.installation = await resolveGlobalUpdate();
+      } catch (error) {
+        resolution.error = errorMessage(error);
+      } finally {
+        this.#status = "";
+      }
+    });
+    if (this.#destroyed) return;
+    if (!resolution.installation) {
+      this.#softwareNotice(resolution.error || "The global installation could not be established. The update cannot start.");
+      return;
+    }
+    const approvedInstallation = resolution.installation;
     const build = { ...this.#softwareUpdates.build };
     const reproducible = !build.dirty && build.source !== "unknown" && /^[0-9a-f]{40}$/i.test(build.commit ?? "");
     const switchToMain = target === "all" || !reproducible;
     const selection = { ...this.#selection };
     const skillsDir = this.#skillsDir;
-    const recoveryCommand = manualRecoveryCommand(skillsDir);
+    const recoveryCommand = manualRecoveryCommand(skillsDir, approvedInstallation.prefix);
     this.#confirm({
       title: target === "all" ? "Update app and CLI" : switchToMain ? "Update Vercel skills CLI · switch to main" : "Update Vercel skills CLI",
-      approveLabel: "update",
+      approveLabel: approvedInstallation.mode === "install" ? "install" : "update",
       lines: [
         target === "all"
           ? "Updates the app to GitHub main and the Vercel skills CLI, then restarts."
           : switchToMain
             ? "Switches the app to GitHub main and updates the Vercel skills CLI, then restarts."
             : `Keeps the current app version${build.commit ? ` (${build.commit.slice(0, 7)})` : ""}, updates the Vercel skills CLI, then restarts.`,
+        ...(switchToMain ? ["GitHub main may advance after this review."] : []),
+        approvedInstallation.mode === "install"
+          ? `Install globally: skills-manager in npm prefix ${quoteTerminalPath(approvedInstallation.prefix)}; this checkout is not changed.`
+          : `Update global installation: skills-manager in npm prefix ${quoteTerminalPath(approvedInstallation.prefix)}.`,
         `Skills directory: ${quoteTerminalPath(skillsDir)}`,
         `Downloads from GitHub and ${origin}.`,
-        "Install scripts have your user permissions.",
+        "npm install scripts run with your user permissions.",
+        "The app will restart from the global installation.",
       ],
       returnMode: "software-updates",
       approve: async () => {
         this.#preparingHandoff = true;
         try {
-          this.#status = "Preparing update session; q quits without starting it.";
+          this.#status = "Preparing update; q quits without starting it.";
           this.#render();
           if (selection.identity !== null) await assertApprovedSkillsRoot(selection);
           const prepared = await prepareUpdateHandoff({
-            target, skillsDir, build, registry, allowSwitchToMain: switchToMain,
+            target, skillsDir, build, registry, installation: approvedInstallation, allowSwitchToMain: switchToMain,
             excludedRoots: this.#softwareUpdates.knownSkillsRoots,
           });
           let transferred = false;
@@ -957,66 +976,6 @@ export class SkillsManagerTui {
         }
       },
     });
-  }
-
-
-  async #chooseSkillsDir(): Promise<void> {
-    if (!this.options.selectSkillsDir) return;
-    const outcome: { result: SkillsOnboardingResult | null } = { result: null };
-    await this.#runExclusive(async () => {
-      this.renderer.suspend();
-      let selected: SkillsRootSelection | null = null;
-      try {
-        outcome.result = await this.options.selectSkillsDir!(this.#skillsDir);
-        selected = outcome.result?.root ?? null;
-      } finally {
-        this.renderer.resume();
-      }
-      if (!selected || this.#destroyed || (selected.path === this.#skillsDir && selected.identity === this.#selection.identity)) return;
-      try {
-        await this.#softwareUpdates.setSkillsDirectory(selected.path);
-      } catch (error) {
-        outcome.result = null;
-        throw error;
-      }
-      this.#softwareChecks.clear();
-      this.#softwareCheckErrors = {};
-      this.#revision++;
-      this.#fileRevision++;
-      this.#updateRevision++;
-      this.#selection = { ...selected };
-      this.#skillsDir = selected.path;
-      this.#skills = [];
-      this.#skillFiles = [];
-      this.#selectedText = "";
-      this.#selectedSource = "";
-      this.#selectedLineCount = null;
-      this.#selectedIndex = 0;
-      this.#searchFilter = "";
-      this.#scope = "all";
-      this.#state = "all";
-      this.#input = "";
-      this.#replacementSkill = null;
-      this.#searchResults = [];
-      this.#searchResultIndex = 0;
-      this.#contextMenu = null;
-      clearTimeout(this.#searchDebounceTimer);
-      clearTimeout(this.#transientMessageTimer);
-      this.#transientMessage = "";
-      this.#availableUpdates.clear();
-      this.#message = "";
-      this.#git = null;
-      this.#gitStatus = "";
-      this.#gitResult = "";
-      this.#gitDiff = "";
-      this.#gitSelectedIndex = 0;
-      this.#gitStatusFilter = "all";
-      this.#gitFullContext = false;
-      this.#gitFiles = [];
-      await this.#recoverInstallation();
-      await this.#reload();
-    });
-    if (!this.#destroyed && outcome.result) await this.#presentOnboardingIntents(outcome.result);
   }
 
   #showTransient(message: string): void {
@@ -1298,20 +1257,29 @@ export class SkillsManagerTui {
       lockEntry: skill.lockEntry ? structuredClone(skill.lockEntry) : null,
       provenance: { ...skill.provenance },
     }));
+    const groups = new Map<string, string[]>();
+    for (const skill of snapshots) {
+      const entry = skill.lockEntry;
+      const name = quoteTerminalPath(skill.path ? path.relative(root.path, skill.path) : skill.name);
+      if (!entry || skill.provenance.kind !== "source") continue;
+      const destination = entry.sourceUrl;
+      const details = `${name} - ${quoteTerminalPath(redactGitUrl(entry.skillPath))}${entry.ref && entry.ref !== "HEAD" ? ` @ ${quoteTerminalPath(redactGitUrl(entry.ref))}` : ""}`;
+      const group = groups.get(destination) ?? [];
+      group.push(details);
+      groups.set(destination, group);
+    }
+    const lines = [
+      `Installation: ${quoteTerminalPath(root.path)}`,
+      "Saved sources are unverified. Preparation contacts these sources and stages temporary files; installed skills change only after a later review.",
+      ...Array.from(groups, ([destination, members]) => [
+        quoteTerminalPath(redactGitUrl(destination).replace(/#.*$/, "#[redacted]")),
+        ...members.map((member) => `  ${member}`),
+      ]).flat(),
+    ];
     this.#confirm({
       title: "Review saved sources",
       approveLabel: "continue",
-      lines: [
-        `Installation: ${quoteTerminalPath(root.path)}`,
-        "These saved sources have not been verified. Review the URLs before continuing.",
-        ...snapshots.flatMap((skill) => skill.lockEntry && skill.provenance.kind === "source" ? [
-          `Skill: ${quoteTerminalPath(skill.path)}`,
-          `Source: ${quoteTerminalPath(skill.lockEntry.source)}`,
-          `URL: ${quoteTerminalPath(skill.lockEntry.sourceUrl)}`,
-          `Ref: ${quoteTerminalPath(skill.lockEntry.ref ?? "HEAD")}`,
-          `Skill path: ${quoteTerminalPath(skill.lockEntry.skillPath)}`,
-        ] : []),
-      ],
+      lines,
       returnMode: "browse",
       approve: async () => {
         if (this.#destroyed || revision !== this.#revision) throw new Error("Selected installation changed since source review.");
@@ -1322,12 +1290,13 @@ export class SkillsManagerTui {
   }
 
   async #reviewUpdateCheck(): Promise<void> {
-    const skills = this.#skills;
-    if (!skills.some((skill) => skill.lockEntry && skill.provenance.kind === "source")) {
-      await this.#runExclusive(() => this.#checkForUpdates(skills));
-      return;
-    }
-    this.#reviewSources(skills, async (root, snapshots) => {
+    const root = this.#approvedRoot();
+    const snapshots = this.#skills.map((skill) => ({
+      ...skill,
+      lockEntry: skill.lockEntry ? structuredClone(skill.lockEntry) : null,
+      provenance: { ...skill.provenance },
+    }));
+    await this.#runExclusive(async () => {
       for (const skill of snapshots) {
         if (!skill.lockEntry || skill.provenance.kind !== "source") continue;
         const current = await readInstalledSource(root.path, skill.path, skill.name, root);
@@ -1603,18 +1572,6 @@ export class SkillsManagerTui {
       : [];
   }
 
-  async #presentOnboardingIntents(intents: Pick<SkillsOnboardingResult, "reviewInitialize">): Promise<void> {
-    if (!intents.reviewInitialize || this.#selection.identity === null) return;
-    const revision = this.#revision;
-    await this.#runExclusive(() => this.#refreshGit());
-    if (this.#destroyed || revision !== this.#revision || this.#git?.kind !== "none") return;
-    this.#mode = "git";
-    const opened = await this.#prepareInit();
-    if (!opened && !this.#destroyed && revision === this.#revision) {
-      this.#mode = "browse";
-      this.#render();
-    }
-  }
 
   async #prepareInit(): Promise<boolean> {
     if (this.#git?.kind !== "none") return false;
@@ -1822,7 +1779,6 @@ export class SkillsManagerTui {
     this.#helpDialog = null;
     this.#helpLayout = null;
     this.#helpColumns = [];
-    this.#helpColumnRows = [];
     this.#helpFooter = null;
     this.#headerLabel = null;
     this.#headerShortcuts = null;
@@ -1859,12 +1815,12 @@ export class SkillsManagerTui {
       flexDirection: "row",
       overflow: "hidden",
     });
-    const headerText = escapeTerminalSingleLine(isGitMode
-      ? `Git · ${this.#git?.kind ?? "error"} · ${this.#visibleGitFiles.length}/${this.#gitFiles.length} files · status: ${this.#gitStatusFilter}`
-      : `Skills ${this.#visibleSkills.length} shown · scope: ${this.#scope === "source" ? "From a repo" : this.#scope === "local" ? "Local" : "All"} · state: ${this.#state}${this.#searchFilter === "" ? "" : ` · filter: ${this.#searchFilter} (Esc to clear)`}`);
+    const headerText = isGitMode
+      ? escapeTerminalSingleLine(`Git · ${this.#git?.kind ?? "error"} · ${this.#visibleGitFiles.length}/${this.#gitFiles.length} files · status: ${this.#gitStatusFilter}`)
+      : t`Skills ${this.#visibleSkills.length} shown · ${fg(colors.accent)(bold("s"))}cope: ${this.#scope === "source" ? "From a repo" : this.#scope === "local" ? "Local" : "All"} · ${fg(colors.accent)(bold("e"))}nabled: ${this.#state}${escapeTerminalSingleLine(this.#searchFilter === "" ? "" : ` · filter: ${this.#searchFilter} (Esc to clear)`)}`;
     const headerLabel = new MeasuredTextRenderable(this.renderer, {
       content: headerText,
-      fg: colors.accent,
+      fg: colors.text,
       attributes: TextAttributes.BOLD,
       height: 1,
       wrapMode: "none",
@@ -1974,7 +1930,7 @@ export class SkillsManagerTui {
       controls.add(entry);
     } else {
       controls.add(new TextRenderable(this.renderer, {
-        content: t`${fg(colors.accent)(bold("x"))} app updates · ${fg(colors.accent)(bold("o"))}pen · ${fg(colors.accent)(bold("space"))} enable/disable · ${fg(colors.accent)(bold("r"))}efresh · ${fg(colors.accent)(bold("u"))}pdate · u${fg(colors.accent)(bold("p"))}date all · ${fg(colors.accent)(bold("v"))} check · ${fg(colors.accent)(bold("a"))}dd · ${fg(colors.accent)(bold("d"))}elete · ${fg(colors.accent)(bold("g"))}it${this.options.selectSkillsDir ? " · " : ""}${this.options.selectSkillsDir ? fg(colors.accent)(bold("i")) : ""}${this.options.selectSkillsDir ? " directory" : ""} · ${fg(colors.accent)(bold("q"))}uit`,
+        content: t`${fg(colors.accent)(bold("x"))} app updates · ${fg(colors.accent)(bold("o"))}pen · ${fg(colors.accent)(bold("space"))} enable/disable · ${fg(colors.accent)(bold("r"))}efresh · ${fg(colors.accent)(bold("u"))}pdate · u${fg(colors.accent)(bold("p"))}date all · ${fg(colors.accent)(bold("v"))} check · ${fg(colors.accent)(bold("a"))}dd · ${fg(colors.accent)(bold("d"))}elete · ${fg(colors.accent)(bold("g"))}it · ${fg(colors.accent)(bold("q"))}uit`,
         fg: colors.muted,
         height: 1,
         minWidth: 0,
@@ -2009,7 +1965,7 @@ export class SkillsManagerTui {
   #skillListWidth(): number {
     let longest = 0;
     for (const skill of this.#visibleSkills) {
-      const label = escapeTerminalSingleLine(`${skill.enabled ? "[on]" : "[off]"} [${skill.provenance.kind === "source" ? "repo" : "local"}] ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`);
+      const label = escapeTerminalSingleLine(`${skill.orphaned ? "!" : skill.enabled ? "◉" : "○"} ${skill.provenance.kind === "source" ? "⎇" : " "} ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`);
       longest = Math.max(longest, label.length);
     }
     return Math.min(40, Math.max(24, longest + 3));
@@ -2024,6 +1980,8 @@ export class SkillsManagerTui {
       width: "100%",
       height: "100%",
       border: true,
+      title: "Skills",
+      titleColor: colors.muted,
       borderColor: colors.border,
       contentOptions: { backgroundColor: colors.panel, overflow: "hidden" },
       viewportOptions: { backgroundColor: colors.panel, overflow: "hidden" },
@@ -2041,7 +1999,7 @@ export class SkillsManagerTui {
         backgroundColor: selected ? colors.selection : colors.panel,
       });
       row.add(new TextRenderable(this.renderer, {
-        content: escapeTerminalSingleLine(`${skill.enabled ? "[on]" : "[off]"} [${skill.provenance.kind === "source" ? "repo" : "local"}] ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`),
+        content: escapeTerminalSingleLine(`${skill.orphaned ? "!" : skill.enabled ? "◉" : "○"} ${skill.provenance.kind === "source" ? "⎇" : " "} ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`),
         fg: skill.orphaned ? colors.warning : skill.enabled ? colors.enabled : colors.disabled,
         attributes: selected ? TextAttributes.BOLD : 0,
         onMouseDown: (event) => {
@@ -2065,6 +2023,8 @@ export class SkillsManagerTui {
   }
 
   #createFilePane(): BoxRenderable {
+    const filePaneWidth = this.#skillListWidth();
+    const filePaneTextWidth = filePaneWidth - 5;
     const panel = new BoxRenderable(this.renderer, {
       width: filePaneWidth,
       minWidth: 0,
@@ -2083,7 +2043,7 @@ export class SkillsManagerTui {
     panel.add(list);
     this.#skillFiles.forEach((file, index) => {
       const selected = index === this.#selectedFileIndex;
-      const label = `${"  ".repeat(file.depth)}${quoteTerminalPath(path.basename(file.path))}${file.kind === "directory" ? "/" : ""}`;
+      const label = `${"  ".repeat(file.depth)}${escapeTerminalSingleLine(path.basename(file.path))}${file.kind === "directory" ? "/" : ""}`;
       const row = new BoxRenderable(this.renderer, {
         id: `skill-file-${index}`,
         width: "100%",
@@ -2301,7 +2261,7 @@ export class SkillsManagerTui {
         ...(description ? [description.value] : []),
       ] : ["No skill selected."];
       const safeFacts = facts.map(escapeTerminalSingleLine);
-      const textWidth = Math.max(10, this.renderer.width - this.#skillListWidth() - filePaneWidth - 4);
+      const textWidth = Math.max(10, this.renderer.width - 2 * this.#skillListWidth() - 4);
       const rows = safeFacts.reduce((sum, fact) => sum + Math.max(1, Math.ceil(fact.length / textWidth)), 0);
       const header = new ScrollBoxRenderable(this.renderer, {
         height: Math.max(3, Math.min(rows + 2, this.renderer.height - 6)),
@@ -2333,26 +2293,22 @@ export class SkillsManagerTui {
       width: "100%",
       height: "100%",
       border: true,
-      title: selectedFile?.kind === "file" ? quoteTerminalPath(selectedFile.path) : undefined,
+      title: selectedFile?.kind === "file" ? escapeTerminalSingleLine(selectedFile.path) : undefined,
       titleColor: colors.accent,
-      contentOptions: { backgroundColor: colors.panel },
+      contentOptions: { backgroundColor: colors.panel, paddingRight: 1 },
       viewportOptions: { backgroundColor: colors.panel },
       scrollbarOptions: { trackOptions: { foregroundColor: colors.accent, backgroundColor: colors.panel } },
     });
     this.#detailContent = content;
-    if (this.#detailRendering === "markdown" && this.#treeSitterClient) {
-      content.add(new CodeRenderable(this.renderer, {
+    if (this.#detailRendering === "markdown") {
+      content.add(new MarkdownRenderable(this.renderer, {
         content: escapeTerminalMultiline(this.#selectedText || (selectedFile?.kind === "file" ? "Empty file." : "No SKILL.md body.")),
-        filetype: "markdown",
         conceal: true,
         syntaxStyle: markdownStyle,
-        treeSitterClient: this.#treeSitterClient,
+        treeSitterClient: this.#treeSitterClient ?? undefined,
         width: "100%",
-        height: Math.max(1, this.#selectedText.split("\n").length + 2),
-        wrapMode: "word",
+        tableOptions: { wrapMode: "word" },
       }));
-    } else if (this.#detailRendering === "markdown") {
-      content.add(new TextRenderable(this.renderer, { content: escapeTerminalMultiline(this.#selectedText || (selectedFile?.kind === "file" ? "Empty file." : "No SKILL.md body.")), fg: colors.text, wrapMode: "word" }));
     } else {
       content.add(new TextRenderable(this.renderer, { content: escapeTerminalMultiline(this.#selectedSource || (selectedFile?.kind === "file" ? "Empty file." : "No SKILL.md source.")), fg: colors.text, wrapMode: "word" }));
     }
@@ -2406,7 +2362,7 @@ export class SkillsManagerTui {
     const cli = updates.results.cli;
     const build = updates.build;
     const lines = [
-      ...(this.#preparingHandoff ? ["Preparing update session; q quits without starting it.", ""] : []),
+      ...(this.#preparingHandoff ? ["Preparing update; q quits without starting it.", ""] : []),
       `${this.#softwareUpdateSelection === "app" ? ">" : " "} skills-manager (app) · ${build.version === "unknown" ? "version unavailable" : `installed ${build.version}`}${build.commit ? ` · ${build.commit.slice(0, 7)}` : ""}${build.dirty ? " · modified" : ""}`,
       `  ${activity.app.checking || this.#softwareChecks.has("app") ? "Checking..." : this.#softwareCheckErrors.app ?? checkSummary(app, "app", activity.app.lastAttemptAt !== null)}`,
       `  Automatic checks: ${updates.preferences.app ? "on" : "off"}${app ? ` · Last checked: ${shortDate(app.checkedAt)}` : ""}`,
@@ -2423,8 +2379,8 @@ export class SkillsManagerTui {
       height: "auto", flexShrink: 0, fg: colors.text, wrapMode: "word",
     });
     const contentRows = text.rowsAt(width - 4);
-    const height = Math.max(5, Math.min(this.renderer.height - 2, contentRows + 4));
-    const overflow = contentRows > height - 4;
+    const height = Math.max(6, Math.min(this.renderer.height - 2, contentRows + 5));
+    const overflow = contentRows > height - 5;
     const dialog = new BoxRenderable(this.renderer, {
       width, height, flexDirection: "column", border: true, borderColor: colors.accent,
       title: "Application updates", titleColor: colors.accent, backgroundColor: colors.panel,
@@ -2440,6 +2396,7 @@ export class SkillsManagerTui {
     this.#softwareContent = content;
     content.add(text);
     dialog.add(content);
+    dialog.add(new TextRenderable(this.renderer, { content: "", height: 1, selectable: false }));
     dialog.add(new TextRenderable(this.renderer, {
       content: t` Up/down select · ${fg(colors.accent)(bold("Enter"))} automatic checks · ${fg(colors.accent)(bold("c"))} check now`,
       fg: colors.muted, height: 1, wrapMode: "none", selectable: false,
@@ -2458,7 +2415,7 @@ export class SkillsManagerTui {
   }
 
   #createHelpDialog(scrollTop = 0): BoxRenderable {
-    type Group = { title: string; rows: Array<[string, string]> };
+    type Group = { title: string; rows: Array<[string, string]>; legend?: boolean };
     const browseGroups: Group[][] = [
       [
         { title: "Browse files", rows: [
@@ -2489,8 +2446,13 @@ export class SkillsManagerTui {
           ["g", "Open Git"],
           ["x", "Application updates"],
           ["r", "Refresh"],
-          ...(this.options.selectSkillsDir ? [["i", "Select directory"] as [string, string]] : []),
           ["q", "Quit"],
+        ] },
+        { title: "List symbols", legend: true, rows: [
+          ["◉ / ○ / !", "Enabled / disabled / missing"],
+          ["⎇", "From a repository"],
+          ["(none)", "Local"],
+          ["*", "Upstream update available"],
         ] },
       ],
     ];
@@ -2518,8 +2480,6 @@ export class SkillsManagerTui {
       ],
     ];
     const groups = this.#helpReturnMode === "browse" ? browseGroups : gitGroups;
-    const groupRows = (column: Group[]) => column.reduce((total, group) => total + 1 + group.rows.length, 0) + Math.max(0, column.length - 1);
-    this.#helpColumnRows = groups.map(groupRows);
     const overlay = new BoxRenderable(this.renderer, {
       position: "absolute", width: "100%", height: "100%", flexDirection: "column",
       justifyContent: "center", alignItems: "center", paddingX: 1, paddingY: 1,
@@ -2553,13 +2513,19 @@ export class SkillsManagerTui {
       for (const [index, group] of column.entries()) {
         if (index) pane.add(new TextRenderable(this.renderer, { content: "", height: 1, selectable: false }));
         pane.add(new TextRenderable(this.renderer, {
-          content: t`${fg(colors.accent)(bold(group.title))}`, height: 1, selectable: false,
+          content: t`${bold(group.title)}`, height: 1, fg: colors.text, selectable: false,
         }));
         for (const [key, description] of group.rows) {
-          pane.add(new TextRenderable(this.renderer, {
-            content: t`${fg(colors.accent)(bold(key))}${" ".repeat(Math.max(1, 18 - key.length))}${description}`,
-            width: "100%", height: 1, fg: colors.text, wrapMode: "none", selectable: false,
+          const row = new BoxRenderable(this.renderer, { width: "100%", height: "auto", flexDirection: "row", flexShrink: 0 });
+          row.add(new TextRenderable(this.renderer, {
+            content: group.legend ? key : t`${fg(colors.accent)(bold(key))}`,
+            width: 18, height: 1, fg: colors.text, wrapMode: "none", selectable: false,
           }));
+          row.add(new MeasuredTextRenderable(this.renderer, {
+            content: description, flexGrow: 1, flexBasis: 0, height: "auto", flexShrink: 0,
+            fg: colors.text, wrapMode: "word", selectable: false,
+          }));
+          pane.add(row);
         }
       }
       layout.add(pane);
@@ -2585,8 +2551,13 @@ export class SkillsManagerTui {
     if (!dialog || !layout || !footer) return;
     const wide = this.renderer.width >= 96;
     const width = Math.max(10, Math.min(110, this.renderer.width - 2));
-    const gap = this.#helpColumnRows.filter((rows) => rows > 0).length > 1 ? 1 : 0;
-    const rows = wide ? Math.max(0, ...this.#helpColumnRows) : this.#helpColumnRows.reduce((sum, count) => sum + count, 0) + gap;
+    const columnWidth = Math.max(1, Math.floor((width - 4) / (wide ? 2 : 1)));
+    const columnRows = this.#helpColumns.map((pane) => pane.getChildren().reduce((sum, child) => {
+      const description = child instanceof BoxRenderable ? child.getChildren()[1] : undefined;
+      return sum + (description instanceof MeasuredTextRenderable ? description.rowsAt(columnWidth - 18) : 1);
+    }, 0));
+    const gap = columnRows.filter((count) => count > 0).length > 1 ? 1 : 0;
+    const rows = wide ? Math.max(0, ...columnRows) : columnRows.reduce((sum, count) => sum + count, 0) + gap;
     const height = Math.max(5, Math.min(this.renderer.height - 2, rows + 3));
     const overflow = rows > height - 3;
     dialog.width = width;

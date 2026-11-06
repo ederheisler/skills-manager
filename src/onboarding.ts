@@ -2,7 +2,6 @@ import { lstat, readlink, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { approveSkillsRoot, type ApprovedSkillsRoot } from "./actions/boundary.js";
-import { discoverGit } from "./actions/git.js";
 import { readSavedSetup, writeSavedSetup, type SavedSetup } from "./state/config.js";
 import { escapeTerminalSingleLine, quoteTerminalPath } from "./terminalText.js";
 
@@ -27,7 +26,6 @@ export type SkillsRootSelection = ApprovedSkillsRoot | { path: string; identity:
 
 export interface SkillsOnboardingResult {
   root: SkillsRootSelection;
-  reviewInitialize: boolean;
 }
 
 export interface InspectedSkillsDirectory {
@@ -142,21 +140,21 @@ async function chooseSkillsDirectory(io: OnboardingIO, options: DirectorySelecti
 
   for (;;) {
     if (selected === undefined) {
-      io.write("\nChoose a skills directory. Only the selected directory will be inspected.\n");
+      io.write("\nChoose a skills directory.\nOnly this directory is inspected. Existing skills are not changed.\n\n");
       if (options.currentSkillsDir !== undefined) io.write(`  0. Keep current: ${quoteTerminalPath(options.currentSkillsDir)}\n`);
-      candidates.forEach((candidate, index) => io.write(`  ${index + 1}. ${candidate.label}: ${quoteTerminalPath(candidate.path)}\n`));
-      io.write(`  ${candidates.length + 1}. Enter a custom or project-local path\n`);
+      io.write(`  1. ~/.agents/skills (${options.currentSkillsDir === undefined ? "default" : "default directory"})\n  2. Choose another directory\n\n`);
       const answer = await io.ask(options.currentSkillsDir === undefined ? "Choose [1] (q to cancel): " : "Choose [0] (q to cancel): ");
       if (answer === null) return null;
       const choice = answer.trim().toLowerCase();
       if (choice === "q" || choice === "quit" || (options.currentSkillsDir !== undefined && (choice === "" || choice === "0"))) return null;
-      const index = choice === "" ? 0 : Number(choice) - 1;
-      if (Number.isInteger(index) && index >= 0 && index < candidates.length) {
-        selected = candidates[index].path;
-      } else if (choice === String(candidates.length + 1)) {
-        const custom = await io.ask("Skills directory path (blank to cancel): ");
+      if (choice === "" || choice === "1") {
+        selected = candidates[0].path;
+      } else if (choice === "2") {
+        io.write("\nKnown directories (you can also enter another path):\n");
+        candidates.forEach((candidate) => io.write(`  ${candidate.label}: ${quoteTerminalPath(candidate.path)}\n`));
+        const custom = await io.ask("Skills directory path (blank to go back): ");
         if (custom === null) return null;
-        if (custom.length === 0) continue;
+        if (custom.trim().length === 0) continue;
         selected = custom;
       } else {
         io.write("Choose one of the listed numbers or q.\n");
@@ -193,12 +191,11 @@ async function chooseSkillsDirectory(io: OnboardingIO, options: DirectorySelecti
     }
 
     io.write(`Selected skills directory: ${quoteTerminalPath(inspection.skillsDir)}\n`);
-    if (inspection.missing) io.write("The directory does not exist yet; browsing will not create it. Create it yourself and reselect it before making changes.\n");
-    let reviewInitialize = false;
-    if (approval !== null && (await discoverGit(inspection.skillsDir)).kind === "none") {
-      const initialize = await io.ask("Review optional local Git initialization? [y/N] (q to cancel): ");
-      if (initialize === null || initialize.trim().toLowerCase() === "q") return null;
-      reviewInitialize = ["y", "yes"].includes(initialize.trim().toLowerCase());
+    if (inspection.missing) {
+      io.write(`The directory does not exist: ${quoteTerminalPath(inspection.skillsDir)}\nThe app does not create it. Create it before you make changes.\n`);
+      const answer = await io.ask("Continue in read-only mode? [Y/n]: ");
+      if (answer === null) return null;
+      if (!["", "y", "yes"].includes(answer.trim().toLowerCase())) continue;
     }
     if (approval !== null) {
       try {
@@ -213,11 +210,11 @@ async function chooseSkillsDirectory(io: OnboardingIO, options: DirectorySelecti
         io.write(`Cannot recheck the selected directory: ${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}\n`);
         continue;
       }
-      return { selectedPath: inspection.selectedPath, result: { root: approval, reviewInitialize } };
+      return { selectedPath: inspection.selectedPath, result: { root: approval } };
     }
     return {
       selectedPath: inspection.selectedPath,
-      result: { root: { path: inspection.skillsDir, identity: null }, reviewInitialize },
+      result: { root: { path: inspection.skillsDir, identity: null } },
     };
   }
 }
@@ -243,7 +240,7 @@ async function reusableSetup(saved: SavedSetup, explicitPath: string | undefined
       const explicit = await inspectSelectedSkillsDirectory(explicitPath);
       if (explicit.missing || explicit.skillsDir !== root.path) return null;
     }
-    return { root, reviewInitialize: false };
+    return { root };
   } catch {
     return null;
   }
@@ -268,6 +265,15 @@ export async function selectSavedSkillsDirectory(io: OnboardingIO, options: Dire
   if (options.currentSkillsDir === undefined && saved !== null) {
     const reused = await reusableSetup(saved, explicit);
     if (reused !== null) return reused;
+    if (explicit !== undefined && saved.identity !== null && await reusableSetup(saved, undefined) === null) {
+      let exists = false;
+      try { exists = !(await inspectSelectedSkillsDirectory(explicit)).missing; } catch { /* Selection reports the error. */ }
+      if (exists) {
+        io.write(`The saved directory changed. Select ${quoteTerminalPath(explicit)} again.\n`);
+        const answer = await io.ask("Use this directory? [y/N]: ");
+        if (!["y", "yes"].includes(answer?.trim().toLowerCase() ?? "")) return null;
+      }
+    }
   }
 
   const chosen = await chooseSkillsDirectory(io, options);

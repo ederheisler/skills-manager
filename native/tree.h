@@ -670,7 +670,7 @@ static int tree_fingerprint_at(int parentfd, const char *name, int staged, char 
     return 0;
 }
 
-static int tree_copy_at(int srcparent, const char *srcname, int dstparent,
+static inline int tree_copy_at(int srcparent, const char *srcname, int dstparent,
                         const char *dstname, char source_fingerprint[65])
 {
     struct tree_walk walk;
@@ -749,7 +749,7 @@ done:
 }
 
 /* Require both the previously verified object and its mount. */
-static int tree_remove_known_at(int parentfd, const char *name, const struct stat *expected,
+static inline int tree_remove_known_at(int parentfd, const char *name, const struct stat *expected,
                                 const struct tree_mount *boundary)
 {
     if (expected == NULL || boundary == NULL) { errno = EINVAL; return -1; }
@@ -757,7 +757,7 @@ static int tree_remove_known_at(int parentfd, const char *name, const struct sta
     return tree_remove_entry(parentfd, name, boundary, 0, expected);
 }
 
-static int tree_remove_at(int parentfd, const char *name)
+static inline int tree_remove_at(int parentfd, const char *name)
 {
     if (tree_component(name) < 0) return -1;
     return tree_remove_entry(parentfd, name, NULL, 0, NULL);

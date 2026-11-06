@@ -95,10 +95,7 @@ async function main(): Promise<void> {
   renderer.once("destroy", () => { rendererDestroyed = true; });
   let app: InstanceType<typeof SkillsManagerTui> | undefined;
   try {
-    app = new SkillsManagerTui(renderer, onboarding.root, {
-      initialOnboarding: { reviewInitialize: onboarding.reviewInitialize },
-      selectSkillsDir: (currentSkillsDir) => select({ currentSkillsDir }),
-    });
+    app = new SkillsManagerTui(renderer, onboarding.root);
     await app.start();
     const outcome = await app.waitForExit();
     if (outcome === null) {

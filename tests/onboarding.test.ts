@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, renameSync } from "node:fs";
-import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -60,20 +60,34 @@ describe("read-only directory selection", () => {
   });
 
   it("chooses a fresh home's default without creating any directory or state", async () => {
-    const session = scripted([""]);
+    const session = scripted(["", ""]);
     await expect(selectSkillsDirectory(session.io, { home })).resolves.toEqual({
-      root: { path: path.join(home, ".agents/skills"), identity: null }, reviewInitialize: false,
+      root: { path: path.join(home, ".agents/skills"), identity: null },
     });
     expect(await readdir(home)).toEqual([]);
-    expect(session.output.join("")).toContain("browsing will not create it");
+    expect(session.output.join("")).toContain("The app does not create it.");
+    expect(session.prompts).toEqual(["Choose [1] (q to cancel): ", "Continue in read-only mode? [Y/n]: "]);
+  });
+
+  it("opens an existing default directory after one choice without changing its contents", async () => {
+    const selected = path.join(home, ".agents/skills");
+    await mkdir(selected, { recursive: true });
+    await writeFile(path.join(selected, "sentinel"), "unchanged");
+    const session = scripted([""]);
+    await expect(selectSkillsDirectory(session.io, { home })).resolves.toEqual({
+      root: { path: selected, identity: expect.any(String) },
+    });
     expect(session.prompts).toEqual(["Choose [1] (q to cancel): "]);
+    expect(session.output.join("")).toContain("~/.agents/skills (default)");
+    expect(session.output.join("")).not.toContain("Claude Code");
+    expect(await readFile(path.join(selected, "sentinel"), "utf8")).toBe("unchanged");
   });
 
   it("selects a project-local directory only when the user enters it", async () => {
     await mkdir(path.join(home, "project", "skills"), { recursive: true });
-    const session = scripted(["6", "./project/skills", ""]);
+    const session = scripted(["2", "./project/skills"]);
     await expect(selectSkillsDirectory(session.io, { home, cwd: home })).resolves.toEqual({
-      root: { path: path.join(home, "project/skills"), identity: expect.any(String) }, reviewInitialize: false,
+      root: { path: path.join(home, "project/skills"), identity: expect.any(String) },
     });
     expect(await readdir(path.join(home, "project", "skills"))).toEqual([]);
   });
@@ -81,27 +95,23 @@ describe("read-only directory selection", () => {
   it("gives an explicit directory priority over the menu", async () => {
     const selected = path.join(home, "custom");
     await mkdir(selected);
-    const session = scripted([""]);
+    const session = scripted([]);
     await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected })).resolves.toEqual({
-      root: { path: selected, identity: expect.any(String) }, reviewInitialize: false,
+      root: { path: selected, identity: expect.any(String) },
     });
-    expect(session.prompts).toEqual([
-      "Review optional local Git initialization? [y/N] (q to cancel): ",
-    ]);
+    expect(session.prompts).toEqual([]);
     expect(await readdir(selected)).toEqual([]);
   });
 
-  it("offers only optional local initialization without changing files", async () => {
+  it("adopts a non-Git directory without setup prompts or changes", async () => {
     const selected = path.join(home, "skills");
     await mkdir(selected);
     await writeFile(path.join(selected, "sentinel"), "unchanged");
-    for (const [answer, reviewInitialize] of [["y", true], ["yes", true], ["", false], ["n", false]] as const) {
-      const session = scripted([answer]);
-      await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected })).resolves.toEqual({
-        root: { path: selected, identity: expect.any(String) }, reviewInitialize,
-      });
-      expect(session.prompts).toEqual(["Review optional local Git initialization? [y/N] (q to cancel): "]);
-    }
+    const session = scripted([]);
+    await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected })).resolves.toEqual({
+      root: { path: selected, identity: expect.any(String) },
+    });
+    expect(session.prompts).toEqual([]);
     expect(await readdir(selected)).toEqual(["sentinel"]);
     expect(await readFile(path.join(selected, "sentinel"), "utf8")).toBe("unchanged");
     expect(await readdir(home)).toEqual(["skills"]);
@@ -130,7 +140,7 @@ describe("read-only directory selection", () => {
 
     const session = scripted([]);
     await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected })).resolves.toEqual({
-      root: { path: selected, identity: expect.any(String) }, reviewInitialize: false,
+      root: { path: selected, identity: expect.any(String) },
     });
     expect(session.prompts).toEqual([]);
     expect(await readFile(path.join(repository, ".git", "index"))).toEqual(index);
@@ -150,7 +160,7 @@ describe("read-only directory selection", () => {
     expect(await discoverGit(selected)).toMatchObject({ kind: "unavailable" });
     const session = scripted([]);
     await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected })).resolves.toEqual({
-      root: { path: selected, identity: expect.any(String) }, reviewInitialize: false,
+      root: { path: selected, identity: expect.any(String) },
     });
     expect(session.prompts).toEqual([]);
     expect(await readdir(selected)).toEqual(["sentinel"]);
@@ -167,7 +177,7 @@ describe("read-only directory selection", () => {
     expect(await discoverGit(selected)).toMatchObject({ kind: "error" });
     const session = scripted([]);
     await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected })).resolves.toEqual({
-      root: { path: selected, identity: expect.any(String) }, reviewInitialize: false,
+      root: { path: selected, identity: expect.any(String) },
     });
     expect(session.prompts).toEqual([]);
     expect(await readFile(config, "utf8")).toBe("[invalid\n");
@@ -201,7 +211,7 @@ describe("read-only directory selection", () => {
       const entries = await readdir(path.join(repository, ".git"));
       const session = scripted([]);
       await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected })).resolves.toEqual({
-        root: { path: selected, identity: expect.any(String) }, reviewInitialize: false,
+        root: { path: selected, identity: expect.any(String) },
       });
       expect(session.prompts).toEqual([]);
       expect(connections).toBe(0);
@@ -216,12 +226,15 @@ describe("read-only directory selection", () => {
     }
   });
 
-  it.each(["q", null])("cancels an initialization review on %s without Git changes", async (answer) => {
-    const selected = path.join(home, "skills");
-    await mkdir(selected);
-    const session = scripted([answer]);
-    await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected })).resolves.toBeNull();
-    expect(await readdir(selected)).toEqual([]);
+  it("returns to selection when read-only browsing is declined", async () => {
+    const session = scripted(["", "n", "2", "", "q"]);
+    await expect(selectSkillsDirectory(session.io, { home })).resolves.toBeNull();
+    expect(session.prompts).toEqual([
+      "Choose [1] (q to cancel): ", "Continue in read-only mode? [Y/n]: ",
+      "Choose [1] (q to cancel): ", "Skills directory path (blank to go back): ",
+      "Choose [1] (q to cancel): ",
+    ]);
+    expect(await readdir(home)).toEqual([]);
   });
 
   it("quotes selected paths and link targets without emitting terminal controls", async () => {
@@ -233,7 +246,7 @@ describe("read-only directory selection", () => {
     const session = scripted(["y", ""]);
 
     const selected = await selectSkillsDirectory(session.io, { home, explicitSkillsDir: alias });
-    expect(selected).toEqual({ root: { path: target, identity: expect.any(String) }, reviewInitialize: false });
+    expect(selected).toEqual({ root: { path: target, identity: expect.any(String) } });
     const output = session.output.join("");
     expect(output).toContain(`Selected link: "${alias}" -> "`);
     expect(output).toContain(String.raw`target-\x1b]52;c;cHdu\x07\nline\t\u202e\\\"quote`);
@@ -243,7 +256,7 @@ describe("read-only directory selection", () => {
   });
 
   it("escapes untrusted candidate paths and current paths in the selection menu", async () => {
-    const session = scripted(["q"]);
+    const session = scripted(["2", "", "q"]);
     const unusualHome = `${home}/home-\x1b]0;title\x07`;
     const current = `${home}/current\n\u009b31m`;
     await expect(selectSkillsDirectory(session.io, { home: unusualHome, currentSkillsDir: current })).resolves.toBeNull();
@@ -273,7 +286,7 @@ describe("read-only directory selection", () => {
     await writeFile(path.join(target, "sentinel"), "unchanged");
     await symlink("target", alias);
 
-    const declined = scripted(["n", "q"]);
+    const declined = scripted(["", "q"]);
     await expect(selectSkillsDirectory(declined.io, { home, explicitSkillsDir: alias })).resolves.toBeNull();
     expect(declined.output.join("")).toContain(`Resolved target: "${target}"`);
     expect(await readlink(alias)).toBe("target");
@@ -281,12 +294,12 @@ describe("read-only directory selection", () => {
 
     const approved = scripted(["yes", ""]);
     const selected = await selectSkillsDirectory(approved.io, { home, explicitSkillsDir: alias });
-    expect(selected).toEqual({ root: { path: target, identity: expect.any(String) }, reviewInitialize: false });
+    expect(selected).toEqual({ root: { path: target, identity: expect.any(String) } });
     expect(await readlink(alias)).toBe("target");
     await unlink(alias);
     await mkdir(path.join(home, "other"));
     await symlink("other", alias);
-    expect(selected).toEqual({ root: { path: target, identity: expect.any(String) }, reviewInitialize: false });
+    expect(selected).toEqual({ root: { path: target, identity: expect.any(String) } });
     expect(await readFile(path.join(target, "sentinel"), "utf8")).toBe("unchanged");
   });
 
@@ -301,7 +314,7 @@ describe("read-only directory selection", () => {
     const session = scripted(["y", ""]);
 
     await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: supplied })).resolves.toEqual({
-      root: { path: path.join(home, "other", "skills"), identity: expect.any(String) }, reviewInitialize: false,
+      root: { path: path.join(home, "other", "skills"), identity: expect.any(String) },
     });
     expect(session.output.join("")).toContain(`Selected path: "${supplied}"`);
     expect(session.output.join("")).toContain(`Resolved target: "${path.join(home, "other", "skills")}"`);
@@ -319,9 +332,9 @@ describe("read-only directory selection", () => {
   it("previews an existing linked ancestor of a missing root without creating it", async () => {
     await mkdir(path.join(home, "target"));
     await symlink("target", path.join(home, "alias"));
-    const session = scripted(["y"]);
+    const session = scripted(["y", ""]);
     await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: path.join(home, "alias", "new") }))
-      .resolves.toEqual({ root: { path: path.join(home, "target", "new"), identity: null }, reviewInitialize: false });
+      .resolves.toEqual({ root: { path: path.join(home, "target", "new"), identity: null } });
     expect(await readdir(path.join(home, "target"))).toEqual([]);
     expect(await readlink(path.join(home, "alias"))).toBe("target");
   });
@@ -344,14 +357,14 @@ describe("read-only directory selection", () => {
     await mkdir(replacement);
     await writeFile(path.join(selected, "sentinel"), "original");
     await writeFile(path.join(replacement, "sentinel"), "replacement");
-    const session = scripted(["", "q"]);
-    const ask = session.io.ask;
-    session.io.ask = async (prompt) => {
-      if (prompt.startsWith("Review optional local Git")) {
-        await rename(selected, original);
-        await rename(replacement, selected);
+    const session = scripted(["q"]);
+    const write = session.io.write;
+    session.io.write = (message) => {
+      write(message);
+      if (message.startsWith("Selected skills directory:")) {
+        renameSync(selected, original);
+        renameSync(replacement, selected);
       }
-      return ask(prompt);
     };
 
     await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected })).resolves.toBeNull();
@@ -389,18 +402,18 @@ describe("read-only directory selection", () => {
 
   it("requires reselection if a missing directory is created during onboarding", async () => {
     const selected = path.join(home, "new");
-    const session = scripted([]);
+    const session = scripted([""]);
     const write = session.io.write;
     session.io.write = (message) => {
       write(message);
-      if (message.includes("does not exist yet")) mkdirSync(selected);
+      if (message.includes("The directory does not exist:")) mkdirSync(selected);
     };
     await expect(selectSkillsDirectory(session.io, { home, explicitSkillsDir: selected }))
-      .resolves.toEqual({ root: { path: selected, identity: null }, reviewInitialize: false });
-    expect(session.prompts).toEqual([]);
-    const reselection = scripted([""]);
+      .resolves.toEqual({ root: { path: selected, identity: null } });
+    expect(session.prompts).toEqual(["Continue in read-only mode? [Y/n]: "]);
+    const reselection = scripted([]);
     await expect(selectSkillsDirectory(reselection.io, { home, explicitSkillsDir: selected }))
-      .resolves.toEqual({ root: { path: selected, identity: expect.any(String) }, reviewInitialize: false });
+      .resolves.toEqual({ root: { path: selected, identity: expect.any(String) } });
     expect(await readdir(selected)).toEqual([]);
   });
 

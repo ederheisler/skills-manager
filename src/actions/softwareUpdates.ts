@@ -218,7 +218,6 @@ export class SoftwareUpdateService {
   #startPromise?: Promise<void>;
   #registryRefresh?: Promise<void>;
   #disposed = false;
-  #storageRevision = 0;
 
   constructor(skillsDir: string, options?: { onChange?: () => void }) {
     if (!skillsDir || !path.isAbsolute(skillsDir) || skillsDir.includes("\0")) throw new Error("An absolute skills directory is required.");
@@ -544,12 +543,6 @@ export class SoftwareUpdateService {
       catch { approvedRegistry = ""; }
     }
     const revision = ++this.#preferenceRevision[component];
-    const storageRevision = this.#storageRevision;
-    const reportInterruptedRevocation = () => {
-      if (!enabled && revision === this.#preferenceRevision[component] && storageRevision !== this.#storageRevision) {
-        this.#error("Automatic checks are off in this session, but saving that choice was interrupted; a future launch may retain the old consent.");
-      }
-    };
     if (!enabled) {
       this.#preferences[component] = false;
       if (this.#foreground[component] === 0) this.#invalidate(component);
@@ -573,35 +566,26 @@ export class SoftwareUpdateService {
           return;
         }
       }
-      if (revision !== this.#preferenceRevision[component] || storageRevision !== this.#storageRevision) {
-        reportInterruptedRevocation();
-        return;
-      }
+      if (revision !== this.#preferenceRevision[component]) return;
       const scope = this.#scope(component);
       if (enabled && !scope) {
         this.#error("Automatic CLI checks cannot be enabled until the npm registry is known.");
         return;
       }
       try {
-        const stillAllowed = () => revision === this.#preferenceRevision[component] && storageRevision === this.#storageRevision;
+        const stillAllowed = () => revision === this.#preferenceRevision[component];
         await this.#directory(this.#config, true, stillAllowed);
         // Never adopt or overwrite an unrelated or malformed existing file.
         await this.#readConsent(component);
         const consent: StoredConsent = { kind: "skills-manager-update-consent", version: 1, enabled, scope };
         await atomicPrivateJson(this.#consentFile(component), consent, stillAllowed);
-        if (revision !== this.#preferenceRevision[component] || storageRevision !== this.#storageRevision) {
-          reportInterruptedRevocation();
-          return;
-        }
+        if (revision !== this.#preferenceRevision[component]) return;
         const newlyEnabled = enabled && !this.#preferences[component];
         this.#preferences[component] = enabled;
         this.#notify();
         if (newlyEnabled && !this.#disposed) this.#launchAutomatic(component, true);
       } catch {
-        if (revision !== this.#preferenceRevision[component] || storageRevision !== this.#storageRevision) {
-          reportInterruptedRevocation();
-          return;
-        }
+        if (revision !== this.#preferenceRevision[component]) return;
         if (enabled) {
           this.#preferences[component] = false;
           this.#invalidate(component);
@@ -615,31 +599,6 @@ export class SoftwareUpdateService {
     this.#preferenceWrites.set(component, operation);
     try { await operation; }
     finally { if (this.#preferenceWrites.get(component) === operation) this.#preferenceWrites.delete(component); }
-  }
-
-  async setSkillsDirectory(skillsDir: string): Promise<void> {
-    if (this.#disposed) return;
-    if (!skillsDir || !path.isAbsolute(skillsDir) || skillsDir.includes("\0")) throw new Error("An absolute skills directory is required.");
-    this.#storageRevision++;
-    this.#knownRoots.add(path.resolve(skillsDir));
-    const flights = [...this.#flights.values()].map((flight) => flight.promise);
-    for (const component of COMPONENTS) this.#invalidate(component);
-    await Promise.allSettled([...flights, ...this.#background, ...this.#preferenceWrites.values(),
-      ...(this.#registryRefresh ? [this.#registryRefresh] : [])]);
-    if (this.#disposed) return;
-    try {
-      this.#knownPhysicalRoots.add(await canonicalCandidate(skillsDir));
-      await this.#assertSafePaths();
-      for (const component of COMPONENTS) if (this.#preferences[component]) this.#schedule(component, 0);
-    } catch {
-      for (const component of COMPONENTS) {
-        this.#preferences[component] = false;
-        this.#preferenceRevision[component]++;
-        this.#invalidate(component);
-      }
-      this.#error("Automatic update checks are off because update storage cannot be kept outside all selected skills directories.");
-    }
-    this.#notify();
   }
 
   async check(component: UpdateComponent, expectedRegistry?: string): Promise<void> {

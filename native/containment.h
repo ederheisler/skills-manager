@@ -273,7 +273,7 @@ static int skills_apply_write_boundary_with_remote(int root_fd, const char *root
 #error "Write confinement is supported only on Linux and macOS"
 #endif
 
-static int skills_apply_write_boundary(int root_fd, const char *root_path,
+static inline int skills_apply_write_boundary(int root_fd, const char *root_path,
                                        int common_fd, const char *common_path)
 {
     return skills_apply_write_boundary_with_remote(root_fd, root_path, common_fd, common_path, -1, NULL);

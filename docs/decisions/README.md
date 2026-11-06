@@ -5,6 +5,7 @@ These records explain accepted decisions and their reasons. For current behavior
 - [Product and portability](2026-11-03-open-source-portability.md#decision).
 - [Implementation choices and historical tagged distribution](2026-11-03-open-source-portability.md#implementation-choices).
 - [Latest main installation](2026-11-03-open-source-portability.md#latest-main-installation).
+- [Persistent installation](2026-11-03-open-source-portability.md#persistent-installation).
 - [Concurrency limits](2026-11-03-open-source-portability.md#concurrency-limits).
 - [Hosted history replacement](2026-11-03-open-source-portability.md#hosted-history-replacement).
 - [macOS arm64 verification](2026-11-03-open-source-portability.md#macos-arm64-verification).

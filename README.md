@@ -15,17 +15,21 @@ Once built, local browsing needs Node, a terminal, and a supported operating sys
 
 ## Quick start
 
-Run the latest code on `main`:
+Start the app once from GitHub:
 
 ```sh
-npx --yes --prefer-online github:ederheisler/skills-manager
+npx --yes github:ederheisler/skills-manager
 ```
 
-This command downloads the project and runs its build script locally. The `--yes` flag skips npm's installation prompt, not the app's confirmations. To select a directory directly, append `--skills-dir /absolute/path/to/skills`. The path is the skills directory itself, not its parent.
+In browse mode, press `x` to open Application updates. Press `r` and approve the persistent installation. The app uses the configured npm global prefix and restarts after installation.
 
-Run the command again to request the latest app code on `main`. It does not guarantee a fresh Vercel `skills` CLI.
+For later launches, run:
 
-Do not run `npx skills-manager`. That unscoped npm name belongs to another project. This project is not published to the npm registry.
+```sh
+skills-manager
+```
+
+Installation downloads the project and builds it locally. To select a directory directly, run `skills-manager --skills-dir /absolute/path/to/skills`. The path is the skills directory itself, not its parent. Do not install the unscoped npm package `skills-manager`. It belongs to another project.
 
 ## Application and CLI updates
 
@@ -35,9 +39,9 @@ The app check contacts `api.github.com`. The CLI check contacts the configured n
 
 The app check compares the running build's full commit SHA with GitHub `main`. The CLI check compares its resolved version with the registry's `latest` tag. A different commit is not necessarily newer, and `latest` does not guarantee compatibility. An unknown identity or unavailable check is not a match.
 
-Update and restart starts a new app from `main` and refreshes the CLI. A CLI-only refresh keeps a known, clean, reproducible full app commit and selects the latest CLI. The menu offers both update actions without requiring an available version or a successful check. If that commit is unknown, dirty, or not reproducible, restart the app manually or explicitly switch to `main`. A source checkout, tagged install, or unknown channel requires that switch for a combined update.
+Update and restart installs the app from `main` and refreshes the CLI. A CLI-only refresh keeps a verified, clean app commit and selects the latest CLI. Both actions update the persistent npm-global installation and restart the app. An update from a checkout or temporary installation requires explicit approval before global installation. The app does not overwrite the checkout.
 
-The helper builds in a private project and cache. Repository and dependency scripts run with your normal permissions. Approve only trusted code. After shutdown, a failed handoff cannot restore the old screen. To start the app again, run the [Quick start](#quick-start) command with the current `--skills-dir`. See the [security policy](SECURITY.md#application-and-cli-updates) for workspace, credential, and cleanup details.
+npm runs repository and dependency scripts with your normal permissions. Approve only trusted code. The update does not use `sudo`. After a failed update of an existing persistent installation, start the app again with `skills-manager --skills-dir /absolute/path/to/skills`. See the [security policy](SECURITY.md#application-and-cli-updates) for details.
 
 ## Development
 
@@ -56,15 +60,17 @@ Run `npm test` before opening a pull request. Merged version bumps are released 
 
 ## Using the app safely
 
-Onboarding lets you choose an existing skills directory. Completed setup is saved in `$XDG_CONFIG_HOME/skills-manager/config.json` when `XDG_CONFIG_HOME` is absolute. Otherwise, the path is `~/.config/skills-manager/config.json`. Later launches reuse setup for an unchanged root. A new or changed root requires setup again.
+Onboarding offers `~/.agents/skills` as the default or lets you choose another directory. Press Enter to select the default. If the directory is missing, onboarding offers read-only mode and does not create it. A linked directory requires approval of its resolved target. Completed setup is saved in `$XDG_CONFIG_HOME/skills-manager/config.json` when `XDG_CONFIG_HOME` is absolute. Otherwise, the path is `~/.config/skills-manager/config.json`. Later launches reuse setup for an unchanged root. A new or changed root requires setup again.
 
-Onboarding does not merge or move skills, create Git state, or rewrite installer locks. If a repository already contains the selected directory, onboarding skips Git setup and opens the browse view. File changes and local commits remain scoped to the selected skills directory. The app never initializes Git, commits, changes a remote, or pushes automatically. Review dialogs default to cancellation.
+Onboarding does not merge or move skills, create Git state, rewrite installer locks, or ask about Git. To initialize Git, press `i` in Git view and approve the confirmation. File changes and local commits remain scoped to the selected skills directory. The app never initializes Git, commits, changes a remote, or pushes automatically. Review dialogs default to cancellation.
 
-Push is an explicit action in Git view. It sends branch history for the whole repository, including commits outside the selected skills directory. Review the repository, destination, and history before approving a push. Push does not preserve uncommitted files.
+Push is an explicit action in Git view. It sends branch history for the whole repository, including commits outside the selected skills directory. Review the repository, destination, and history before approving a push. Push does not include uncommitted changes.
 
 Existing Vercel installer records provide source tracking and update checks without skills-manager receipts. Press `?` for help in the current view. Git controls and repository status appear in Git view, not the browse footer. Shortcuts use Option on macOS and Alt on Linux.
 
 The browse filter offers All, From a repo, and Local. Local includes skills without a recorded remote association. It does not mean that you authored them.
+
+In the skill list, ◉ means enabled, ○ means disabled, and ! means missing. ⎇ marks a repository source. No source marker means local. No special font is required.
 
 Local browsing works without network access. Automatic update checks require the separate opt-ins described above. Search, remote preparation, fetch, pull, and push require explicit actions. Remote preparation runs behind an operating-system boundary, not a general-purpose hostile-code sandbox. Do not edit or move files, or run Git commands, concurrently with an app action.
 

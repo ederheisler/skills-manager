@@ -20,7 +20,7 @@ The app reads skills as untrusted data. It must not execute frontmatter or infer
 
 App locks coordinate app instances, not external editors, filesystem moves, or Git commands. Do not run those operations concurrently with an app action. Stale checks are not atomic pathname guards. Processes running as your user can replace the app, alter saved state, or move already-open files; the app does not claim protection against those actions.
 
-Saved source receipts and Vercel installer lock entries are continuity metadata, not publisher authentication or proof of prior approval or unchanged local content. An untrusted restore over the same installation can forge those associations. Review the source destination before each remote check or update, and review staged content separately before import.
+Saved source receipts and Vercel installer lock entries are continuity metadata, not publisher authentication or proof of prior approval or unchanged local content. An untrusted restore over the same installation can forge those associations. Review sources before updates and staged content before import.
 
 Ambiguous recovery state is retained for inspection. The app must not delete foreign locks or overwrite foreign files merely to make recovery succeed.
 
@@ -28,7 +28,7 @@ Ambiguous recovery state is retained for inspection. The app must not delete for
 
 Linux mutations require Landlock ABI 5 or later and mount-aware `statx`. If the required boundary is unavailable, the app refuses the mutation rather than allowing unrestricted writes.
 
-The app inspects only the selected installation. Project-local directories require explicit selection. Onboarding previews a linked directory's resolved target. Completed setup is reused for an unchanged root, but every launch freshly validates its physical identity. A new or changed root requires setup again. Adoption does not copy, merge, move, or relink skills, create Git state, or rewrite an installer's lock. A missing directory does not authorize creating it automatically.
+The app inspects only the selected installation. Onboarding offers `~/.agents/skills` by default or another directory by explicit selection. A linked directory requires approval of its resolved target. If the directory is missing, onboarding offers read-only mode and does not create it. Completed setup is reused for an unchanged root, but every launch freshly validates its physical identity. A new or changed root requires setup again. Adoption does not copy, merge, move, or relink skills, create Git state, or rewrite an installer's lock.
 
 Manual and tool-installed skills use the same local scan. Invalid metadata and broken links remain visible. Separate installations remain separate, even when skill names match. Active entries live at `<skills-dir>/<name>`. Disabled entries live at `<skills-dir>/.disabled_skills/<name>`. The app does not automatically migrate an existing sibling `.disabled_skills` directory.
 
@@ -42,7 +42,7 @@ The app refuses unsafe paths, collisions, stale previews, and operations for whi
 
 Optional Git actions require Git 2.48 or later. Commits and pulls require Git's `files` ref backend and refuse `reftable` repositories.
 
-Local skills work without Git. An existing repository at or above the selected directory needs no Git setup during onboarding. Startup opens the browse view. The app never automatically initializes Git, commits, changes a remote, or pushes.
+Local skills work without Git. Onboarding does not ask about Git. To initialize Git, press `i` in Git view and approve the confirmation. The app never automatically initializes Git, commits, changes a remote, or pushes.
 
 Skill file writes and local commits are limited to the selected skills directory. Commit previews list the exact skill paths. Unrelated staged and unstaged files and transient recovery data stay outside the commit. The app does not add exclusions or untrack files.
 
@@ -68,36 +68,26 @@ The app saves completed directory setup separately in `$XDG_CONFIG_HOME/skills-m
 
 The app compares the running build's full commit with `main`. Different commits do not establish which build is newer. The CLI check compares the resolved CLI version with the registry's `latest` tag. The tag is not a compatibility guarantee or a tested-version gate. An unknown build or CLI version, an offline request, or an invalid response is not a match.
 
-An approved update shuts down the app and replaces its process with a helper in a private temporary workspace. The helper uses a separate private npm project and cache outside the running package, shared caches, checkout, and skills roots. It selects the CLI from the approved registry through the root npm override `{"skills":"$skills"}`.
+An approved update packs the selected GitHub revision in owned staging, installs the package into the configured npm global prefix, and restarts the installed app. A combined update selects `main`, which can change after a check. A CLI-only refresh keeps a verified, clean running app commit and refreshes the bundled CLI dependency. An update from a source checkout or temporary installation requires explicit approval before global installation. The app does not overwrite the checkout.
 
-The combined update fetches `main`, which can change after the check. A CLI-only refresh rebuilds a known, clean, reproducible full app commit. An unknown, dirty, or nonreproducible build requires manual recovery or an explicit switch to `main`. A source checkout, tagged install, or unknown channel also requires that explicit switch for an in-app app update.
+npm downloads code and runs repository and dependency lifecycle scripts with the normal permissions of your user. These scripts can access your files, credentials, and network. Approve only trusted code.
 
-The workspace is not a sandbox. npm runs repository and dependency lifecycle scripts with the normal permissions of your user. The helper preserves normal `HOME` and user configuration. Scripts can access your files, credentials, and network, and can contact hosts beyond those used for checks.
+The update does not use `sudo` or `--force`, or rewrite npm configuration or `PATH`. It refuses conflicting existing packages or executables. It does not directly change skill documents, user lockfiles, or the global `skills` CLI. Unrestricted scripts can still alter anything available to your account.
 
-The helper does not directly install into your checkout, running package, shared npm cache, or skills roots. It does not directly overwrite installed skill documents, user lockfiles, or the global `skills` CLI. Unrestricted scripts can still alter anything available to your account.
-
-The helper prints the workspace path before installation and keeps the workspace while the new app runs. If the new app exits with status zero, the helper attempts identity-checked cleanup. If the new app exits abnormally or is interrupted, the helper keeps and reports the workspace because descendant processes can still run. A hard kill or crash can also leave the workspace behind. Before removing a leftover workspace, make sure that no process still uses it.
-
-The new app freshly validates the selected physical skills directory and reuses completed setup for an unchanged root. A new or changed root requires setup again. The selected directory is passed as a separate `--skills-dir` argument, not through a shell.
-
-After shutdown, a failed handoff cannot restore the old app screen. The app reports the failure and a manual recovery command. You can also run this command with your current absolute skills directory:
-
-```sh
-npx --yes --prefer-online github:ederheisler/skills-manager --skills-dir '/absolute/path/to/skills'
-```
-
-Replace the example path with your directory and quote it for your shell. The command recovers the app from `main`, but it does not guarantee a fresh CLI.
+The restarted app validates the selected physical skills directory and reuses completed setup for an unchanged root. A new or changed root requires setup again. After a failed update, start the installed app again with `skills-manager --skills-dir '/absolute/path/to/skills'`. Replace the example path with your directory and quote it for your shell.
 
 ## Remote actions and privacy
 
-The app uses Vercel's [`skills`](https://www.npmjs.com/package/skills) dependency for explicit remote actions. The dependency requests `latest`, and tests used version 1.7.6. In a source checkout, `npm ci` installs the resolution recorded in the lockfile. The recommended GitHub `npx` command requests the app from `main`, but npm's dependency resolution and cache can retain an earlier `skills` version. A newer `skills` version is not necessarily installed on every launch. The app validates the installed package's declared executable path before use. It does not require a global `skills` installation.
+The app uses Vercel's [`skills`](https://www.npmjs.com/package/skills) dependency for explicit remote actions. The dependency requests `latest`, and tests used version 1.7.6. In a source checkout, `npm ci` installs the resolution recorded in the lockfile.
 
-Running the GitHub `npx` command can contact the network before the app starts. Once the app runs, automatic app and CLI checks require the separate opt-ins described above. Search, remote preparation, skill update checks, fetch, pull, and push require explicit user actions. Disabling network access does not disable local browsing.
+The installed CLI version remains in use until an explicit refresh. Launching the app does not install a newer version. The app validates the installed package's declared executable path before use. It does not require a global `skills` installation.
+
+Installing the app can contact the network before the app starts. Once the app runs, automatic app and CLI checks require the separate opt-ins described above. Search, remote preparation, skill update checks, fetch, pull, and push require explicit user actions. Disabling network access does not disable local browsing.
 
 Remote preparation runs in a disposable workspace behind an operating-system boundary. macOS uses `sandbox-exec` and the Apple-signed Git in the standard system location for the active Xcode or Command Line Tools installation. The confined installer does not use a custom Homebrew Git or host credential helpers. Linux requires a working Bubblewrap installation and the required kernel permissions. A missing or unusable boundary makes the remote action unavailable. Environment variables alone are not a sandbox. If workspace cleanup cannot be safely confined, the app reports the temporary path and retains it for manual cleanup.
 
 The boundary confines the upstream process's filesystem access. It is not a general-purpose hostile-code sandbox. Approved remote actions can use the network, including loopback. Skill documents are parsed as data, not executed.
 
-The app reviews staged results before importing them into the selected installation. It never temporarily enables live disabled skills to update them. External installer locks remain read-only. Updates and checks using saved sources require a separate review of the source URL and ref before contact. Updates also require staged-content approval before import. Unknown sources require explicit selection.
+The app reviews staged results before importing them into the selected installation. It never temporarily enables live disabled skills to update them. External installer locks remain read-only. Updates using saved sources require separate review of the source URL and ref before contact, then staged-content approval before import. A version check for a known GitHub source is immediate and read-only. Unknown sources require explicit selection.
 
 A matching receipt associates a source with the same physical installation. Valid existing Vercel installer lock entries can also provide source tracking without a manager receipt. A saved baseline is not proof of current local content. Version checks compare upstream with the recorded baseline. Copied or recreated installations can require source re-review. Upstream telemetry is disabled with `DISABLE_TELEMETRY=1` and `DO_NOT_TRACK=1`. Upstream documents that this also disables its security-audit requests. Remote actions still contact their requested services and source hosts. Authentication or network failures are visible, not empty successful results.

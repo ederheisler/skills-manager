@@ -472,18 +472,4 @@ describe("software update consent and checks", () => {
     expect(JSON.parse(await readFile(path.join(saved, "app.json"), "utf8")).enabled).toBe(true);
     await unlink(appDirectory);
   }, 15_000);
-
-  it("revalidates storage against switched and previously selected skills roots", async () => {
-    const { skills, base } = await fixture();
-    const updates = service(skills);
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("4".repeat(40), { status: 200 })));
-    await updates.start();
-    await updates.setAutomatic("app", true);
-    await updates.setSkillsDirectory(base);
-    expect(updates.preferences.app).toBe(false);
-    expect(updates.errors.length).toBeGreaterThan(0);
-    await updates.setSkillsDirectory(skills);
-    await updates.setAutomatic("app", true);
-    expect(updates.preferences.app).toBe(false);
-  }, 15_000);
 });

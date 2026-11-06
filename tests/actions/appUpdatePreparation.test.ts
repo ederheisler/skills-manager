@@ -1,8 +1,10 @@
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { prepareUpdateHandoff, resolveUpdateRegistry, type PreparedUpdateHandoff } from "../../src/actions/appUpdateHandoff.js";
+import { prepareUpdateHandoff, resolveGlobalUpdate, resolveUpdateRegistry, type PreparedUpdateHandoff } from "../../src/actions/appUpdateHandoff.js";
 import type { BuildIdentity } from "../../src/state/appBuild.js";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -11,7 +13,33 @@ const originalEnv = { ...process.env };
 let base: string;
 let skills: string;
 let marker: string;
+let prefix: string;
+let installation: { prefix: string; mode: "install" | "update" };
 const prepared: PreparedUpdateHandoff[] = [];
+
+async function existingGlobalApp(): Promise<{ app: string; bin: string }> {
+  const app = path.join(prefix, "lib", "node_modules", "skills-manager");
+  const bin = path.join(prefix, "bin", "skills-manager");
+  await mkdir(path.join(app, "dist", "actions"), { recursive: true });
+  await mkdir(path.dirname(bin), { recursive: true });
+  await writeFile(path.join(app, "package.json"), JSON.stringify({
+    name: "skills-manager", type: "module", bin: { "skills-manager": "./dist/cli.js" },
+  }));
+  await writeFile(path.join(app, "dist", "cli.js"), "// installed app\n");
+  await symlink("../lib/node_modules/skills-manager/dist/cli.js", bin);
+  const repository = fileURLToPath(new URL("../../", import.meta.url));
+  for (const [source, destination] of [
+    ["src/actions/appUpdateHandoff.ts", "dist/actions/appUpdateHandoff.js"],
+    ["src/actions/appUpdateWorker.ts", "dist/actions/appUpdateWorker.js"],
+    ["src/terminalText.ts", "dist/terminalText.js"],
+  ]) {
+    const output = ts.transpileModule(await readFile(path.join(repository, source), "utf8"), {
+      fileName: source, compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    await writeFile(path.join(app, destination), output);
+  }
+  return { app, bin };
+}
 
 beforeEach(async () => {
   base = await realpath(await mkdtemp(path.join(tmpdir(), "skills-update-preparation-")));
@@ -19,24 +47,32 @@ beforeEach(async () => {
   const bin = path.join(base, "bin");
   const cache = path.join(base, "existing-npm-cache");
   marker = path.join(base, "unexpected-install");
-  await Promise.all([mkdir(skills), mkdir(bin), mkdir(cache)]);
+  prefix = path.join(base, "global-prefix");
+  installation = { prefix, mode: "install" };
+  await Promise.all([mkdir(skills), mkdir(bin), mkdir(cache), mkdir(prefix)]);
   const npm = path.join(bin, "npm");
   await writeFile(npm, `#!/bin/sh
 if [ "$TEST_UPDATE_HANG" = 1 ]; then /bin/sleep 60; fi
 case "$1:$2:$3" in
   config:get:registry) printf '%s\\n' "$TEST_UPDATE_REGISTRY" ;;
+  config:get:prefix)
+    [ "$4" = "--cache" ] && [ "$5" = "/dev/null" ] && [ "$6" = "--logs-dir" ] \
+      && [ "$7" = "/dev/null" ] && [ "$8" = "--global" ] || exit 1
+    printf '%s\\n' "$TEST_UPDATE_PREFIX" ;;
   config:list:--long) printf '%s\\n' '; "env" config from environment' "; cache = $TEST_UPDATE_CACHE_JSON ; overridden by cli" ;;
   *) printf 'unexpected install\\n' > "$TEST_UPDATE_MARKER"; exit 1 ;;
 esac
 `);
   await chmod(npm, 0o700);
   for (const name of Object.keys(process.env)) {
-    if (/^npm_config_registry$/i.test(name)) delete process.env[name];
+    if (/^npm_config_(?:registry|prefix)$/i.test(name)) delete process.env[name];
   }
   process.env.PATH = `${bin}${path.delimiter}${originalEnv.PATH ?? ""}`;
   process.env.TEST_UPDATE_REGISTRY = "https://user:secret@registry.example.invalid/custom/";
   process.env.TEST_UPDATE_CACHE_JSON = JSON.stringify(cache);
   process.env.TEST_UPDATE_MARKER = marker;
+  process.env.TEST_UPDATE_PREFIX = prefix;
+  process.env.npm_config_prefix = prefix;
 });
 
 afterEach(async () => {
@@ -49,6 +85,120 @@ afterEach(async () => {
 });
 
 describe("software update handoff preparation", () => {
+  it("resolves the configured global prefix without installing and canonicalizes an alias", async () => {
+    const alias = path.join(base, "prefix-link");
+    await symlink(prefix, alias, "dir");
+    process.env.TEST_UPDATE_PREFIX = alias;
+    await expect(resolveGlobalUpdate()).resolves.toEqual({ prefix, mode: "install" });
+    expect(await readdir(prefix)).toEqual([]);
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("preserves the npm entry name for a multicall executable during queries and handoff", async () => {
+    const npm = path.join(base, "bin", "npm");
+    const multicall = path.join(base, "bin", "multicall");
+    const source = await readFile(npm, "utf8");
+    await rename(npm, multicall);
+    await writeFile(multicall, source.replace("#!/bin/sh\n", '#!/bin/sh\ncase "$0" in */npm) ;; *) exit 1 ;; esac\n'));
+    await symlink("multicall", npm);
+    const reviewed = await resolveGlobalUpdate();
+    expect(reviewed).toEqual({ prefix, mode: "install" });
+    expect(await resolveUpdateRegistry()).toBe(process.env.TEST_UPDATE_REGISTRY);
+    const item = await prepareUpdateHandoff({
+      target: "all", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY!, installation: reviewed,
+    });
+    prepared.push(item);
+    expect(item.args[1]).toBe(npm);
+    expect(item.args[1]).not.toBe(await realpath(npm));
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("recognizes an existing global app and records package and bin identities", async () => {
+    const { app, bin } = await existingGlobalApp();
+    // Import the module from this installed package so its import.meta.url identifies the running app.
+    const updater = await import(pathToFileURL(path.join(app, "dist", "actions", "appUpdateHandoff.js")).href) as {
+      resolveGlobalUpdate: typeof resolveGlobalUpdate; prepareUpdateHandoff: typeof prepareUpdateHandoff;
+    };
+    const reviewed = await updater.resolveGlobalUpdate();
+    expect(reviewed).toEqual({ prefix, mode: "update" });
+    const item = await updater.prepareUpdateHandoff({
+      target: "cli", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY!, installation: reviewed,
+    });
+    prepared.push(item);
+    const appIdentity = await lstat(app, { bigint: true });
+    const binIdentity = await lstat(bin, { bigint: true });
+    expect(item.args).toEqual([item.workspace, await realpath(path.join(base, "bin", "npm")), "cli", commit, skills, prefix, "update"]);
+    expect(item.env.SKILLS_MANAGER_UPDATE_PACKAGE_ID).toBe(`${appIdentity.dev}:${appIdentity.ino}`);
+    expect(item.env.SKILLS_MANAGER_UPDATE_BIN_ID).toBe(`${binIdentity.dev}:${binIdentity.ino}`);
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses a different global app when launched from a checkout", async () => {
+    const { app, bin } = await existingGlobalApp();
+    await expect(resolveGlobalUpdate()).rejects.toThrow();
+    expect(JSON.parse(await readFile(path.join(app, "package.json"), "utf8")).name).toBe("skills-manager");
+    expect((await lstat(bin)).isSymbolicLink()).toBe(true);
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a changed npm prefix after review without creating a workspace", async () => {
+    const reviewed = await resolveGlobalUpdate();
+    const otherPrefix = path.join(base, "other-prefix");
+    const temp = path.join(base, "reviewed-temp");
+    await Promise.all([mkdir(otherPrefix), mkdir(temp)]);
+    process.env.TMPDIR = temp;
+    process.env.TEST_UPDATE_PREFIX = otherPrefix;
+    await expect(prepareUpdateHandoff({
+      target: "all", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY!, installation: reviewed,
+    })).rejects.toThrow();
+    expect(await readdir(temp)).toEqual([]);
+    expect(await readdir(prefix)).toEqual([]);
+    expect(await readdir(otherPrefix)).toEqual([]);
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects an unrelated bin that appears after approval without changing it", async () => {
+    const reviewed = await resolveGlobalUpdate();
+    const temp = path.join(base, "reviewed-temp");
+    const bin = path.join(prefix, "bin", "skills-manager");
+    await Promise.all([mkdir(temp), mkdir(path.dirname(bin), { recursive: true })]);
+    await writeFile(bin, "unrelated bin");
+    process.env.TMPDIR = temp;
+    await expect(prepareUpdateHandoff({
+      target: "all", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY!, installation: reviewed,
+    })).rejects.toThrow();
+    expect(await readFile(bin, "utf8")).toBe("unrelated bin");
+    expect(await readdir(temp)).toEqual([]);
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["package", "bin"] as const)("refuses a preexisting unrelated global %s without writing to it", async (entry) => {
+    const target = entry === "package"
+      ? path.join(prefix, "lib", "node_modules", "skills-manager")
+      : path.join(prefix, "bin", "skills-manager");
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "unrelated data");
+    await expect(resolveGlobalUpdate()).rejects.toThrow();
+    expect(await readFile(target, "utf8")).toBe("unrelated data");
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["package", "bin"] as const)("refuses a global %s symlink into a checkout without modifying its target", async (entry) => {
+    const checkout = path.join(base, "checkout");
+    const target = entry === "package"
+      ? path.join(prefix, "lib", "node_modules", "skills-manager")
+      : path.join(prefix, "bin", "skills-manager");
+    await mkdir(path.join(checkout, ".git"), { recursive: true });
+    await writeFile(path.join(checkout, "sentinel"), "checkout unchanged");
+    await mkdir(path.dirname(target), { recursive: true });
+    await symlink(entry === "package" ? checkout : path.join(checkout, "sentinel"), target);
+    await expect(resolveGlobalUpdate()).rejects.toThrow();
+    expect((await lstat(target)).isSymbolicLink()).toBe(true);
+    expect(await readFile(path.join(checkout, "sentinel"), "utf8")).toBe("checkout unchanged");
+    expect(await readdir(checkout)).toEqual([".git", "sentinel"]);
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("resolves the real configured registry without discarding credentials needed by npm", async () => {
     await expect(resolveUpdateRegistry()).resolves.toBe("https://user:secret@registry.example.invalid/custom/");
     await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
@@ -96,6 +246,7 @@ describe("software update handoff preparation", () => {
     process.env.npm_config_userconfig = path.join(base, "no-user-npmrc");
     process.env.npm_config_globalconfig = path.join(base, "no-global-npmrc");
     await expect(resolveUpdateRegistry()).resolves.toBe("https://registry.example.invalid/private/");
+    await expect(resolveGlobalUpdate()).resolves.toEqual({ prefix, mode: "install" });
     expect(await readdir(home)).toEqual([]);
     expect(await readdir(temp)).toEqual([]);
     expect(await readdir(skills)).toEqual([]);
@@ -120,8 +271,9 @@ describe("software update handoff preparation", () => {
     process.env.NODE_DISABLE_COMPILE_CACHE = "0";
     process.env.npm_config_userconfig = userConfig;
     process.env.npm_config_globalconfig = path.join(base, "no-global-npmrc");
+    process.env.npm_config_prefix = prefix;
     const item = await prepareUpdateHandoff({
-      target: "all", skillsDir: skills, build: cleanBuild, registry: "https://registry.example.invalid/private/",
+      target: "all", skillsDir: skills, build: cleanBuild, registry: "https://registry.example.invalid/private/", installation,
     });
     prepared.push(item);
     expect(path.relative(cache, item.workspace)).toMatch(/^\.\./);
@@ -155,7 +307,7 @@ describe("software update handoff preparation", () => {
     await mkdir(temp);
     process.env.TMPDIR = temp;
     process.env.TEST_UPDATE_REGISTRY = "https://other.example.invalid/custom/";
-    await expect(prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: reviewed }))
+    await expect(prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: reviewed, installation }))
       .rejects.toThrow(/registry changed since approval/i);
     expect(await readdir(temp)).toEqual([]);
     await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
@@ -164,7 +316,7 @@ describe("software update handoff preparation", () => {
   it("accepts the same registry scope when only credentials and a trailing slash differ", async () => {
     const reviewed = process.env.TEST_UPDATE_REGISTRY!;
     process.env.TEST_UPDATE_REGISTRY = "https://new-user:new-secret@registry.example.invalid/custom";
-    const item = await prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: reviewed });
+    const item = await prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: reviewed, installation });
     prepared.push(item);
     expect(item.env.SKILLS_MANAGER_UPDATE_REGISTRY).toBe(reviewed);
     await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
@@ -173,14 +325,16 @@ describe("software update handoff preparation", () => {
   it("copies an independent private helper without starting an install and preserves a clean app commit", async () => {
     process.env.NODE_COMPILE_CACHE = path.join(skills, "node-compile-cache");
     process.env.NODE_DISABLE_COMPILE_CACHE = "0";
-    const item = await prepareUpdateHandoff({ target: "cli", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY! });
+    const item = await prepareUpdateHandoff({ target: "cli", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY!, installation });
     prepared.push(item);
-    expect(item.args).toEqual([item.workspace, await realpath(path.join(base, "bin", "npm")), "cli", commit, skills]);
+    expect(item.args).toEqual([item.workspace, await realpath(path.join(base, "bin", "npm")), "cli", commit, skills, prefix, "install"]);
     expect(path.dirname(item.helperPath)).toBe(item.workspace);
     expect((await lstat(item.workspace)).mode & 0o777).toBe(0o700);
     expect((await lstat(item.helperPath)).isFile()).toBe(true);
     expect(path.relative(skills, item.workspace)).toMatch(/^\.\./);
     expect(item.env.SKILLS_MANAGER_UPDATE_REGISTRY).toBe(process.env.TEST_UPDATE_REGISTRY);
+    expect(item.env.SKILLS_MANAGER_UPDATE_PACKAGE_ID).toBe("absent");
+    expect(item.env.SKILLS_MANAGER_UPDATE_BIN_ID).toBe("absent");
     expect(item.env.NODE_DISABLE_COMPILE_CACHE).toBe("1");
     expect(item.env.NODE_COMPILE_CACHE).toBe(process.env.NODE_COMPILE_CACHE);
     expect(await readdir(skills)).toEqual([]);
@@ -195,7 +349,7 @@ describe("software update handoff preparation", () => {
     const other = path.join(base, "other");
     await mkdir(other);
     await symlink(skills, link, "dir");
-    const item = await prepareUpdateHandoff({ target: "all", skillsDir: link, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY! });
+    const item = await prepareUpdateHandoff({ target: "all", skillsDir: link, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY!, installation });
     prepared.push(item);
     await unlink(link);
     await symlink(other, link, "dir");
@@ -208,9 +362,9 @@ describe("software update handoff preparation", () => {
       { ...cleanBuild, dirty: true },
       { ...cleanBuild, source: "unknown" as const, commit: null },
     ]) {
-      await expect(prepareUpdateHandoff({ target: "cli", skillsDir: skills, build, registry: process.env.TEST_UPDATE_REGISTRY! }))
+      await expect(prepareUpdateHandoff({ target: "cli", skillsDir: skills, build, registry: process.env.TEST_UPDATE_REGISTRY!, installation }))
         .rejects.toThrow(/explicitly choose switch to main/i);
-      const item = await prepareUpdateHandoff({ target: "cli", skillsDir: skills, build, registry: process.env.TEST_UPDATE_REGISTRY!, allowSwitchToMain: true });
+      const item = await prepareUpdateHandoff({ target: "cli", skillsDir: skills, build, registry: process.env.TEST_UPDATE_REGISTRY!, installation, allowSwitchToMain: true });
       prepared.push(item);
       expect(item.args[3]).toBe("main");
     }
@@ -219,7 +373,7 @@ describe("software update handoff preparation", () => {
 
   it("does not create the helper inside the selected skills tree, even when it is TMPDIR", async () => {
     process.env.TMPDIR = skills;
-    const item = await prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY! });
+    const item = await prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY!, installation });
     prepared.push(item);
     expect(item.args[3]).toBe("main");
     expect(path.relative(skills, item.workspace)).toMatch(/^\.\./);
@@ -232,7 +386,7 @@ describe("software update handoff preparation", () => {
     process.env.TMPDIR = previous;
     const item = await prepareUpdateHandoff({
       target: "all", skillsDir: skills, build: cleanBuild,
-      registry: process.env.TEST_UPDATE_REGISTRY!, excludedRoots: [previous],
+      registry: process.env.TEST_UPDATE_REGISTRY!, excludedRoots: [previous], installation,
     });
     prepared.push(item);
     expect(path.relative(previous, item.workspace)).toMatch(/^\.\./);
@@ -245,14 +399,14 @@ describe("software update handoff preparation", () => {
     await mkdir(path.join(checkout, ".git"), { recursive: true });
     await mkdir(temp);
     process.env.TMPDIR = temp;
-    const item = await prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY! });
+    const item = await prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY!, installation });
     prepared.push(item);
     expect(path.relative(checkout, item.workspace)).toMatch(/^\.\./);
     expect(await readdir(temp)).toEqual([]);
   });
 
   it("refuses to remove a replaced workspace and leaves the replacement untouched", async () => {
-    const item = await prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY! });
+    const item = await prepareUpdateHandoff({ target: "all", skillsDir: skills, build: cleanBuild, registry: process.env.TEST_UPDATE_REGISTRY!, installation });
     prepared.push(item);
     const saved = `${item.workspace}-saved`;
     await rename(item.workspace, saved);
