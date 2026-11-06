@@ -17,11 +17,13 @@ const device = process.env.SKILLS_MANAGER_UPDATE_DEVICE;
 const inode = process.env.SKILLS_MANAGER_UPDATE_INODE;
 const packageId = process.env.SKILLS_MANAGER_UPDATE_PACKAGE_ID;
 const binId = process.env.SKILLS_MANAGER_UPDATE_BIN_ID;
+const approvedExecutable = process.env.SKILLS_MANAGER_UPDATE_EXECUTABLE;
 delete process.env.SKILLS_MANAGER_UPDATE_REGISTRY;
 delete process.env.SKILLS_MANAGER_UPDATE_DEVICE;
 delete process.env.SKILLS_MANAGER_UPDATE_INODE;
 delete process.env.SKILLS_MANAGER_UPDATE_PACKAGE_ID;
 delete process.env.SKILLS_MANAGER_UPDATE_BIN_ID;
+delete process.env.SKILLS_MANAGER_UPDATE_EXECUTABLE;
 
 const workerDirectory = path.dirname(fileURLToPath(import.meta.url));
 const signals: HandledSignal[] = ["SIGINT", "SIGTERM", "SIGHUP"];
@@ -203,6 +205,32 @@ async function assertDestination(): Promise<void> {
     || (mode === "install" && (packageId !== "absent" || binId !== "absent"))
     || (mode === "update" && packageId === "absent")) {
     throw new Error("The approved global destination changed");
+  }
+  if (mode === "update") {
+    const entry = await lstat(app);
+    if (!entry.isDirectory() || entry.isSymbolicLink() || await realpath(app) !== app
+      || !approvedExecutable || !contained(app, approvedExecutable) || approvedExecutable === app) {
+      throw new Error("The approved global destination changed");
+    }
+    const manifestPath = path.join(app, "package.json");
+    const manifestEntry = await lstat(manifestPath);
+    if (!manifestEntry.isFile() || manifestEntry.isSymbolicLink()) throw new Error("The approved global destination changed");
+    const manifest: unknown = JSON.parse(await readFile(manifestPath, "utf8"));
+    if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)
+      || !("name" in manifest) || manifest.name !== "skills-manager" || !("bin" in manifest)) {
+      throw new Error("The approved global destination changed");
+    }
+    const declared = typeof manifest.bin === "string" ? manifest.bin
+      : typeof manifest.bin === "object" && manifest.bin !== null && !Array.isArray(manifest.bin)
+        && "skills-manager" in manifest.bin ? manifest.bin["skills-manager"] : undefined;
+    if (typeof declared !== "string" || !declared || path.isAbsolute(declared)
+      || await realpath(path.resolve(app, declared)) !== approvedExecutable
+      || !(await stat(approvedExecutable)).isFile()) {
+      throw new Error("The approved global destination changed");
+    }
+    if (binId !== "absent" && (!(await lstat(bin)).isSymbolicLink() || await realpath(bin) !== approvedExecutable)) {
+      throw new Error("The approved global destination changed");
+    }
   }
 }
 

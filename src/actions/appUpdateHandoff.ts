@@ -226,7 +226,7 @@ async function entryIdentity(file: string): Promise<{ id: string; entry?: BigInt
   }
 }
 
-async function globalInstallation(npm: string): Promise<GlobalUpdateInstallation & { packageId: string; binId: string }> {
+async function globalInstallation(npm: string): Promise<GlobalUpdateInstallation & { packageId: string; binId: string; executable: string }> {
   const configured = await npmConfig(npm, "prefix");
   if (!path.isAbsolute(configured)) throw new Error("The npm global prefix is not an absolute path.");
   const prefix = await canonicalPath(configured);
@@ -242,13 +242,14 @@ async function globalInstallation(npm: string): Promise<GlobalUpdateInstallation
   const [installed, bin] = await Promise.all([entryIdentity(packagePath), entryIdentity(binPath)]);
   if (installed.id === "absent") {
     if (bin.id !== "absent") throw new Error("The global skills-manager command already belongs to another file.");
-    return { prefix, mode: "install", packageId: installed.id, binId: bin.id };
+    return { prefix, mode: "install", packageId: installed.id, binId: bin.id, executable: "" };
   }
   const runningRoot = await realpath(fileURLToPath(new URL("../../", import.meta.url)));
   if (!installed.entry?.isDirectory() || installed.entry.isSymbolicLink()
     || await realpath(packagePath) !== runningRoot || await checkoutRoot(packagePath)) {
     throw new Error("The global skills-manager package is different from the running installation; it was not changed.");
   }
+  let executable: string;
   try {
     const manifestPath = path.join(packagePath, "package.json");
     const manifestEntry = await lstat(manifestPath);
@@ -262,7 +263,7 @@ async function globalInstallation(npm: string): Promise<GlobalUpdateInstallation
       : typeof manifest.bin === "object" && manifest.bin !== null && !Array.isArray(manifest.bin)
         && "skills-manager" in manifest.bin ? manifest.bin["skills-manager"] : undefined;
     if (typeof declared !== "string" || !declared || path.isAbsolute(declared)) throw new Error("Invalid bin.");
-    const executable = await realpath(path.resolve(packagePath, declared));
+    executable = await realpath(path.resolve(packagePath, declared));
     if (!isWithin(executable, runningRoot) || executable === runningRoot || !(await stat(executable)).isFile()) {
       throw new Error("Invalid bin.");
     }
@@ -272,7 +273,7 @@ async function globalInstallation(npm: string): Promise<GlobalUpdateInstallation
   } catch {
     throw new Error("The global skills-manager package or command is unsafe or belongs to another file.");
   }
-  return { prefix, mode: "update", packageId: installed.id, binId: bin.id };
+  return { prefix, mode: "update", packageId: installed.id, binId: bin.id, executable };
 }
 
 /** Resolve the actual destination before asking the user to approve it. */
@@ -423,6 +424,7 @@ export async function prepareUpdateHandoff(options: {
         SKILLS_MANAGER_UPDATE_INODE: inode.toString(),
         SKILLS_MANAGER_UPDATE_PACKAGE_ID: installation.packageId,
         SKILLS_MANAGER_UPDATE_BIN_ID: installation.binId,
+        SKILLS_MANAGER_UPDATE_EXECUTABLE: installation.executable,
       },
       cleanup,
     };

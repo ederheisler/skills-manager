@@ -66,7 +66,7 @@ fs.writeFileSync(isPack ? env.SM_TEST_PACK_RECORD : env.SM_TEST_INSTALL_RECORD, 
   temporary: env.TMPDIR, tmp: env.TMP, temp: env.TEMP,
   temporaryMode: fs.statSync(env.TMPDIR).mode & 0o777,
   privateEnvExposed: ["SKILLS_MANAGER_UPDATE_REGISTRY", "SKILLS_MANAGER_UPDATE_DEVICE", "SKILLS_MANAGER_UPDATE_INODE",
-    "SKILLS_MANAGER_UPDATE_PACKAGE_ID", "SKILLS_MANAGER_UPDATE_BIN_ID"].some((key) => key in env),
+    "SKILLS_MANAGER_UPDATE_PACKAGE_ID", "SKILLS_MANAGER_UPDATE_BIN_ID", "SKILLS_MANAGER_UPDATE_EXECUTABLE"].some((key) => key in env),
   ...(compileCache ? { compileCacheStatus: compileCache.status } : {}),
   hadLockfile: fs.existsSync("package-lock.json"),
 }));
@@ -174,7 +174,7 @@ writeFileSync(process.env.SM_TEST_LAUNCH + ".tmp", JSON.stringify({
   runtime, revision: manifest.buildRevision,
   workspaceExists: existsSync(process.env.SM_TEST_WORKSPACE),
   privateEnvExposed: ["SKILLS_MANAGER_UPDATE_REGISTRY", "SKILLS_MANAGER_UPDATE_DEVICE", "SKILLS_MANAGER_UPDATE_INODE",
-    "SKILLS_MANAGER_UPDATE_PACKAGE_ID", "SKILLS_MANAGER_UPDATE_BIN_ID"].some((key) => key in process.env),
+    "SKILLS_MANAGER_UPDATE_PACKAGE_ID", "SKILLS_MANAGER_UPDATE_BIN_ID", "SKILLS_MANAGER_UPDATE_EXECUTABLE"].some((key) => key in process.env),
   ...(compileCache ? { compileCacheStatus: compileCache.status } : {}),
 }));
 renameSync(process.env.SM_TEST_LAUNCH + ".tmp", process.env.SM_TEST_LAUNCH);
@@ -286,6 +286,7 @@ function startWorker(f: WorkerFixture, options: {
     SKILLS_MANAGER_UPDATE_INODE: options.inode ?? f.inode,
     SKILLS_MANAGER_UPDATE_PACKAGE_ID: options.packageId ?? "absent",
     SKILLS_MANAGER_UPDATE_BIN_ID: options.binId ?? "absent",
+    SKILLS_MANAGER_UPDATE_EXECUTABLE: options.mode === "update" ? path.join(f.app, "dist", "cli.js") : "",
     npm_config_userconfig: path.join(f.base, "user.npmrc"),
     NPM_CONFIG_REGISTRY: "https://wrong.example.invalid/",
     NPM_CONFIG_CACHE: path.join(f.base, "wrong-cache"),
@@ -664,6 +665,48 @@ describe("persistent global application update worker", () => {
     expect(await readFile(f.bin, "utf8")).toBe("unrelated command");
     await expectMissing(f.installRecord);
     await expectMissing(f.workspace);
+  });
+
+  it.each(["bin file", "bin target", "package file", "package identity"] as const)(
+    "rejects a changed %s even when its inode identity collides", async (change) => {
+      const f = await updateFixture();
+      await stageRuntime(f);
+      const previous = await installExisting(f);
+      const workerFile = path.join(f.workspace, "app-update-worker.mjs");
+      const source = await readFile(workerFile, "utf8");
+      const original = "return `${entry.dev}:${entry.ino}`;";
+      expect(source).toContain(original);
+      await writeFile(workerFile, source.replace(original,
+        `return file === ${JSON.stringify(f.app)} ? ${JSON.stringify(previous.packageId)} : file === ${JSON.stringify(f.bin)} ? ${JSON.stringify(previous.binId)} : ${original.slice(7)}`));
+      const worker = startWorker(f, { mode: "update", ...previous, npmMode: "pack-hold" });
+      await waitForFile(f.packReady);
+      if (change === "bin file") {
+        await unlink(f.bin);
+        await writeFile(f.bin, "unrelated command");
+      } else if (change === "bin target") {
+        await unlink(f.bin);
+        await symlink(path.join(f.app, "package.json"), f.bin);
+      } else if (change === "package file") {
+        await rename(f.app, `${f.app}-original`);
+        await writeFile(f.app, "unrelated package");
+      } else {
+        await writeFile(path.join(f.app, "package.json"), JSON.stringify({ name: "another-package", bin: "./dist/cli.js" }));
+      }
+      await writeFile(f.release, "continue");
+      expect((await worker.result).code).not.toBe(0);
+      await expectMissing(f.installRecord);
+      await expectMissing(f.workspace);
+    },
+  );
+
+  it("allows an approved update with an absent global command", async () => {
+    const f = await updateFixture();
+    await stageRuntime(f);
+    const previous = await installExisting(f);
+    await unlink(f.bin);
+    const result = await startWorker(f, { mode: "update", packageId: previous.packageId, binId: "absent" }).result;
+    expect(result.code).toBe(0);
+    expect(await realpath(f.bin)).toBe(path.join(f.app, "dist", "cli.js"));
   });
 
   it("does not delete a replacement workspace while npm is running", async () => {

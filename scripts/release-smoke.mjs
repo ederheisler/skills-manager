@@ -125,15 +125,14 @@ async function inspectRefreshedSession(mode, startingCli) {
   console.log(`Global ${mode}: skills ${runtime.version} matches npm latest; app commit ${identity.commit}.`);
   return executable;
 }
-const localGitPrompt = 'Review optional local Git initialization? [y/N] (q to cancel): ';
-const startupQuestions = ['Review optional local Git initialization?'];
 const startupPromptMarkers = [
   'Choose a skills directory.',
   'Choose [',
   'Skills directory path',
   'Manage this resolved target?',
   'Review optional remote backup?',
-  ...startupQuestions,
+  'Review optional local Git initialization?',
+  'Continue in read-only mode?',
 ];
 
 function startupPrompts(text) {
@@ -190,17 +189,11 @@ async function browseInTerminal(skillsDir, {
       && screen.includes('skills-manager (app)') && screen.includes('Vercel skills CLI')
       && (screen.match(/Automatic checks:\s*off/g) ?? []).length === 2
       && !screen.includes('Checking...');
-    if (step <= 2) {
-      const prompts = startupPrompts(text);
-      const expected = saved ? [] : startupQuestions;
-      assert.deepEqual(prompts, expected.slice(0, prompts.length), 'Unexpected startup prompt or prompt order');
-      assert.ok(prompts.length <= (saved ? 0 : Math.min(step + 1, expected.length)), 'A startup question appeared before the previous answer');
+    if (step === 0) {
+      assert.deepEqual(startupPrompts(text), [], 'Unexpected startup prompt before browsing');
     }
-    if (!saved && step === 0 && text.includes(localGitPrompt)) {
-      step = 1;
-      child.stdin.write('\n');
-    } else if (((saved && step === 0) || (!saved && step === 1)) && /Skills\s+1\s+shown/.test(screen) && browse) {
-      assert.deepEqual(startupPrompts(text), saved ? [] : startupQuestions, 'Incorrect startup questions before browsing');
+    if (step === 0 && /Skills\s+1\s+shown/.test(screen) && browse) {
+      assert.deepEqual(startupPrompts(text), [], 'Unexpected startup prompt before browsing');
       if (!saved) assert.ok(text.includes('Selected skills directory:'), 'The first launch must show its selected directory');
       step = 3;
       stageStart = transcript.length;
@@ -222,7 +215,13 @@ async function browseInTerminal(skillsDir, {
       child.stdin.write('q');
     } else if (step === 6 && refresh && screen.includes('Update Vercel skills CLI')
       && new RegExp(`y\\s+${updateMode}`).test(screen)) {
-      const review = screen.replace(/[│┃╭╮╰╯─]/g, '').replace(/\s/g, '');
+      const lines = screen.split('\n');
+      const title = lines.find((line) => line.includes('┌─Update Vercel skills CLI'));
+      assert.ok(title, 'Update review dialog must be visible');
+      const left = title.indexOf('┌─Update Vercel skills CLI');
+      const right = title.indexOf('┐', left);
+      assert.ok(right > left, 'Update review dialog must have a right border');
+      const review = lines.map((line) => line.slice(left + 1, right)).join('').replace(/\s/g, '');
       assert.ok(screen.includes(updateMode === 'install' ? 'Install globally:' : 'Update global installation:'),
         'Review must distinguish a new global install from an update');
       assert.ok(review.includes(globalPrefix.replace(/\s/g, '')), 'Review must show the isolated global prefix');
@@ -242,7 +241,7 @@ async function browseInTerminal(skillsDir, {
       });
     } else if (step === 8) {
       assert.deepEqual(startupPrompts(text), [], 'The refreshed child must not show startup prompts for the unchanged root');
-      const marker = 'Starting…';
+      const marker = 'Done. Restarting skills-manager…';
       const started = text.indexOf(marker);
       const childOutput = started === -1 ? '' : text.slice(started + marker.length);
       if (childOutput.trim() && /Skills\s+1\s+shown/.test(screen) && browse) {

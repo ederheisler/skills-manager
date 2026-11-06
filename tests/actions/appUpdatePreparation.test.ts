@@ -130,6 +130,7 @@ describe("software update handoff preparation", () => {
     expect(item.args).toEqual([item.workspace, await realpath(path.join(base, "bin", "npm")), "cli", commit, skills, prefix, "update"]);
     expect(item.env.SKILLS_MANAGER_UPDATE_PACKAGE_ID).toBe(`${appIdentity.dev}:${appIdentity.ino}`);
     expect(item.env.SKILLS_MANAGER_UPDATE_BIN_ID).toBe(`${binIdentity.dev}:${binIdentity.ino}`);
+    expect(item.env.SKILLS_MANAGER_UPDATE_EXECUTABLE).toBe(path.join(app, "dist", "cli.js"));
     await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -335,6 +336,7 @@ describe("software update handoff preparation", () => {
     expect(item.env.SKILLS_MANAGER_UPDATE_REGISTRY).toBe(process.env.TEST_UPDATE_REGISTRY);
     expect(item.env.SKILLS_MANAGER_UPDATE_PACKAGE_ID).toBe("absent");
     expect(item.env.SKILLS_MANAGER_UPDATE_BIN_ID).toBe("absent");
+    expect(item.env.SKILLS_MANAGER_UPDATE_EXECUTABLE).toBe("");
     expect(item.env.NODE_DISABLE_COMPILE_CACHE).toBe("1");
     expect(item.env.NODE_COMPILE_CACHE).toBe(process.env.NODE_COMPILE_CACHE);
     expect(await readdir(skills)).toEqual([]);
