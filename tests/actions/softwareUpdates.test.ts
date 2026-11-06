@@ -52,7 +52,7 @@ describe("software update consent and checks", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
       requests.push(String(input));
       return String(input).startsWith("https://api.github.com/")
-        ? new Response(JSON.stringify({ sha: "1".repeat(40) }), { status: 200 })
+        ? new Response("1".repeat(40), { status: 200 })
         : registryResponse(cliVersion);
     }));
     const updates = service(skills);
@@ -200,7 +200,7 @@ describe("software update consent and checks", () => {
     const requests: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
       requests.push(String(input));
-      return new Response(JSON.stringify({ sha: "2".repeat(40) }), { status: 200 });
+      return new Response("2".repeat(40), { status: 200 });
     }));
     const first = service(skills);
     await first.start();
@@ -233,7 +233,7 @@ describe("software update consent and checks", () => {
     const requests: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
       requests.push(String(input));
-      return new Response(JSON.stringify({ sha: "6".repeat(40) }), { status: 200 });
+      return new Response("6".repeat(40), { status: 200 });
     }));
     const first = service(skills);
     await first.start();
@@ -276,7 +276,7 @@ describe("software update consent and checks", () => {
       import { SoftwareUpdateService } from ${JSON.stringify(moduleUrl)};
       globalThis.fetch = async () => {
         await appendFile(process.env.REQUEST_LOG, "request\\n");
-        return new Response(JSON.stringify({ sha: "5".repeat(40) }));
+        return new Response("5".repeat(40));
       };
       // The headless fixture needs a live handle for the intentionally unref'ed scheduler.
       const keepAlive = setInterval(() => {}, 60_000);
@@ -316,6 +316,22 @@ describe("software update consent and checks", () => {
     expect(updates.results.cli).toMatchObject({ status: "unavailable", available: null });
   }, 30_000);
 
+  it("accepts a compact app SHA with a trailing newline and rejects malformed and JSON responses", async () => {
+    const { skills } = await fixture();
+    let body = `${"a".repeat(40)}\n`;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 200 })));
+    const updates = service(skills);
+    await updates.start();
+    await updates.check("app");
+    expect(updates.results.app?.available).toBe("a".repeat(40));
+
+    for (const invalid of ["a".repeat(39), "g".repeat(40), JSON.stringify({ sha: "a".repeat(40) })]) {
+      body = invalid;
+      await updates.check("app");
+      expect(updates.results.app).toMatchObject({ status: "unavailable", available: null });
+    }
+  }, 15_000);
+
   it("cancels rejected response streams without waiting for the remote body", async () => {
     const { skills } = await fixture();
     let cancelled = 0;
@@ -334,7 +350,7 @@ describe("software update consent and checks", () => {
     expect(updates.results.app?.status).toBe("unavailable");
   }, 15_000);
 
-  it("invalidates an in-flight result immediately when consent is revoked", async () => {
+  it("finishes an explicit in-flight check when automatic consent is revoked", async () => {
     const { skills } = await fixture();
     const response = Promise.withResolvers<Response>();
     const requested = Promise.withResolvers<void>();
@@ -347,13 +363,17 @@ describe("software update consent and checks", () => {
     const updates = service(skills);
     await updates.start();
     const pending = updates.check("cli");
-    await requested.promise;
-    await updates.setAutomatic("cli", false);
-    expect(signal?.aborted).toBe(true);
-    response.resolve(registryResponse("999.0.0"));
-    await pending;
+    try {
+      await requested.promise;
+      await updates.setAutomatic("cli", false);
+      expect(signal?.aborted).toBe(false);
+      expect(updates.preferences.cli).toBe(false);
+    } finally {
+      response.resolve(registryResponse("999.0.0"));
+      await pending;
+    }
     expect(updates.preferences.cli).toBe(false);
-    expect(updates.results.cli).toBeUndefined();
+    expect(updates.results.cli).toMatchObject({ available: "999.0.0" });
   }, 15_000);
 
   it("awaits cancellation on disposal without publishing a late result", async () => {
@@ -437,7 +457,7 @@ describe("software update consent and checks", () => {
 
   it("rejects a symlinked app-owned directory and keeps prior consent disabled when persistence fails", async () => {
     const { skills, config, base } = await fixture();
-    const fetch = vi.fn(async () => new Response(JSON.stringify({ sha: "3".repeat(40) }), { status: 200 }));
+    const fetch = vi.fn(async () => new Response("3".repeat(40), { status: 200 }));
     vi.stubGlobal("fetch", fetch);
     const updates = service(skills);
     await updates.start();
@@ -451,19 +471,5 @@ describe("software update consent and checks", () => {
     expect(updates.errors.join(" ")).toMatch(/future|next|later/i);
     expect(JSON.parse(await readFile(path.join(saved, "app.json"), "utf8")).enabled).toBe(true);
     await unlink(appDirectory);
-  }, 15_000);
-
-  it("revalidates storage against switched and previously selected skills roots", async () => {
-    const { skills, base } = await fixture();
-    const updates = service(skills);
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ sha: "4".repeat(40) }), { status: 200 })));
-    await updates.start();
-    await updates.setAutomatic("app", true);
-    await updates.setSkillsDirectory(base);
-    expect(updates.preferences.app).toBe(false);
-    expect(updates.errors.length).toBeGreaterThan(0);
-    await updates.setSkillsDirectory(skills);
-    await updates.setAutomatic("app", true);
-    expect(updates.preferences.app).toBe(false);
   }, 15_000);
 });

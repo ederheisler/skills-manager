@@ -171,7 +171,7 @@ function attemptTimestamp(value: unknown, now: number): number | null {
   return value.at;
 }
 
-async function responseJson(response: Response): Promise<unknown> {
+async function responseText(response: Response): Promise<string> {
   const length = response.headers.get("content-length");
   if (!response.body) throw new Error("Missing response body");
   const reader = response.body.getReader();
@@ -189,7 +189,7 @@ async function responseJson(response: Response): Promise<unknown> {
       chunks.push(value);
     }
   } finally { await reader.cancel().catch(() => {}); }
-  return JSON.parse(Buffer.concat(chunks, size).toString("utf8"));
+  return Buffer.concat(chunks, size).toString("utf8");
 }
 
 /** Separate, default-off consent and check state for the app and its bundled CLI. */
@@ -206,6 +206,7 @@ export class SoftwareUpdateService {
   readonly #preferenceRevision: Record<UpdateComponent, number> = { app: 0, cli: 0 };
   readonly #preferenceWrites = new Map<UpdateComponent, Promise<void>>();
   readonly #flights = new Map<UpdateComponent, Flight>();
+  readonly #foreground: Record<UpdateComponent, number> = { app: 0, cli: 0 };
   readonly #checking: Record<UpdateComponent, Set<symbol>> = { app: new Set(), cli: new Set() };
   readonly #attempts: Record<UpdateComponent, number | null> = { app: null, cli: null };
   readonly #timers = new Map<UpdateComponent, { handle: ReturnType<typeof setTimeout>; at: number }>();
@@ -217,7 +218,6 @@ export class SoftwareUpdateService {
   #startPromise?: Promise<void>;
   #registryRefresh?: Promise<void>;
   #disposed = false;
-  #storageRevision = 0;
 
   constructor(skillsDir: string, options?: { onChange?: () => void }) {
     if (!skillsDir || !path.isAbsolute(skillsDir) || skillsDir.includes("\0")) throw new Error("An absolute skills directory is required.");
@@ -344,7 +344,7 @@ export class SoftwareUpdateService {
     let latest: PrivateJsonSnapshot<StoredResult> | null = null;
     let latestName = path.basename(canonical);
     try { latest = await this.#readResultState(canonical, component, key); }
-    catch { if (allowed()) this.#error("An update result cache is invalid, unreadable, or unsafe."); }
+    catch { if (allowed()) this.#error("A saved update check result is invalid, unreadable, or unsafe."); }
     if (!allowed()) return null;
     const prefix = `result-${component}-${key}-`;
     const directory = await opendir(this.#cache);
@@ -367,7 +367,7 @@ export class SoftwareUpdateService {
           latestName = entry.name;
         }
       } catch {
-        if (allowed()) this.#error("An update result cache is invalid, unreadable, or unsafe.");
+        if (allowed()) this.#error("A saved update check result is invalid, unreadable, or unsafe.");
       }
     }
     return allowed() ? latest?.value ?? null : null;
@@ -413,13 +413,13 @@ export class SoftwareUpdateService {
       const attempt = attemptTimestamp(await readPrivateJson(this.#cacheFile(component, "attempt", key)), Date.now());
       if (allowed()) this.#attempts[component] = attempt;
     } catch {
-      if (allowed()) this.#error("An update attempt cache is invalid, unreadable, or unsafe.");
+      if (allowed()) this.#error("A saved update check record is invalid, unreadable, or unsafe.");
     }
     try {
       const result = await this.#readResult(component, key);
       if (allowed() && result) this.#results[component] = this.#compareResult(result);
     } catch {
-      if (allowed()) this.#error("An update result cache is invalid, unreadable, or unsafe.");
+      if (allowed()) this.#error("A saved update check result is invalid, unreadable, or unsafe.");
     }
   }
 
@@ -543,15 +543,14 @@ export class SoftwareUpdateService {
       catch { approvedRegistry = ""; }
     }
     const revision = ++this.#preferenceRevision[component];
-    const storageRevision = this.#storageRevision;
-    const reportInterruptedRevocation = () => {
-      if (!enabled && revision === this.#preferenceRevision[component] && storageRevision !== this.#storageRevision) {
-        this.#error("Automatic checks are off in this session, but saving that choice was interrupted; a future launch may retain the old consent.");
-      }
-    };
     if (!enabled) {
       this.#preferences[component] = false;
-      this.#invalidate(component);
+      if (this.#foreground[component] === 0) this.#invalidate(component);
+      else {
+        const timer = this.#timers.get(component);
+        clearTimeout(timer?.handle);
+        this.#timers.delete(component);
+      }
       this.#notify();
     }
     const previous = this.#preferenceWrites.get(component) ?? Promise.resolve();
@@ -567,35 +566,26 @@ export class SoftwareUpdateService {
           return;
         }
       }
-      if (revision !== this.#preferenceRevision[component] || storageRevision !== this.#storageRevision) {
-        reportInterruptedRevocation();
-        return;
-      }
+      if (revision !== this.#preferenceRevision[component]) return;
       const scope = this.#scope(component);
       if (enabled && !scope) {
         this.#error("Automatic CLI checks cannot be enabled until the npm registry is known.");
         return;
       }
       try {
-        const stillAllowed = () => revision === this.#preferenceRevision[component] && storageRevision === this.#storageRevision;
+        const stillAllowed = () => revision === this.#preferenceRevision[component];
         await this.#directory(this.#config, true, stillAllowed);
         // Never adopt or overwrite an unrelated or malformed existing file.
         await this.#readConsent(component);
         const consent: StoredConsent = { kind: "skills-manager-update-consent", version: 1, enabled, scope };
         await atomicPrivateJson(this.#consentFile(component), consent, stillAllowed);
-        if (revision !== this.#preferenceRevision[component] || storageRevision !== this.#storageRevision) {
-          reportInterruptedRevocation();
-          return;
-        }
+        if (revision !== this.#preferenceRevision[component]) return;
         const newlyEnabled = enabled && !this.#preferences[component];
         this.#preferences[component] = enabled;
         this.#notify();
         if (newlyEnabled && !this.#disposed) this.#launchAutomatic(component, true);
       } catch {
-        if (revision !== this.#preferenceRevision[component] || storageRevision !== this.#storageRevision) {
-          reportInterruptedRevocation();
-          return;
-        }
+        if (revision !== this.#preferenceRevision[component]) return;
         if (enabled) {
           this.#preferences[component] = false;
           this.#invalidate(component);
@@ -611,47 +601,29 @@ export class SoftwareUpdateService {
     finally { if (this.#preferenceWrites.get(component) === operation) this.#preferenceWrites.delete(component); }
   }
 
-  async setSkillsDirectory(skillsDir: string): Promise<void> {
+  async check(component: UpdateComponent, expectedRegistry?: string): Promise<void> {
     if (this.#disposed) return;
-    if (!skillsDir || !path.isAbsolute(skillsDir) || skillsDir.includes("\0")) throw new Error("An absolute skills directory is required.");
-    this.#storageRevision++;
-    this.#knownRoots.add(path.resolve(skillsDir));
-    const flights = [...this.#flights.values()].map((flight) => flight.promise);
-    for (const component of COMPONENTS) this.#invalidate(component);
-    await Promise.allSettled([...flights, ...this.#background, ...this.#preferenceWrites.values(),
-      ...(this.#registryRefresh ? [this.#registryRefresh] : [])]);
-    if (this.#disposed) return;
-    try {
-      this.#knownPhysicalRoots.add(await canonicalCandidate(skillsDir));
-      await this.#assertSafePaths();
-      for (const component of COMPONENTS) if (this.#preferences[component]) this.#schedule(component, 0);
-    } catch {
-      for (const component of COMPONENTS) {
-        this.#preferences[component] = false;
-        this.#preferenceRevision[component]++;
-        this.#invalidate(component);
+    if (component === "cli" && expectedRegistry !== undefined) {
+      let approvedRegistry = "";
+      try { approvedRegistry = safeRegistry(expectedRegistry); } catch { /* Invalid approval cannot authorize a host. */ }
+      if (!approvedRegistry || approvedRegistry !== this.#registryScope) {
+        this.#error("The npm registry changed; review it before checking the CLI.");
+        return;
       }
-      this.#error("Automatic update checks are off because update storage cannot be kept outside all selected skills directories.");
     }
-    this.#notify();
+    this.#foreground[component]++;
+    try { await this.#check(component, false); }
+    finally { this.#foreground[component]--; }
   }
 
-  async check(component: UpdateComponent, expectedRegistry?: string): Promise<void> {
+  async #check(component: UpdateComponent, automatic: boolean): Promise<void> {
     if (this.#disposed) return;
     const token = this.#beginChecking(component);
     try {
-      if (component === "cli" && expectedRegistry !== undefined) {
-        let approvedRegistry = "";
-        try { approvedRegistry = safeRegistry(expectedRegistry); } catch { /* Invalid approval cannot authorize a host. */ }
-        if (!approvedRegistry || approvedRegistry !== this.#registryScope) {
-          this.#error("The npm registry changed; review it before checking the CLI.");
-          return;
-        }
-      }
       const generation = this.#generation[component];
       const disclosedRegistry = this.#registryScope;
       if (component === "cli") await this.#refreshRegistry();
-      if (this.#disposed || generation !== this.#generation[component]
+      if (this.#disposed || (automatic && !this.#preferences[component]) || generation !== this.#generation[component]
         || (component === "cli" && disclosedRegistry !== this.#registryScope)) return;
       const existing = this.#flights.get(component);
       if (existing) return await existing.promise;
@@ -678,18 +650,20 @@ export class SoftwareUpdateService {
       const url = component === "app" ? GITHUB_URL : new URL("skills/latest", this.#registryScope).href;
       const response = await fetch(url, {
         method: "GET", redirect: "error", credentials: "omit",
-        headers: { Accept: "application/json", "User-Agent": "skills-manager" },
+        headers: { Accept: component === "app" ? "application/vnd.github.sha" : "application/json", "User-Agent": "skills-manager" },
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
       });
       if (!response.ok) {
         if (response.status >= 100 && response.status <= 599) error = `Update check unavailable (HTTP ${response.status}).`;
         await response.body?.cancel().catch(() => {});
       } else {
-        const data = await responseJson(response);
+        const text = await responseText(response);
         if (component === "app") {
-          if (!isRecord(data) || typeof data.sha !== "string" || !SHA.test(data.sha)) throw new Error("Invalid app response");
-          available = data.sha;
+          const sha = text.trim();
+          if (!SHA.test(sha)) throw new Error("Invalid app response");
+          available = sha;
         } else {
+          const data: unknown = JSON.parse(text);
           if (!isRecord(data) || data.name !== "skills" || typeof data.version !== "string"
             || data.version.length > 128 || !VERSION.test(data.version)) throw new Error("Invalid CLI response");
           available = data.version;
@@ -798,7 +772,7 @@ export class SoftwareUpdateService {
       let result: StoredResult | null;
       try { result = await this.#readResult(component, key); }
       catch {
-        if (allowed()) this.#error("Automatic checks are paused because the result cache is invalid or unsafe; manual checks remain available.");
+        if (allowed()) this.#error("Automatic checks are paused because the saved check result is invalid or unsafe; manual checks remain available.");
         return { next: Date.now() + 60_000, retry: false };
       }
       if (!allowed()) return { next: now + RETRY_MS, retry: false };
@@ -822,7 +796,7 @@ export class SoftwareUpdateService {
       if (allowed()) {
         this.#attempts[component] = now;
         this.#notify();
-        await this.check(component);
+        await this.#check(component, true);
       }
       const completed = this.#results[component];
       return { next: completed ? completed.checkedAt + DAY_MS : now + DAY_MS, at: now, retry: false };

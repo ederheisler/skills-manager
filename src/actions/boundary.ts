@@ -41,6 +41,8 @@ function reviewedLocation(root: string, selectedRoot: string, name: string, expe
   throw new Error("The confirmed path is not this skill in the selected directory");
 }
 
+let hostLibc: "glibc" | "unsupported" | undefined;
+
 function checkHelperPlatform(): void {
   let platform: { platform?: string; arch?: string; libc?: string | null };
   try {
@@ -48,10 +50,11 @@ function checkHelperPlatform(): void {
   } catch (error) {
     throw new Error(`Skills filesystem helper platform metadata is missing or invalid (${platformFile}): ${error instanceof Error ? error.message : String(error)}`);
   }
-  const report = process.report.getReport() as { header?: { glibcVersionRuntime?: string } };
-  const libc = process.platform === "linux"
-    ? (report.header?.glibcVersionRuntime ? "glibc" : "unsupported")
-    : null;
+  if (process.platform === "linux" && hostLibc === undefined) {
+    const report = process.report.getReport() as { header?: { glibcVersionRuntime?: string } };
+    hostLibc = report.header?.glibcVersionRuntime ? "glibc" : "unsupported";
+  }
+  const libc = process.platform === "linux" ? hostLibc : null;
   if (!platform || platform.platform !== process.platform || platform.arch !== process.arch || platform.libc !== libc) {
     throw new Error(`Skills filesystem helper is incompatible with ${process.platform}/${process.arch}${libc ? `/${libc}` : ""}; rebuild it for this host`);
   }

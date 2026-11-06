@@ -2,7 +2,7 @@ import { lstat, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { approveSkillsRoot, assertApprovedSkillsRoot, fingerprintSkillContents, readManagedMetadata, readParentSkillLock, type ApprovedSkillsRoot } from "../actions/boundary.js";
 import type { LockEntry } from "./types.js";
-import { isLockEntry, isRecord, parseSkillLockFile } from "./validation.js";
+import { isLockEntry, isRecord } from "./validation.js";
 
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const MAX_METADATA_BYTES = 1024 * 1024;
@@ -213,9 +213,9 @@ export async function readExternalClaim(skillsDir: string, skillPath: string, na
   if (text === null) return null;
   let raw: unknown;
   try { raw = JSON.parse(text); } catch { return null; }
-  const lock = parseSkillLockFile(raw);
-  const entry = lock?.version === 3 ? lock.skills[name] : undefined;
-  if (!entry || entry.sourceType !== "github" || !validSourceEntry(entry) || !/^[a-f0-9]{40}$/i.test(entry.skillFolderHash)
+  if (!isRecord(raw) || raw.version !== 3 || !isRecord(raw.skills) || !Object.hasOwn(raw.skills, name)) return null;
+  const entry = raw.skills[name];
+  if (!isLockEntry(entry) || entry.sourceType !== "github" || !validSourceEntry(entry) || !/^[a-f0-9]{40}$/i.test(entry.skillFolderHash)
     || !entry.skillPath || path.win32.isAbsolute(entry.skillPath) || entry.skillPath.includes("\\")
     || entry.skillPath.split("/").some((part) => !part || part === "." || part === "..")) return null;
   return entry;

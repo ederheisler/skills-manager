@@ -45,15 +45,34 @@ describe("filterSkills", () => {
 });
 
 describe("source scope", () => {
-  const skills = [skill("local", "A local skill"), catalogSkill("catalog", "A catalog skill")];
+  it("groups unknown provenance with local without changing its metadata", () => {
+    const local = skill("local", "A local skill");
+    const remote = catalogSkill("catalog", "A catalog skill");
+    const unknown: Skill = { ...skill("unknown", "Unknown origin"), authors: ["Recorded author"], provenance: { kind: "unknown" } };
+    const orphan: Skill = { ...skill("orphan", "Missing folder"), provenance: { kind: "unknown" }, orphaned: true, path: "", entryKind: "orphaned", warnings: ["Missing folder"] };
+    const all = [local, remote, unknown, orphan];
+    const before = structuredClone(all);
 
-  it("keeps unknown, local and remote provenance separate", () => {
-    const unknown = { ...skill("unknown", "Unknown origin"), provenance: { kind: "unknown" as const } };
-    const all = [...skills, unknown];
     expect(filterSkills(all, "", "all")).toEqual(all);
-    expect(filterSkills(all, "", "local")).toEqual([skills[0]]);
-    expect(filterSkills(all, "", "source")).toEqual([skills[1]]);
-    expect(filterSkills(all, "", "unknown")).toEqual([unknown]);
+    expect(filterSkills(all, "", "local")).toEqual([local, unknown, orphan]);
+    expect(filterSkills(all, "", "source")).toEqual([remote]);
+    expect(all).toEqual(before);
+    expect(unknown.provenance.kind).toBe("unknown");
+    expect(unknown.authors).toEqual(["Recorded author"]);
+    expect(orphan.orphaned).toBe(true);
+    expect(orphan.warnings).toEqual(["Missing folder"]);
+  });
+
+  it("intersects category, disabled state, and query", () => {
+    const local = { ...skill("local", "Shared description"), enabled: false };
+    const unknown: Skill = { ...skill("unknown", "Shared description"), enabled: false, provenance: { kind: "unknown" } };
+    const remote = { ...catalogSkill("remote", "Shared description"), enabled: false };
+    const enabled = skill("enabled", "Shared description");
+    const all = [local, unknown, remote, enabled];
+
+    expect(filterSkills(all, "shared", "local", "disabled")).toEqual([local, unknown]);
+    expect(filterSkills(all, "shared", "source", "disabled")).toEqual([remote]);
+    expect(filterSkills(all, "unknown", "local", "disabled")).toEqual([unknown]);
   });
 });
 

@@ -4,6 +4,8 @@ Date: 2026-11-05
 
 Status: Implemented. Runtime results and supported-platform checks are recorded below.
 
+This plan and its results describe the earlier temporary-session updater. The user later chose [persistent installation](../../decisions/2026-11-03-open-source-portability.md#persistent-installation), which supersedes that installation target and repeated `npx` launches. The current route uses one `npx` launch, followed by approval in Application updates. Earlier checks do not verify the persistent updater or that complete installation route. The current [security policy](../../../SECURITY.md#application-and-cli-updates) describes its boundaries.
+
 ## Behavior and evidence when proposed
 
 The [README](../../../README.md#quick-start) directed users to run `npx --yes --prefer-online github:ederheisler/skills-manager` for latest `main`.
@@ -139,7 +141,7 @@ Replace the old process image with that helper before npm starts. The helper use
 Preserve normal `HOME` and legitimate user configuration. The helper starts a new session and does not replace the current installation.
 Keep the workspace for the new app's lifetime. If the new app exits with status zero, attempt identity-checked cleanup of only that workspace.
 If the new app exits abnormally or is interrupted, retain and report the workspace because descendant processes can still run.
-A hard kill or crash can also leave the workspace. Print its exact path before installation for possible manual cleanup.
+A hard kill or crash can also leave the workspace without reporting its path. Report the path when cleanup fails or is unsafe.
 
 The combined update can obtain a later main commit than the reviewed SHA. Explain this before approval.
 The new build displays its actual identity. A child process starting is not proof that the app reached browsing.

@@ -146,6 +146,53 @@ describe("explicit update checks", () => {
     await expect(lstat(path.join(skills, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("finds four updates from GitHub entries alongside a well-known sibling in a v3 lock", async () => {
+    const base = await realpath(await mkdtemp(path.join(tmpdir(), "skills-mixed-check-")));
+    roots.push(base);
+    const skills = path.join(base, "selected");
+    const names = ["alpha", "beta", "gamma", "delta"];
+    const entries: Record<string, LockEntry> = {};
+    for (const [index, name] of names.entries()) {
+      const target = path.join(skills, name);
+      await mkdir(target, { recursive: true });
+      await writeFile(path.join(target, "SKILL.md"), `---\nname: ${name}\ndescription: Test skill\n---\n`);
+      entries[name] = {
+        source: "owner/repository", sourceType: "github", sourceUrl: "https://github.com/owner/repository.git",
+        skillPath: `skills/${name}/SKILL.md`, skillFolderHash: String(index + 1).repeat(40),
+        ref: index < 2 ? "main" : "release",
+        installedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+      };
+    }
+    await writeFile(path.join(base, ".skill-lock.json"), JSON.stringify({
+      version: 3,
+      skills: {
+        ...entries,
+        website: {
+          source: "https://example.com", sourceType: "well-known", sourceUrl: "https://example.com",
+          skillFolderHash: "", sourceBaseUrl: "https://example.com", wellKnownDigest: "digest",
+          installedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+        },
+      },
+    }));
+
+    const scanned = await scanSkills(skills);
+    expect(scanned).toHaveLength(4);
+    for (const row of scanned) expect(row.lockEntry).toEqual(entries[row.name]);
+    const trees: Record<string, unknown> = {
+      main: { truncated: false, tree: [
+        { type: "tree", path: "skills/alpha", sha: "a".repeat(40) },
+        { type: "tree", path: "skills/beta", sha: "b".repeat(40) },
+      ] },
+      release: { truncated: false, tree: [
+        { type: "tree", path: "skills/gamma", sha: "c".repeat(40) },
+        { type: "tree", path: "skills/delta", sha: "d".repeat(40) },
+      ] },
+    };
+    const report = await checkForUpdates(scanned, async (_repository, ref) => trees[ref]);
+    expect(report.unavailable).toEqual([]);
+    expect(report.updated.sort()).toEqual(scanned.map((row) => row.id).sort());
+  });
+
   it("reports incomplete and malformed trees as unavailable", async () => {
     const truncated = await serve({ truncated: true, tree: [{ type: "tree", path: "skills/example", sha: upstream }] });
     const malformed = await serve({ unexpected: true });

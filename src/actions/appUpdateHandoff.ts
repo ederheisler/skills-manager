@@ -1,7 +1,7 @@
 /// <reference lib="es2024.promise" />
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { constants, type BigIntStats } from "node:fs";
+import { access, chmod, copyFile, lstat, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,11 @@ import { quoteTerminalPath } from "../terminalText.js";
 import type { BuildIdentity } from "../state/appBuild.js";
 
 export type UpdateTarget = "all" | "cli";
+
+export interface GlobalUpdateInstallation {
+  prefix: string;
+  mode: "install" | "update";
+}
 
 export interface PreparedUpdateHandoff {
   workspace: string;
@@ -29,10 +34,12 @@ async function npmExecutable(): Promise<string> {
       const resolved = await realpath(candidate);
       if (!(await stat(resolved)).isFile()) continue;
       await access(resolved, constants.X_OK);
-      return resolved;
+      // Some npm launchers are multi-call binaries: preserve the PATH entry
+      // as argv[0] instead of invoking the canonical target under another name.
+      return candidate;
     } catch { /* Try the next PATH entry. */ }
   }
-  throw new Error("npm is required to start an update session.");
+  throw new Error("npm is required to update the global installation.");
 }
 
 function readNpmConfig(npm: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
@@ -90,7 +97,7 @@ function protectedEnvironmentRegistry(env: NodeJS.ProcessEnv): string | undefine
   }
 }
 
-async function npmConfig(npm: string, key: "registry" | "cache"): Promise<string> {
+async function npmConfig(npm: string, key: "registry" | "cache" | "prefix"): Promise<string> {
   const env = { ...process.env };
   // npm and the upstream CLI enable Node's compile cache on startup. Keep
   // even user-configured cache locations untouched during this read-only query.
@@ -110,13 +117,13 @@ async function npmConfig(npm: string, key: "registry" | "cache"): Promise<string
     // npm creates its configured cache even for `config get`. An existing
     // character device cannot become a cache directory, so this query makes
     // no filesystem writes. Global mode skips project .npmrc while still
-    // reading the user and global configuration used by our empty project.
+    // reading the user and global configuration used for installation.
     if (!(await stat("/dev/null")).isCharacterDevice()) throw new Error("Missing null device.");
-    const command = key === "registry" ? ["config", "get", "registry"] : ["config", "list", "--long"];
+    const command = key === "cache" ? ["config", "list", "--long"] : ["config", "get", key];
     const stdout = await readNpmConfig(npm, [
       ...command, "--cache", "/dev/null", "--logs-dir", "/dev/null", "--global",
     ], path.parse(process.execPath).root, env);
-    const result = key === "registry" ? stdout.trim() : configuredCache(stdout);
+    const result = key === "cache" ? configuredCache(stdout) : stdout.trim();
     if (!result || /[\u0000-\u001f\u007f]/.test(result)) throw new Error("Invalid npm configuration.");
     return result;
   } catch {
@@ -167,7 +174,7 @@ function registryScope(value: string): string {
   return url.href;
 }
 
-/** Resolve the same user-configured registry that the private npm project will use. */
+/** Resolve the registry npm will use for the approved installation. */
 export async function resolveUpdateRegistry(): Promise<string> {
   return validateRegistry(await npmConfig(await npmExecutable(), "registry"));
 }
@@ -207,6 +214,72 @@ async function checkoutRoot(packageRoot: string): Promise<string | undefined> {
     if (parent === current) return undefined;
     current = parent;
   }
+}
+
+async function entryIdentity(file: string): Promise<{ id: string; entry?: BigIntStats }> {
+  try {
+    const entry = await lstat(file, { bigint: true });
+    return { id: `${entry.dev}:${entry.ino}`, entry };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { id: "absent" };
+    throw error;
+  }
+}
+
+async function globalInstallation(npm: string): Promise<GlobalUpdateInstallation & { packageId: string; binId: string; executable: string }> {
+  const configured = await npmConfig(npm, "prefix");
+  if (!path.isAbsolute(configured)) throw new Error("The npm global prefix is not an absolute path.");
+  const prefix = await canonicalPath(configured);
+  const packagePath = path.join(prefix, "lib", "node_modules", "skills-manager");
+  const binPath = path.join(prefix, "bin", "skills-manager");
+  const packageParent = await canonicalPath(path.dirname(packagePath));
+  const binParent = await canonicalPath(path.dirname(binPath));
+  if (packageParent !== path.dirname(packagePath) || binParent !== path.dirname(binPath)
+    || !isWithin(packageParent, prefix) || !isWithin(binParent, prefix)
+    || await checkoutRoot(packageParent) || await checkoutRoot(binParent)) {
+    throw new Error("The npm global destination is outside the approved prefix or inside a checkout.");
+  }
+  const [installed, bin] = await Promise.all([entryIdentity(packagePath), entryIdentity(binPath)]);
+  if (installed.id === "absent") {
+    if (bin.id !== "absent") throw new Error("The global skills-manager command already belongs to another file.");
+    return { prefix, mode: "install", packageId: installed.id, binId: bin.id, executable: "" };
+  }
+  const runningRoot = await realpath(fileURLToPath(new URL("../../", import.meta.url)));
+  if (!installed.entry?.isDirectory() || installed.entry.isSymbolicLink()
+    || await realpath(packagePath) !== runningRoot || await checkoutRoot(packagePath)) {
+    throw new Error("The global skills-manager package is different from the running installation; it was not changed.");
+  }
+  let executable: string;
+  try {
+    const manifestPath = path.join(packagePath, "package.json");
+    const manifestEntry = await lstat(manifestPath);
+    if (!manifestEntry.isFile() || manifestEntry.isSymbolicLink()) throw new Error("Invalid manifest.");
+    const manifest: unknown = JSON.parse(await readFile(manifestPath, "utf8"));
+    if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)
+      || !("name" in manifest) || manifest.name !== "skills-manager" || !("bin" in manifest)) {
+      throw new Error("Invalid manifest.");
+    }
+    const declared = typeof manifest.bin === "string" ? manifest.bin
+      : typeof manifest.bin === "object" && manifest.bin !== null && !Array.isArray(manifest.bin)
+        && "skills-manager" in manifest.bin ? manifest.bin["skills-manager"] : undefined;
+    if (typeof declared !== "string" || !declared || path.isAbsolute(declared)) throw new Error("Invalid bin.");
+    executable = await realpath(path.resolve(packagePath, declared));
+    if (!isWithin(executable, runningRoot) || executable === runningRoot || !(await stat(executable)).isFile()) {
+      throw new Error("Invalid bin.");
+    }
+    if (bin.id !== "absent" && (!bin.entry?.isSymbolicLink() || await realpath(binPath) !== executable)) {
+      throw new Error("Conflicting bin.");
+    }
+  } catch {
+    throw new Error("The global skills-manager package or command is unsafe or belongs to another file.");
+  }
+  return { prefix, mode: "update", packageId: installed.id, binId: bin.id, executable };
+}
+
+/** Resolve the actual destination before asking the user to approve it. */
+export async function resolveGlobalUpdate(): Promise<GlobalUpdateInstallation> {
+  const { prefix, mode } = await globalInstallation(await npmExecutable());
+  return { prefix, mode };
 }
 
 async function removeOwnedWorkspace(workspace: string, device: bigint, inode: bigint): Promise<void> {
@@ -275,6 +348,7 @@ export async function prepareUpdateHandoff(options: {
   skillsDir: string;
   build: BuildIdentity;
   registry: string;
+  installation: GlobalUpdateInstallation;
   allowSwitchToMain?: boolean;
   excludedRoots?: readonly string[];
 }): Promise<PreparedUpdateHandoff> {
@@ -305,6 +379,20 @@ export async function prepareUpdateHandoff(options: {
   if (registryScope(currentRegistry) !== registryScope(registry)) {
     throw new Error("The npm registry changed since approval; review the update again.");
   }
+  const installation = await globalInstallation(npm);
+  if (!options.installation || installation.prefix !== options.installation.prefix
+    || installation.mode !== options.installation.mode) {
+    throw new Error("The npm global destination changed since approval; review the update again.");
+  }
+  const protectedRoots = await Promise.all([skillsDir, ...(options.excludedRoots ?? [])].map(canonicalPath));
+  const destinations = [
+    await canonicalPath(path.join(installation.prefix, "lib", "node_modules", "skills-manager")),
+    await canonicalPath(path.join(installation.prefix, "bin", "skills-manager")),
+  ];
+  if (protectedRoots.some((root) => destinations.some((destination) =>
+    isWithin(destination, root) || isWithin(root, destination)))) {
+    throw new Error("The npm global installation overlaps a skills directory.");
+  }
   const cache = await npmConfig(npm, "cache");
   if (!path.isAbsolute(cache)) throw new Error("The npm cache location is unavailable or invalid.");
   const packageRoot = await realpath(fileURLToPath(new URL("../../", import.meta.url)));
@@ -316,7 +404,7 @@ export async function prepareUpdateHandoff(options: {
     throw new Error("The built update helper is unavailable; build the app or use the manual route.");
   }
   const { workspace, device, inode, cleanup } = await privateWorkspace(
-    "skills-manager-update-", [skillsDir, ...(options.excludedRoots ?? []), cache],
+    "skills-manager-update-", [skillsDir, ...(options.excludedRoots ?? []), cache, installation.prefix],
   );
   try {
     const helperPath = path.join(workspace, "app-update-worker.mjs");
@@ -325,7 +413,7 @@ export async function prepareUpdateHandoff(options: {
     return {
       workspace,
       helperPath,
-      args: [workspace, npm, options.target, revision, skillsDir],
+      args: [workspace, npm, options.target, revision, skillsDir, installation.prefix, installation.mode],
       env: {
         ...process.env,
         // This must be set before execve: the helper, npm, and the relaunched
@@ -334,6 +422,9 @@ export async function prepareUpdateHandoff(options: {
         SKILLS_MANAGER_UPDATE_REGISTRY: registry,
         SKILLS_MANAGER_UPDATE_DEVICE: device.toString(),
         SKILLS_MANAGER_UPDATE_INODE: inode.toString(),
+        SKILLS_MANAGER_UPDATE_PACKAGE_ID: installation.packageId,
+        SKILLS_MANAGER_UPDATE_BIN_ID: installation.binId,
+        SKILLS_MANAGER_UPDATE_EXECUTABLE: installation.executable,
       },
       cleanup,
     };

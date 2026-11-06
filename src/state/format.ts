@@ -1,7 +1,7 @@
 import type { Provenance, Skill } from "./types.js";
 
 export function formatProvenance(provenance: Provenance): string {
-  return provenance.kind === "source" ? `from ${provenance.source}` : provenance.kind;
+  return provenance.kind === "source" ? `from repo ${provenance.source}` : provenance.kind === "local" ? "local path" : "repository not recorded";
 }
 
 export function skillsShUrl(source: string): string {
@@ -10,10 +10,10 @@ export function skillsShUrl(source: string): string {
 
 
 export function formatSkillSource(skill: Skill): string {
-  if (skill.provenance.kind === "unknown") return "Source: unknown";
-  if (skill.provenance.kind === "local") return "Source: local";
+  if (skill.provenance.kind === "unknown") return "Repository: not recorded";
+  if (skill.provenance.kind === "local") return "Repository: local path";
   const { source, sourceUrl } = skill.provenance;
-  return `Source: ${skillsShUrl(source)} · ${sourceUrl.replace(/\.git$/, "")}`;
+  return `Repository: ${source} · ${sourceUrl.replace(/\.git$/, "")}`;
 }
 
 export function formatSkillLine(skill: Skill): string {

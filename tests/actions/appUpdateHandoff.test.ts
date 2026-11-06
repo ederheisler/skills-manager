@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { watch, type FSWatcher } from "node:fs";
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { constants as moduleConstants } from "node:module";
 import { constants, tmpdir } from "node:os";
 import path from "node:path";
@@ -13,7 +13,7 @@ const repository = fileURLToPath(new URL("../../", import.meta.url));
 const updateFixtures: string[] = [];
 const updateProcesses = new Set<ChildProcess>();
 const updateWatchers = new Set<FSWatcher>();
-const updateSurvivors = new Set<string>();
+const commit = "0123456789abcdef0123456789abcdef01234567";
 const registry = "https://update-user:update-secret@registry.example.invalid/";
 
 type WorkerResult = { code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string };
@@ -22,8 +22,12 @@ type WorkerFixture = {
   workspace: string;
   skillsDir: string;
   npm: string;
+  prefix: string;
+  app: string;
+  bin: string;
   modules: string;
-  record: string;
+  packRecord: string;
+  installRecord: string;
   launch: string;
   release: string;
   signal: string;
@@ -31,8 +35,7 @@ type WorkerFixture = {
   descendantReady: string;
   descendantSignal: string;
   descendantReaped: string;
-  survivorReady: string;
-  survivorDone: string;
+  packReady: string;
   device: string;
   inode: string;
 };
@@ -50,24 +53,33 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const env = process.env;
+const args = process.argv.slice(2);
+const isPack = args[0] === "pack";
+if (!isPack && args[0] !== "install") process.exit(2);
 const compileCache = env.SM_TEST_ENABLE_COMPILE_CACHE === "1" ? require("node:module").enableCompileCache() : undefined;
 const configs = Object.fromEntries(Object.entries(env).filter(([key]) => key.toLowerCase().startsWith("npm_config_")));
-const manifest = JSON.parse(fs.readFileSync("package.json", "utf8"));
 const cache = env.npm_config_cache;
-fs.writeFileSync(env.SM_TEST_RECORD, JSON.stringify({
-  argv: process.argv.slice(2), cwd: process.cwd(), manifest, configs,
-  home: env.HOME, projectMode: fs.statSync(".").mode & 0o777,
+fs.writeFileSync(isPack ? env.SM_TEST_PACK_RECORD : env.SM_TEST_INSTALL_RECORD, JSON.stringify({
+  argv: args, cwd: process.cwd(), configs,
+  home: env.HOME, workspaceMode: fs.statSync(".").mode & 0o777,
   cacheMode: fs.statSync(cache).mode & 0o777,
   temporary: env.TMPDIR, tmp: env.TMP, temp: env.TEMP,
   temporaryMode: fs.statSync(env.TMPDIR).mode & 0o777,
-  privateEnvExposed: ["SKILLS_MANAGER_UPDATE_REGISTRY", "SKILLS_MANAGER_UPDATE_DEVICE", "SKILLS_MANAGER_UPDATE_INODE"].some((key) => key in env),
+  privateEnvExposed: ["SKILLS_MANAGER_UPDATE_REGISTRY", "SKILLS_MANAGER_UPDATE_DEVICE", "SKILLS_MANAGER_UPDATE_INODE",
+    "SKILLS_MANAGER_UPDATE_PACKAGE_ID", "SKILLS_MANAGER_UPDATE_BIN_ID", "SKILLS_MANAGER_UPDATE_EXECUTABLE"].some((key) => key in env),
   ...(compileCache ? { compileCacheStatus: compileCache.status } : {}),
   hadLockfile: fs.existsSync("package-lock.json"),
 }));
 process.stdout.write("UNTRUSTED " + env.npm_config_registry + "\\x1b[31m\\n");
 process.stderr.write("UNTRUSTED " + env.npm_config_registry + "\\x1b[31m\\n");
-if (env.SM_TEST_NPM_MODE === "failure") process.exit(23);
-if (env.SM_TEST_NPM_MODE === "hold") {
+if (env.SM_TEST_NPM_MODE === "failure" || (!isPack && env.SM_TEST_NPM_MODE === "install-failure")) process.exit(23);
+const pack = () => {
+  const destination = args[args.indexOf("--pack-destination") + 1];
+  fs.writeFileSync(path.join(destination, "skills-manager-test.tgz"), JSON.stringify({
+    spec: args[1], lockDisabled: env.npm_config_package_lock === "false",
+  }));
+};
+if (isPack && env.SM_TEST_NPM_MODE === "hold") {
   let interrupted = false;
   const finish = () => {
     if (interrupted && fs.existsSync(env.SM_TEST_RELEASE)) {
@@ -87,8 +99,38 @@ if (env.SM_TEST_NPM_MODE === "hold") {
     fs.writeFileSync(env.SM_TEST_DESC_REAPED + ".tmp", "reaped");
     fs.renameSync(env.SM_TEST_DESC_REAPED + ".tmp", env.SM_TEST_DESC_REAPED);
   });
+} else if (isPack && env.SM_TEST_NPM_MODE === "pack-hold") {
+  const finish = () => {
+    if (fs.existsSync(env.SM_TEST_RELEASE)) { pack(); process.exit(0); }
+  };
+  fs.watch(path.dirname(env.SM_TEST_RELEASE), finish);
+  fs.writeFileSync(env.SM_TEST_PACK_READY, "ready");
+  finish();
+} else if (isPack) {
+  pack();
 } else {
-  fs.cpSync(env.SM_TEST_MODULES, path.join(process.cwd(), "node_modules"), { recursive: true });
+  const prefix = args[args.indexOf("--prefix") + 1];
+  const archive = args[args.indexOf("--prefix") + 2];
+  const packed = JSON.parse(fs.readFileSync(archive, "utf8"));
+  const app = path.join(prefix, "lib", "node_modules", "skills-manager");
+  const bin = path.join(prefix, "bin", "skills-manager");
+  fs.rmSync(app, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(app), { recursive: true });
+  fs.cpSync(path.join(env.SM_TEST_MODULES, "skills-manager"), app, { recursive: true, verbatimSymlinks: true });
+  const manifestFile = path.join(app, "package.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
+  manifest.buildRevision = packed.spec.split("#")[1];
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+  if (!packed.lockDisabled) {
+    const skillsManifest = path.join(app, "node_modules", "skills", "package.json");
+    const skills = JSON.parse(fs.readFileSync(skillsManifest, "utf8"));
+    skills.version = "0.9.0";
+    fs.writeFileSync(skillsManifest, JSON.stringify(skills));
+  }
+  fs.mkdirSync(path.dirname(bin), { recursive: true });
+  fs.rmSync(bin, { force: true });
+  const declared = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.["skills-manager"];
+  if (typeof declared === "string") fs.symlinkSync(path.relative(path.dirname(bin), path.resolve(app, declared)), bin);
 }
 `;
 
@@ -103,30 +145,14 @@ fs.watch(path.dirname(process.env.SM_TEST_DESC_READY), () => {});
 fs.writeFileSync(process.env.SM_TEST_DESC_READY, "ready");
 `;
 
-const fakeSurvivor = `const fs = require("node:fs");
-const path = require("node:path");
-const env = process.env;
-const finish = () => {
-  if (!fs.existsSync(env.SM_TEST_RELEASE)) return;
-  let result = "done";
-  try { fs.writeFileSync(path.join(env.SM_TEST_WORKSPACE, "survivor-finished"), "finished"); }
-  catch { result = "workspace unavailable"; }
-  fs.writeFileSync(env.SM_TEST_SURVIVOR_DONE + ".tmp", result);
-  fs.renameSync(env.SM_TEST_SURVIVOR_DONE + ".tmp", env.SM_TEST_SURVIVOR_DONE);
-  process.exit(0);
-};
-fs.watch(path.dirname(env.SM_TEST_RELEASE), finish);
-fs.writeFileSync(path.join(env.SM_TEST_WORKSPACE, "survivor-active"), "active");
-fs.writeFileSync(env.SM_TEST_SURVIVOR_READY + ".tmp", "ready");
-fs.renameSync(env.SM_TEST_SURVIVOR_READY + ".tmp", env.SM_TEST_SURVIVOR_READY);
-finish();
-`;
 
-const fakeApp = `import { existsSync, renameSync, watch, writeFileSync } from "node:fs";
+const fakeApp = `import { existsSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { enableCompileCache } from "node:module";
+import { inspectSkillsRuntime } from "./actions/sandbox.js";
 const compileCache = process.env.SM_TEST_ENABLE_COMPILE_CACHE === "1" ? enableCompileCache() : undefined;
+const runtime = await inspectSkillsRuntime();
+const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 let interrupted = false;
 if (process.env.SM_TEST_APP_MODE === "hold") {
   const finish = () => {
@@ -143,22 +169,16 @@ if (process.env.SM_TEST_APP_MODE === "hold") {
     finish();
   });
 }
-if (process.env.SM_TEST_APP_MODE === "descendant") {
-  const child = spawn(process.execPath, [process.env.SM_TEST_SURVIVOR], { stdio: "ignore" });
-  child.unref();
-  const finish = () => { if (existsSync(process.env.SM_TEST_SURVIVOR_READY)) process.exit(19); };
-  watch(path.dirname(process.env.SM_TEST_SURVIVOR_READY), finish);
-  finish();
-}
 writeFileSync(process.env.SM_TEST_LAUNCH + ".tmp", JSON.stringify({
-  args: process.argv.slice(2), workspaceExists: existsSync(process.env.SM_TEST_WORKSPACE),
-  privateEnvExposed: ["SKILLS_MANAGER_UPDATE_REGISTRY", "SKILLS_MANAGER_UPDATE_DEVICE", "SKILLS_MANAGER_UPDATE_INODE"].some((key) => key in process.env),
+  args: process.argv.slice(2), executable: process.argv[1], pid: process.pid,
+  runtime, revision: manifest.buildRevision,
+  workspaceExists: existsSync(process.env.SM_TEST_WORKSPACE),
+  privateEnvExposed: ["SKILLS_MANAGER_UPDATE_REGISTRY", "SKILLS_MANAGER_UPDATE_DEVICE", "SKILLS_MANAGER_UPDATE_INODE",
+    "SKILLS_MANAGER_UPDATE_PACKAGE_ID", "SKILLS_MANAGER_UPDATE_BIN_ID", "SKILLS_MANAGER_UPDATE_EXECUTABLE"].some((key) => key in process.env),
   ...(compileCache ? { compileCacheStatus: compileCache.status } : {}),
 }));
 renameSync(process.env.SM_TEST_LAUNCH + ".tmp", process.env.SM_TEST_LAUNCH);
-if (process.env.SM_TEST_APP_MODE !== "hold" && process.env.SM_TEST_APP_MODE !== "descendant") {
-  process.exit(Number(process.env.SM_TEST_APP_EXIT || 0));
-}
+if (process.env.SM_TEST_APP_MODE !== "hold") process.exit(Number(process.env.SM_TEST_APP_EXIT || 0));
 `;
 
 async function updateFixture(skillsName = "skills ' with spaces", workspaceName = "workspace"): Promise<WorkerFixture> {
@@ -167,18 +187,21 @@ async function updateFixture(skillsName = "skills ' with spaces", workspaceName 
   const workspace = path.join(base, workspaceName);
   const skillsDir = path.join(base, skillsName);
   const modules = path.join(base, "staged-modules");
+  const prefix = path.join(base, "global prefix");
+  const app = path.join(prefix, "lib", "node_modules", "skills-manager");
+  const bin = path.join(prefix, "bin", "skills-manager");
   await mkdir(workspace, { mode: 0o700 });
-  await mkdir(skillsDir);
+  await Promise.all([mkdir(skillsDir), mkdir(prefix)]);
   await writeFile(path.join(skillsDir, "sentinel"), "unchanged");
   await writeFile(path.join(workspace, "app-update-worker.mjs"), await transpiled("src/actions/appUpdateWorker.ts"));
   const identity = await lstat(workspace, { bigint: true });
   const npm = path.join(base, "fake-npm");
   await writeFile(npm, fakeNpm, { mode: 0o700 });
   await writeFile(path.join(base, "descendant.cjs"), fakeDescendant);
-  await writeFile(path.join(base, "survivor.cjs"), fakeSurvivor);
   return {
-    base, workspace, skillsDir, npm, modules,
-    record: path.join(base, "npm-record.json"),
+    base, workspace, skillsDir, npm, prefix, app, bin, modules,
+    packRecord: path.join(base, "pack-record.json"),
+    installRecord: path.join(base, "install-record.json"),
     launch: path.join(base, "launch.json"),
     release: path.join(base, "release"),
     signal: path.join(base, "signal"),
@@ -186,42 +209,72 @@ async function updateFixture(skillsName = "skills ' with spaces", workspaceName 
     descendantReady: path.join(base, "descendant-ready"),
     descendantSignal: path.join(base, "descendant-signal"),
     descendantReaped: path.join(base, "descendant-reaped"),
-    survivorReady: path.join(base, "survivor-ready"),
-    survivorDone: path.join(base, "survivor-done"),
+    packReady: path.join(base, "pack-ready"),
     device: identity.dev.toString(), inode: identity.ino.toString(),
   };
 }
 
 async function stageRuntime(f: WorkerFixture, options: {
-  appName?: string; bin?: unknown; skillsName?: string; nestedSkills?: boolean; missingDependency?: boolean;
+  appName?: string; bin?: unknown; skillsName?: string; escapingSkills?: boolean;
+  missingDependency?: boolean; identityCommit?: string;
 } = {}): Promise<void> {
   const app = path.join(f.modules, "skills-manager");
-  const skills = path.join(f.modules, "skills");
+  const skills = options.escapingSkills ? path.join(f.base, "outside-skills") : path.join(app, "node_modules", "skills");
   await mkdir(path.join(app, "dist", "actions"), { recursive: true });
   await mkdir(path.join(app, "dist", "state"), { recursive: true });
   await mkdir(skills, { recursive: true });
   await writeFile(path.join(app, "package.json"), JSON.stringify({
     name: options.appName ?? "skills-manager", type: "module",
     bin: options.bin ?? { "skills-manager": "./dist/cli.js" },
+    dependencies: { skills: "latest" },
   }));
   await writeFile(path.join(app, "dist", "cli.js"), fakeApp);
   // Exercise the installed app's real inspector, not a test replacement.
   await writeFile(path.join(app, "dist", "actions", "sandbox.js"), await transpiled("src/actions/sandbox.ts"));
   await writeFile(path.join(app, "dist", "state", "validation.js"), await transpiled("src/state/validation.ts"));
+  await writeFile(path.join(app, "dist", "state", "buildIdentity.json"), JSON.stringify({
+    version: "0.1.0", commit: options.identityCommit ?? commit, dirty: false, source: "git",
+  }));
+  await writeFile(path.join(app, "package-lock.json"), JSON.stringify({
+    lockfileVersion: 3, packages: { "node_modules/skills": { version: "0.9.0" } },
+  }));
   await writeFile(path.join(skills, "package.json"), JSON.stringify({
     name: options.skillsName ?? "skills", version: "1.2.3", type: "module", bin: "./cli.js",
     ...(options.missingDependency ? { dependencies: { "missing-package": "1.0.0" } } : {}),
   }));
   await writeFile(path.join(skills, "cli.js"), "export {};\n");
-  if (options.nestedSkills) {
+  if (options.escapingSkills) {
     await mkdir(path.join(app, "node_modules"), { recursive: true });
-    await cp(skills, path.join(app, "node_modules", "skills"), { recursive: true });
+    await symlink(skills, path.join(app, "node_modules", "skills"), "dir");
   }
+}
+
+async function installExisting(f: WorkerFixture): Promise<{ packageId: string; binId: string }> {
+  await mkdir(path.dirname(f.app), { recursive: true });
+  await mkdir(path.dirname(f.bin), { recursive: true });
+  await cp(path.join(f.modules, "skills-manager"), f.app, { recursive: true });
+  const oldSkills = path.join(f.app, "node_modules", "skills", "package.json");
+  const manifest = JSON.parse(await readFile(oldSkills, "utf8"));
+  await writeFile(oldSkills, JSON.stringify({ ...manifest, version: "0.9.0" }));
+  await symlink("../lib/node_modules/skills-manager/dist/cli.js", f.bin);
+  const appIdentity = await lstat(f.app, { bigint: true });
+  const binIdentity = await lstat(f.bin, { bigint: true });
+  return { packageId: `${appIdentity.dev}:${appIdentity.ino}`, binId: `${binIdentity.dev}:${binIdentity.ino}` };
+}
+
+async function resetWorkspace(f: WorkerFixture): Promise<void> {
+  await mkdir(f.workspace, { mode: 0o700 });
+  await writeFile(path.join(f.workspace, "app-update-worker.mjs"), await transpiled("src/actions/appUpdateWorker.ts"));
+  const identity = await lstat(f.workspace, { bigint: true });
+  f.device = identity.dev.toString();
+  f.inode = identity.ino.toString();
 }
 
 function startWorker(f: WorkerFixture, options: {
   target?: "all" | "cli"; revision?: string; npm?: string; device?: string; inode?: string;
-  npmMode?: "failure" | "hold"; appMode?: "hold" | "descendant"; appExit?: number; compileCache?: boolean;
+  mode?: "install" | "update"; packageId?: string; binId?: string;
+  npmMode?: "failure" | "install-failure" | "hold" | "pack-hold"; appMode?: "hold"; appExit?: number; compileCache?: boolean;
+  cwd?: string;
 } = {}): { child: ChildProcess; result: Promise<WorkerResult> } {
   const env = {
     ...process.env,
@@ -231,6 +284,9 @@ function startWorker(f: WorkerFixture, options: {
     SKILLS_MANAGER_UPDATE_REGISTRY: registry,
     SKILLS_MANAGER_UPDATE_DEVICE: options.device ?? f.device,
     SKILLS_MANAGER_UPDATE_INODE: options.inode ?? f.inode,
+    SKILLS_MANAGER_UPDATE_PACKAGE_ID: options.packageId ?? "absent",
+    SKILLS_MANAGER_UPDATE_BIN_ID: options.binId ?? "absent",
+    SKILLS_MANAGER_UPDATE_EXECUTABLE: options.mode === "update" ? path.join(f.app, "dist", "cli.js") : "",
     npm_config_userconfig: path.join(f.base, "user.npmrc"),
     NPM_CONFIG_REGISTRY: "https://wrong.example.invalid/",
     NPM_CONFIG_CACHE: path.join(f.base, "wrong-cache"),
@@ -238,14 +294,14 @@ function startWorker(f: WorkerFixture, options: {
     NPM_CONFIG_LOCATION: "global",
     NPM_CONFIG_LOGS_DIR: f.skillsDir,
     NPM_CONFIG_TIMING: "true",
-    SM_TEST_RECORD: f.record, SM_TEST_MODULES: f.modules, SM_TEST_LAUNCH: f.launch,
+    NPM_CONFIG_PACKAGE_LOCK: "true",
+    SM_TEST_PACK_RECORD: f.packRecord, SM_TEST_INSTALL_RECORD: f.installRecord,
+    SM_TEST_MODULES: f.modules, SM_TEST_LAUNCH: f.launch, SM_TEST_PACK_READY: f.packReady,
     SM_TEST_WORKSPACE: f.workspace, SM_TEST_RELEASE: f.release,
     SM_TEST_SIGNAL: f.signal, SM_TEST_DONE: f.done,
     SM_TEST_DESCENDANT: path.join(f.base, "descendant.cjs"),
     SM_TEST_DESC_READY: f.descendantReady, SM_TEST_DESC_SIGNAL: f.descendantSignal,
     SM_TEST_DESC_REAPED: f.descendantReaped,
-    SM_TEST_SURVIVOR: path.join(f.base, "survivor.cjs"),
-    SM_TEST_SURVIVOR_READY: f.survivorReady, SM_TEST_SURVIVOR_DONE: f.survivorDone,
     SM_TEST_NPM_MODE: options.npmMode ?? "success", SM_TEST_APP_MODE: options.appMode ?? "normal",
     SM_TEST_APP_EXIT: String(options.appExit ?? 0),
     ...(options.compileCache ? {
@@ -256,8 +312,8 @@ function startWorker(f: WorkerFixture, options: {
   };
   const child = spawn(process.execPath, [
     path.join(f.workspace, "app-update-worker.mjs"), f.workspace, options.npm ?? f.npm,
-    options.target ?? "all", options.revision ?? "main", f.skillsDir,
-  ], { env, stdio: ["ignore", "pipe", "pipe"] });
+    options.target ?? "all", options.revision ?? "main", f.skillsDir, f.prefix, options.mode ?? "install",
+  ], { env, cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
   updateProcesses.add(child);
   let stdout = "";
   let stderr = "";
@@ -301,59 +357,76 @@ afterEach(async () => {
     return closed;
   });
   await Promise.all(stopping);
-  await Promise.all([...updateSurvivors].map(waitForFile));
-  updateSurvivors.clear();
   await Promise.all(updateFixtures.splice(0).map((base) => rm(base, { recursive: true, force: true })));
 });
 
-describe("isolated application update worker", () => {
+describe("persistent global application update worker", () => {
   it.each([
-    { target: "all" as const, revision: "main" },
-    { target: "cli" as const, revision: "0123456789abcdef0123456789abcdef01234567" },
-    { target: "cli" as const, revision: "main" },
-  ])("installs and launches the approved $target revision $revision in a private project", async ({ target, revision }) => {
+    { target: "all" as const, revision: "main", update: false },
+    { target: "cli" as const, revision: commit, update: true },
+    { target: "cli" as const, revision: "main", update: false },
+  ])("installs the approved $target revision $revision and restarts the global app", async ({ target, revision, update }) => {
     const f = await updateFixture();
     await stageRuntime(f);
-    const result = await startWorker(f, { target, revision }).result;
+    const previous = update ? await installExisting(f) : {};
+    const worker = startWorker(f, { target, revision, mode: update ? "update" : "install", ...previous });
+    const result = await worker.result;
     expect(result.code).toBe(0);
     expect(result.signal).toBeNull();
-    const install = JSON.parse(await readFile(f.record, "utf8"));
-    expect(install.argv).toEqual(["install", "--prefer-online", "--no-audit", "--no-fund"]);
-    expect(path.dirname(install.cwd)).toBe(f.workspace);
-    expect(install.manifest).toMatchObject({
-      private: true,
-      dependencies: { "skills-manager": `github:ederheisler/skills-manager#${revision}`, skills: "latest" },
-      overrides: { skills: "$skills" },
+    const pack = JSON.parse(await readFile(f.packRecord, "utf8"));
+    const install = JSON.parse(await readFile(f.installRecord, "utf8"));
+    expect(pack.argv).toEqual([
+      "pack", `github:ederheisler/skills-manager#${revision}`,
+      "--pack-destination", path.join(f.workspace, "pack"), "--no-audit", "--no-fund",
+    ]);
+    expect(install.argv).toEqual([
+      "install", "--global", "--prefix", f.prefix, path.join(f.workspace, "pack", "skills-manager-test.tgz"),
+      "--no-audit", "--no-fund",
+    ]);
+    for (const command of [pack, install]) {
+      expect(command.cwd).toBe(f.workspace);
+      expect(command.hadLockfile).toBe(false);
+      expect(command.workspaceMode).toBe(0o700);
+      expect(command.cacheMode).toBe(0o700);
+      expect(path.dirname(command.configs.npm_config_cache)).toBe(f.workspace);
+      expect(path.dirname(command.temporary)).toBe(f.workspace);
+      expect(command.tmp).toBe(command.temporary);
+      expect(command.temp).toBe(command.temporary);
+      expect(command.temporaryMode).toBe(0o700);
+      expect(command.configs.npm_config_registry).toBe(registry);
+      expect(command.configs.npm_config_global).toBe("false");
+      expect(command.configs.npm_config_location).toBe("project");
+      expect(command.configs.npm_config_package_lock).toBe("false");
+      expect(command.configs.npm_config_force).toBe("false");
+      expect(command.configs.npm_config_loglevel).toBe("silent");
+      expect(command.configs.npm_config_logs_max).toBe("0");
+      expect(command.configs.npm_config_logs_dir).toBe(path.join(command.configs.npm_config_cache, "_logs"));
+      expect(command.configs.npm_config_timing).toBe("false");
+      expect(command.configs.npm_config_update_notifier).toBe("false");
+      expect(command.privateEnvExposed).toBe(false);
+      for (const key of ["REGISTRY", "CACHE", "GLOBAL", "LOCATION", "LOGS_DIR", "TIMING", "PACKAGE_LOCK"]) {
+        expect(command.configs[`NPM_CONFIG_${key}`]).toBeUndefined();
+      }
+      expect(command.home).toBe(f.base);
+      expect(command.configs.npm_config_userconfig).toBe(path.join(f.base, "user.npmrc"));
+    }
+    const launched = JSON.parse(await readFile(f.launch, "utf8"));
+    expect(launched).toMatchObject({
+      args: ["--skills-dir", f.skillsDir], executable: path.join(f.app, "dist", "cli.js"),
+      pid: worker.child.pid, revision, workspaceExists: false, privateEnvExposed: false,
+      runtime: { version: "1.2.3", packageRoot: path.join(f.app, "node_modules", "skills") },
     });
-    expect(install.manifest.scripts).toBeUndefined();
-    expect(install.hadLockfile).toBe(false);
-    expect(install.projectMode).toBe(0o700);
-    expect(install.cacheMode).toBe(0o700);
-    expect(path.dirname(install.configs.npm_config_cache)).toBe(f.workspace);
-    expect(path.dirname(install.temporary)).toBe(f.workspace);
-    expect(install.tmp).toBe(install.temporary);
-    expect(install.temp).toBe(install.temporary);
-    expect(install.temporaryMode).toBe(0o700);
-    expect(install.configs.npm_config_registry).toBe(registry);
-    expect(install.configs.npm_config_global).toBe("false");
-    expect(install.configs.npm_config_location).toBe("project");
-    expect(install.configs.npm_config_loglevel).toBe("silent");
-    expect(install.configs.npm_config_logs_max).toBe("0");
-    expect(install.configs.npm_config_logs_dir).toBe(path.join(install.configs.npm_config_cache, "_logs"));
-    expect(install.configs.npm_config_timing).toBe("false");
-    expect(install.configs.npm_config_update_notifier).toBe("false");
-    expect(install.privateEnvExposed).toBe(false);
-    expect(install.configs.NPM_CONFIG_REGISTRY).toBeUndefined();
-    expect(install.configs.NPM_CONFIG_CACHE).toBeUndefined();
-    expect(install.configs.NPM_CONFIG_GLOBAL).toBeUndefined();
-    expect(install.configs.NPM_CONFIG_LOCATION).toBeUndefined();
-    expect(install.configs.NPM_CONFIG_LOGS_DIR).toBeUndefined();
-    expect(install.configs.NPM_CONFIG_TIMING).toBeUndefined();
-    expect(install.home).toBe(f.base);
-    expect(install.configs.npm_config_userconfig).toBe(path.join(f.base, "user.npmrc"));
-    expect(JSON.parse(await readFile(f.launch, "utf8"))).toEqual({
-      args: ["--skills-dir", f.skillsDir], workspaceExists: true, privateEnvExposed: false,
-    });
+    expect(await realpath(f.bin)).toBe(path.join(f.app, "dist", "cli.js"));
+    expect(JSON.parse(await readFile(path.join(f.app, "dist", "state", "buildIdentity.json"), "utf8")).commit).toBe(commit);
+    expect(result.stderr).toBe([
+      "Updating skills-manager…",
+      `Downloading and building from GitHub (${revision})…`,
+      `Installing to ${JSON.stringify(f.prefix)}…`,
+      "Refreshing Vercel skills CLI…",
+      "Done. Restarting skills-manager…",
+      "",
+    ].join("\n"));
+    expect(result.stdout).toBe("");
     expect(result.stdout + result.stderr).not.toContain("update-secret");
     expect(result.stdout + result.stderr).not.toContain("\x1b");
     await expectMissing(f.workspace);
@@ -365,8 +438,10 @@ describe("isolated application update worker", () => {
     await stageRuntime(f);
     const result = await startWorker(f, { compileCache: true }).result;
     expect(result.code).toBe(0);
-    const install = JSON.parse(await readFile(f.record, "utf8"));
+    const pack = JSON.parse(await readFile(f.packRecord, "utf8"));
+    const install = JSON.parse(await readFile(f.installRecord, "utf8"));
     const app = JSON.parse(await readFile(f.launch, "utf8"));
+    expect(pack.compileCacheStatus).toBe(moduleConstants.compileCacheStatus.DISABLED);
     expect(install.compileCacheStatus).toBe(moduleConstants.compileCacheStatus.DISABLED);
     expect(app.compileCacheStatus).toBe(moduleConstants.compileCacheStatus.DISABLED);
     expect(app.args).toEqual(["--skills-dir", f.skillsDir]);
@@ -375,18 +450,36 @@ describe("isolated application update worker", () => {
     expect(await readFile(path.join(f.skillsDir, "sentinel"), "utf8")).toBe("unchanged");
   });
 
-  it("reports a quoted recovery command and removes the workspace after npm fails", async () => {
+  it("leaves the existing installation usable after npm fails and can retry", async () => {
     const f = await updateFixture();
-    const result = await startWorker(f, { npmMode: "failure" }).result;
+    await stageRuntime(f);
+    const previous = await installExisting(f);
+    const result = await startWorker(f, { mode: "update", ...previous, npmMode: "install-failure" }).result;
     expect(result.code).toBe(23);
-    expect(result.stderr).toContain("while installing the update");
-    expect(result.stderr).toContain(f.workspace);
-    expect(result.stderr).toContain("npx --yes --prefer-online github:ederheisler/skills-manager --skills-dir '");
+    expect(result.stderr).toContain("Installing skills-manager failed: npm exited with code 23");
+    expect(result.stderr).not.toContain("UNTRUSTED");
     expect(result.stderr).toContain(`/skills '"'"' with spaces'`);
     expect(result.stderr).not.toContain("update-secret");
     expect(result.stdout + result.stderr).not.toContain("\x1b");
+    expect(JSON.parse(await readFile(path.join(f.app, "node_modules", "skills", "package.json"), "utf8")).version).toBe("0.9.0");
+    expect(await realpath(f.bin)).toBe(path.join(f.app, "dist", "cli.js"));
     await expectMissing(f.workspace);
     await expectMissing(f.launch);
+    await resetWorkspace(f);
+    expect((await startWorker(f, { mode: "update", ...previous }).result).code).toBe(0);
+    expect(JSON.parse(await readFile(f.launch, "utf8")).runtime.version).toBe("1.2.3");
+    await expectMissing(f.workspace);
+  });
+
+  it("reports a download failure and the npm exit code without npm output", async () => {
+    const f = await updateFixture();
+    const result = await startWorker(f, { npmMode: "failure" }).result;
+    expect(result.code).toBe(23);
+    expect(result.stderr).toContain("Downloading and building failed: npm exited with code 23");
+    expect(result.stderr).not.toContain("UNTRUSTED");
+    expect(result.stderr).not.toContain("Installing to ");
+    expect(result.stderr).toContain("To reinstall and start the app again, run:");
+    await expectMissing(f.installRecord);
   });
 
   it("escapes control and Unicode format characters in paths and manual recovery", async () => {
@@ -395,19 +488,21 @@ describe("isolated application update worker", () => {
     expect(result.code).not.toBe(0);
     expect(result.stdout + result.stderr).not.toContain("\x1b");
     expect(result.stdout + result.stderr).not.toContain("\u202e");
-    expect(result.stderr).toContain("\\u{202e}");
     expect(result.stderr).toContain("printf '%b.'");
-    expect(result.stderr).toContain("npx --yes --prefer-online github:ederheisler/skills-manager --skills-dir");
-    expect(result.stderr).toContain('"${SKILLS_DIR%.}"');
+    expect(result.stderr).toContain('"$SM_SKILLS_DIR"');
     expect(result.stderr).toContain("\\0033\\0133\\0063\\0061\\0155\\0342\\0200\\0256\\0012");
     await expectMissing(f.workspace);
+    const retained = await updateFixture("skills", "workspace\u202e");
+    const unsafe = await startWorker(retained, { inode: (BigInt(retained.inode) + 1n).toString() }).result;
+    expect(unsafe.stderr).not.toContain("\u202e");
+    expect(unsafe.stderr).toContain("\\u{202e}");
+    expect((await lstat(retained.workspace)).isDirectory()).toBe(true);
   });
 
   it("cleans up and gives manual recovery when npm cannot be launched", async () => {
     const f = await updateFixture();
     const result = await startWorker(f, { npm: path.join(f.base, "absent-npm") }).result;
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain("npx --yes --prefer-online github:ederheisler/skills-manager --skills-dir");
     await expectMissing(f.workspace);
     await expectMissing(f.launch);
   });
@@ -420,15 +515,24 @@ describe("isolated application update worker", () => {
     { name: "bin without the declared command", options: { bin: { another: "./dist/cli.js" } } },
     { name: "directory in place of the app bin", options: { bin: "./dist/actions" } },
     { name: "wrong direct CLI identity", options: { skillsName: "another-cli" } },
-    { name: "different CLI selected by the app", options: { nestedSkills: true } },
+    { name: "CLI runtime outside the app", options: { escapingSkills: true } },
     { name: "incomplete CLI dependency closure", options: { missingDependency: true } },
   ])("refuses $name before launching", async ({ options }) => {
     const f = await updateFixture();
     await stageRuntime(f, options);
     const result = await startWorker(f).result;
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain("while validating the staged update");
-    expect(result.stderr).toContain("npx --yes --prefer-online github:ederheisler/skills-manager --skills-dir");
+    expect(result.stderr).toContain("Validating the installation failed:");
+    await expectMissing(f.launch);
+    await expectMissing(f.workspace);
+  });
+
+  it("refuses to restart a CLI-only update whose installed app has a different SHA", async () => {
+    const f = await updateFixture();
+    await stageRuntime(f, { identityCommit: "1111111111111111111111111111111111111111" });
+    const result = await startWorker(f, { target: "cli", revision: commit }).result;
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("Validating the installation failed:");
     await expectMissing(f.launch);
     await expectMissing(f.workspace);
   });
@@ -445,63 +549,44 @@ describe("isolated application update worker", () => {
     await expectMissing(f.workspace);
   });
 
-  it("keeps the private project alive until the new application exits", async () => {
+  it("leaves the checkout untouched when updating from outside the global installation", async () => {
     const f = await updateFixture();
+    const checkout = path.join(f.base, "checkout");
+    await mkdir(path.join(checkout, ".git"), { recursive: true });
+    await writeFile(path.join(checkout, "sentinel"), "unchanged checkout");
     await stageRuntime(f);
-    const { result } = startWorker(f, { appMode: "hold" });
-    await waitForFile(f.launch);
-    expect((await lstat(f.workspace)).isDirectory()).toBe(true);
-    await writeFile(f.release, "quit");
-    expect((await result).code).toBe(0);
+    const result = await startWorker(f, { cwd: checkout }).result;
+    expect(result.code).toBe(0);
+    expect(await readdir(checkout)).toEqual([".git", "sentinel"]);
+    expect(await readFile(path.join(checkout, "sentinel"), "utf8")).toBe("unchanged checkout");
+    expect(await realpath(f.bin)).toBe(path.join(f.app, "dist", "cli.js"));
     await expectMissing(f.workspace);
   });
 
-  it("propagates an application failure and preserves its workspace", async () => {
+  it("leaves the global installation available after the restarted app fails", async () => {
     const f = await updateFixture();
     await stageRuntime(f);
     const result = await startWorker(f, { appExit: 19 }).result;
     expect(result.code).toBe(19);
-    expect(result.stderr).toContain("while starting or running the new application");
-    expect(result.stderr).toContain("npx --yes --prefer-online github:ederheisler/skills-manager --skills-dir");
-    expect((await lstat(f.workspace)).isDirectory()).toBe(true);
-    expect(result.stderr).toContain(f.workspace);
+    expect(await realpath(f.bin)).toBe(path.join(f.app, "dist", "cli.js"));
+    expect(JSON.parse(await readFile(f.launch, "utf8")).workspaceExists).toBe(false);
+    await expectMissing(f.workspace);
   });
 
-  it("keeps a failed app's workspace while its surviving child still uses it", async () => {
-    const f = await updateFixture();
-    await stageRuntime(f);
-    const worker = startWorker(f, { appMode: "descendant" });
-    await waitForFile(f.survivorReady);
-    updateSurvivors.add(f.survivorDone);
-    const result = await worker.result;
-    expect(result.code).toBe(19);
-    expect((await lstat(f.workspace)).isDirectory()).toBe(true);
-    expect(await readFile(path.join(f.workspace, "survivor-active"), "utf8")).toBe("active");
-    expect(result.stderr).toContain(f.workspace);
-    expect(result.stderr).toContain("wait for any remaining processes");
-    expect(result.stderr).toContain("npx --yes --prefer-online github:ederheisler/skills-manager --skills-dir");
-    await writeFile(f.release, "quit");
-    await waitForFile(f.survivorDone);
-    expect(await readFile(f.survivorDone, "utf8")).toBe("done");
-    expect(await readFile(path.join(f.workspace, "survivor-finished"), "utf8")).toBe("finished");
-  });
-
-  it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)("forwards %s, waits for the app, and preserves its workspace", async (signal) => {
+  it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)("delivers %s to the persistent app after staging is removed", async (signal) => {
     const f = await updateFixture();
     await stageRuntime(f);
     const worker = startWorker(f, { appMode: "hold" });
     await waitForFile(f.launch);
-    worker.child.kill(signal);
+    expect(JSON.parse(await readFile(f.launch, "utf8")).pid).toBe(worker.child.pid);
+    await expectMissing(f.workspace);
+    expect(worker.child.kill(signal)).toBe(true);
     await waitForFile(f.signal);
     expect(await readFile(f.signal, "utf8")).toBe(signal);
-    expect((await lstat(f.workspace)).isDirectory()).toBe(true);
     await writeFile(f.release, "quit");
-    const result = await worker.result;
-    expect(result.signal === signal || result.code === 128 + constants.signals[signal]).toBe(true);
+    expect((await worker.result).code).toBe(0);
     expect(await readFile(f.done, "utf8")).toBe("done");
-    expect((await lstat(f.workspace)).isDirectory()).toBe(true);
-    expect(result.stderr).toContain(f.workspace);
-    expect(result.stderr).toContain("npx --yes --prefer-online github:ederheisler/skills-manager --skills-dir");
+    expect(await realpath(f.bin)).toBe(path.join(f.app, "dist", "cli.js"));
   });
 
   it("signals the npm process group and waits for its lifecycle descendants", async () => {
@@ -529,19 +614,110 @@ describe("isolated application update worker", () => {
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain(f.workspace);
     expect((await lstat(f.workspace)).isDirectory()).toBe(true);
-    await expectMissing(f.record);
+    await expectMissing(f.packRecord);
   });
 
-  it("does not delete a replacement workspace after the app exits", async () => {
+  it.each(["package", "bin"] as const)("refuses a hostile global %s appearing before npm", async (entry) => {
+    const f = await updateFixture();
+    const checkout = path.join(f.base, "checkout");
+    const target = entry === "package" ? f.app : f.bin;
+    await mkdir(path.join(checkout, ".git"), { recursive: true });
+    await writeFile(path.join(checkout, "sentinel"), "untouched");
+    await mkdir(path.dirname(target), { recursive: true });
+    await symlink(entry === "package" ? checkout : path.join(checkout, "sentinel"), target);
+    const result = await startWorker(f).result;
+    expect(result.code).not.toBe(0);
+    expect((await lstat(target)).isSymbolicLink()).toBe(true);
+    expect(await readFile(path.join(checkout, "sentinel"), "utf8")).toBe("untouched");
+    await expectMissing(f.packRecord);
+    await expectMissing(f.installRecord);
+    await expectMissing(f.workspace);
+  });
+
+  it.each(["package", "bin"] as const)("rechecks the global %s after packing and before installing", async (entry) => {
+    const f = await updateFixture();
+    const target = entry === "package" ? f.app : f.bin;
+    const outside = path.join(f.base, "outside");
+    await mkdir(outside);
+    await writeFile(path.join(outside, "sentinel"), "untouched");
+    const worker = startWorker(f, { npmMode: "pack-hold" });
+    await waitForFile(f.packReady);
+    await mkdir(path.dirname(target), { recursive: true });
+    await symlink(entry === "package" ? outside : path.join(outside, "sentinel"), target);
+    await writeFile(f.release, "continue");
+    expect((await worker.result).code).not.toBe(0);
+    expect((await lstat(target)).isSymbolicLink()).toBe(true);
+    expect(await readFile(path.join(outside, "sentinel"), "utf8")).toBe("untouched");
+    await expectMissing(f.installRecord);
+    await expectMissing(f.workspace);
+  });
+
+  it("rejects a replaced global command during an approved update", async () => {
     const f = await updateFixture();
     await stageRuntime(f);
-    const { result } = startWorker(f, { appMode: "hold" });
-    await waitForFile(f.launch);
+    const previous = await installExisting(f);
+    const worker = startWorker(f, { mode: "update", ...previous, npmMode: "pack-hold" });
+    await waitForFile(f.packReady);
+    await unlink(f.bin);
+    await writeFile(f.bin, "unrelated command");
+    await writeFile(f.release, "continue");
+    expect((await worker.result).code).not.toBe(0);
+    expect(await readFile(f.bin, "utf8")).toBe("unrelated command");
+    await expectMissing(f.installRecord);
+    await expectMissing(f.workspace);
+  });
+
+  it.each(["bin file", "bin target", "package file", "package identity"] as const)(
+    "rejects a changed %s even when its inode identity collides", async (change) => {
+      const f = await updateFixture();
+      await stageRuntime(f);
+      const previous = await installExisting(f);
+      const workerFile = path.join(f.workspace, "app-update-worker.mjs");
+      const source = await readFile(workerFile, "utf8");
+      const original = "return `${entry.dev}:${entry.ino}`;";
+      expect(source).toContain(original);
+      await writeFile(workerFile, source.replace(original,
+        `return file === ${JSON.stringify(f.app)} ? ${JSON.stringify(previous.packageId)} : file === ${JSON.stringify(f.bin)} ? ${JSON.stringify(previous.binId)} : ${original.slice(7)}`));
+      const worker = startWorker(f, { mode: "update", ...previous, npmMode: "pack-hold" });
+      await waitForFile(f.packReady);
+      if (change === "bin file") {
+        await unlink(f.bin);
+        await writeFile(f.bin, "unrelated command");
+      } else if (change === "bin target") {
+        await unlink(f.bin);
+        await symlink(path.join(f.app, "package.json"), f.bin);
+      } else if (change === "package file") {
+        await rename(f.app, `${f.app}-original`);
+        await writeFile(f.app, "unrelated package");
+      } else {
+        await writeFile(path.join(f.app, "package.json"), JSON.stringify({ name: "another-package", bin: "./dist/cli.js" }));
+      }
+      await writeFile(f.release, "continue");
+      expect((await worker.result).code).not.toBe(0);
+      await expectMissing(f.installRecord);
+      await expectMissing(f.workspace);
+    },
+  );
+
+  it("allows an approved update with an absent global command", async () => {
+    const f = await updateFixture();
+    await stageRuntime(f);
+    const previous = await installExisting(f);
+    await unlink(f.bin);
+    const result = await startWorker(f, { mode: "update", packageId: previous.packageId, binId: "absent" }).result;
+    expect(result.code).toBe(0);
+    expect(await realpath(f.bin)).toBe(path.join(f.app, "dist", "cli.js"));
+  });
+
+  it("does not delete a replacement workspace while npm is running", async () => {
+    const f = await updateFixture();
+    const worker = startWorker(f, { npmMode: "pack-hold" });
+    await waitForFile(f.packReady);
     await rename(f.workspace, path.join(f.base, "original-workspace"));
     await mkdir(f.workspace);
     await writeFile(path.join(f.workspace, "sentinel"), "replacement");
     await writeFile(f.release, "quit");
-    const ended = await result;
+    const ended = await worker.result;
     expect(ended.code).not.toBe(0);
     expect(ended.stderr).toContain(f.workspace);
     expect(await readFile(path.join(f.workspace, "sentinel"), "utf8")).toBe("replacement");

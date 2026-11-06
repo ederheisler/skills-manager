@@ -42,6 +42,21 @@ and the Vercel `skills` dependency behind an operating-system boundary.
   `npm ls vitest @vitest/mocker vite esbuild --all` to inspect the resolved
   versions of the packages involved in the current advisories.
 
+## PR publishing and CI
+
+- After every push to a PR branch, watch its checks until they finish:
+  `gh pr checks <number> --watch`. Native portability runs Linux arm64,
+  Linux x64, and macOS x64, and catches failures that local macOS arm64 runs miss.
+- Do not report a PR as published, ready, or merged while any required check
+  is pending or failing. If a check fails, read its log
+  (`gh run view <run-id> --log-failed`), fix the root cause, push, and watch again.
+- Release happens only after a version bump merges to `main` and Native
+  portability passes there. After a merge, also watch the `main` run and the
+  Release workflow, and confirm the tag and release exist.
+- When a change alters onboarding, prompts, or update output, update
+  `scripts/release-smoke.mjs` in the same PR. CI drives the installed CLI
+  through that script.
+
 ## TUI interaction and rendering
 - This is a terminal UI project, not a frontend project. Never load or use the
   `impeccable` skill here. For every TUI change, load the local `opentui` skill

@@ -146,6 +146,22 @@ async function runOperation(operation: Operation, args: string[], fault?: Fault,
   }
 }
 
+describe("helper platform metadata", () => {
+  it("rejects metadata changed after a successful operation", async () => {
+    const metadataPath = join(faultProject, "native", "skills-boundary.platform.json");
+    const original = await readFile(metadataPath, "utf8");
+    // Import the temporary copy so the real helper metadata remains untouched.
+    const boundary = await import(pathToFileURL(join(faultProject, "src", "actions", "boundary.ts")).href);
+    try {
+      await boundary.approveSkillsRoot(skillsDir);
+      await writeFile(metadataPath, JSON.stringify({ ...JSON.parse(original), arch: "incompatible" }));
+      await expect(boundary.approveSkillsRoot(skillsDir)).rejects.toThrow("Skills filesystem helper is incompatible");
+    } finally {
+      await writeFile(metadataPath, original);
+    }
+  });
+});
+
 describe("disposable workspaces", () => {
   it("cleans the identified workspace when an unrelated sibling appears", async () => {
     const workspace = join(sandbox, "workspace");

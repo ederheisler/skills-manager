@@ -118,7 +118,7 @@ function deferred<T>(fallback: T) {
 }
 
 function appResponse(sha = COMMIT_A): Response {
-  return new Response(JSON.stringify({ sha }), { status: 200 });
+  return new Response(sha, { status: 200 });
 }
 
 function cliResponse(version = "1.2.3"): Response {
@@ -453,7 +453,7 @@ describe("software update lifecycle and result cache", () => {
     expect(events.at(-1)?.checking).toBe(false);
   }, 15_000);
 
-  it.each(["disable", "host switch", "shutdown"] as const)(
+  it.each(["host switch", "shutdown"] as const)(
     "does not publish or cache a late response after %s",
     async (reason) => {
       const f = await fixture();
@@ -474,8 +474,7 @@ describe("software update lifecycle and result cache", () => {
       await vi.waitFor(() => expect(f.fetch).toHaveBeenCalledTimes(1), { timeout: 10_000 });
       expect(updates.activity().cli.checking).toBe(true);
       let closing: Promise<void> | undefined;
-      if (reason === "disable") await updates.setAutomatic("cli", false);
-      else if (reason === "host switch") {
+      if (reason === "host switch") {
         f.setRegistry(HOST_B);
         await updates.refreshRegistry();
       } else closing = updates.dispose();
@@ -491,6 +490,82 @@ describe("software update lifecycle and result cache", () => {
       expect(await snapshotFiles(f.cache, "cli", HOST_B)).toEqual([]);
     }, 15_000,
   );
+
+  it("finishes and caches a foreground check after automatic checks are disabled", async () => {
+    const f = await fixture();
+    const response = deferred(cliResponse());
+    let signal: AbortSignal | undefined;
+    f.fetch.mockResolvedValue(cliResponse());
+    const updates = service(f.skills);
+    await updates.start();
+    await updates.setAutomatic("cli", true);
+    await vi.waitFor(() => {
+      expect(updates.results.cli?.available).toBe("1.2.3");
+      expect(updates.activity().cli.checking).toBe(false);
+    }, { timeout: 10_000 });
+    f.fetch.mockClear();
+    f.fetch.mockImplementation(async (_input, init) => {
+      signal = init?.signal ?? undefined;
+      return response.promise;
+    });
+    const checking = updates.check("cli", updates.registry);
+    await vi.waitFor(() => expect(f.fetch).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    await updates.setAutomatic("cli", false);
+    expect(signal?.aborted).toBe(false);
+    expect(updates.preferences.cli).toBe(false);
+    response.resolve(cliResponse("9.9.9"));
+    await checking;
+    expect(updates.results.cli).toMatchObject({ available: "9.9.9" });
+    expect(await snapshotFiles(f.cache, "cli")).toHaveLength(2);
+    expect(JSON.parse(await readFile(path.join(f.config, "skills-manager", "cli.json"), "utf8")).enabled).toBe(false);
+  }, 15_000);
+
+  it("keeps a shared automatic flight when a foreground check joins before disabling", async () => {
+    const f = await fixture();
+    const response = deferred(appResponse());
+    let signal: AbortSignal | undefined;
+    f.fetch.mockImplementation(async (_input, init) => {
+      signal = init?.signal ?? undefined;
+      return response.promise;
+    });
+    const updates = service(f.skills);
+    await updates.start();
+    await updates.setAutomatic("app", true);
+    await vi.waitFor(() => expect(f.fetch).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    const checking = updates.check("app");
+    await updates.setAutomatic("app", false);
+    expect(signal?.aborted).toBe(false);
+    expect(f.fetch).toHaveBeenCalledTimes(1);
+    response.resolve(appResponse(COMMIT_B));
+    await checking;
+    expect(updates.results.app).toMatchObject({ available: COMMIT_B });
+    expect(updates.preferences.app).toBe(false);
+    expect(await snapshotFiles(f.cache, "app")).toHaveLength(1);
+    expect(JSON.parse(await readFile(path.join(f.config, "skills-manager", "app.json"), "utf8")).enabled).toBe(false);
+  }, 15_000);
+
+  it("aborts a background-only flight on disable and ignores its late response", async () => {
+    const f = await fixture();
+    const response = deferred(appResponse());
+    let signal: AbortSignal | undefined;
+    f.fetch.mockImplementation(async (_input, init) => {
+      signal = init?.signal ?? undefined;
+      return response.promise;
+    });
+    const updates = service(f.skills);
+    await updates.start();
+    await updates.setAutomatic("app", true);
+    await vi.waitFor(() => expect(f.fetch).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    await updates.setAutomatic("app", false);
+    expect(signal?.aborted).toBe(true);
+    expect(updates.preferences.app).toBe(false);
+    response.resolve(appResponse(COMMIT_B));
+    await vi.waitFor(() => expect(updates.activity().app.checking).toBe(false), { timeout: 10_000 });
+    await updates.dispose();
+    expect(updates.results.app).toBeUndefined();
+    expect(await snapshotFiles(f.cache, "app")).toEqual([]);
+    expect(JSON.parse(await readFile(path.join(f.config, "skills-manager", "app.json"), "utf8")).enabled).toBe(false);
+  }, 15_000);
 
   it("keeps immutable snapshots, restores the newest, and does not repeat a completed automatic check", async () => {
     vi.setSystemTime(NOW - 120_000);

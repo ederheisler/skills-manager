@@ -27,6 +27,10 @@ const home = path.join(work, 'home');
 const temporary = path.join(work, 'tmp');
 const outside = path.join(work, 'outside');
 const externalLock = path.join(work, '.skill-lock.json');
+const globalPrefix = path.join(work, 'npm-global');
+const globalApp = path.join(globalPrefix, 'lib', 'node_modules', 'skills-manager');
+const globalBin = path.join(globalPrefix, 'bin', 'skills-manager');
+const launchTrace = path.join(work, 'cli-starts.ndjson');
 
 async function put(file, content) {
   await mkdir(path.dirname(file), { recursive: true });
@@ -68,43 +72,67 @@ function successful(result) {
   assert.equal(result.exitCode, 0, `${result.command}: ${result.stderr}`);
 }
 
-async function inspectRefreshedSession(workspace) {
-  const project = path.join(workspace, 'project');
-  const projectManifest = JSON.parse(await readFile(path.join(project, 'package.json'), 'utf8'));
-  assert.equal(projectManifest.dependencies['skills-manager'], `github:ederheisler/skills-manager#${previousEnv.RELEASE_EXPECTED_COMMIT}`);
-  assert.equal(projectManifest.dependencies.skills, 'latest');
-  assert.equal(projectManifest.overrides.skills, '$skills');
-  const resolveProject = createRequire(path.join(project, 'package.json'));
-  const appRoot = path.dirname(await realpath(resolveProject.resolve('skills-manager/package.json')));
-  const skillsRoot = path.dirname(await realpath(resolveProject.resolve('skills/package.json')));
-  assert.ok(appRoot.startsWith(`${project}${path.sep}`));
-  assert.ok(skillsRoot.startsWith(`${project}${path.sep}`));
-  assert.notEqual(appRoot, installed);
-  const appManifest = JSON.parse(await readFile(path.join(appRoot, 'package.json'), 'utf8'));
-  const skillsManifest = JSON.parse(await readFile(path.join(skillsRoot, 'package.json'), 'utf8'));
+async function inspectRefreshedSession(mode, startingCli) {
+  assert.deepEqual((await readdir(temporary)).filter((entry) => entry.startsWith('skills-manager-update-')), [],
+    'Update staging must be removed before the restarted app is usable');
+  const appEntry = await lstat(globalApp);
+  assert.ok(appEntry.isDirectory() && !appEntry.isSymbolicLink(), 'The global app must be a real directory');
+  assert.equal(await realpath(globalApp), globalApp);
+  const appManifest = JSON.parse(await readFile(path.join(globalApp, 'package.json'), 'utf8'));
   assert.equal(appManifest.name, 'skills-manager');
+  assert.equal(appManifest.dependencies.skills, 'latest');
+  const appBin = typeof appManifest.bin === 'string' ? appManifest.bin : appManifest.bin?.['skills-manager'];
+  assert.equal(typeof appBin, 'string');
+  assert.ok(appBin && !path.isAbsolute(appBin));
+  const candidate = path.resolve(globalApp, appBin);
+  assert.ok(candidate.startsWith(`${globalApp}${path.sep}`), 'The declared app bin must be inside the global package');
+  const executable = await realpath(candidate);
+  assert.ok(executable.startsWith(`${globalApp}${path.sep}`), 'The resolved app bin must remain inside the global package');
+  assert.ok((await stat(executable)).isFile());
+  assert.ok((await lstat(globalBin)).isSymbolicLink());
+  assert.equal(await realpath(globalBin), executable);
+  const launches = (await readFile(launchTrace, 'utf8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  assert.deepEqual(launches.map(({ entry }) => entry), [startingCli, executable],
+    'The actual restarted TUI must use the global package entry, not PATH or temporary staging');
+
+  const resolveApp = createRequire(path.join(globalApp, 'dist', 'actions', 'sandbox.js'));
+  const skillsRoot = path.dirname(await realpath(resolveApp.resolve('skills/package.json')));
+  assert.ok(skillsRoot.startsWith(`${globalApp}${path.sep}`), 'The selected skills package must belong to the global app');
+  const skillsManifest = JSON.parse(await readFile(path.join(skillsRoot, 'package.json'), 'utf8'));
   assert.equal(skillsManifest.name, 'skills');
-  const freshBuild = await import(pathToFileURL(path.join(appRoot, 'dist', 'state', 'appBuild.js')).href);
+  const freshBuild = await import(pathToFileURL(path.join(globalApp, 'dist', 'state', 'appBuild.js')).href);
   const identity = await freshBuild.readBuildIdentity();
   assert.equal(identity.version, appManifest.version);
-  assert.equal(identity.commit, previousEnv.RELEASE_EXPECTED_COMMIT, 'Refreshed app must retain the approved commit');
+  assert.equal(identity.commit, previousEnv.RELEASE_EXPECTED_COMMIT, 'CLI-only refresh must retain the approved commit');
   assert.equal(identity.dirty, false);
-  const freshSandbox = await import(pathToFileURL(path.join(appRoot, 'dist', 'actions', 'sandbox.js')).href);
+  const freshSandbox = await import(pathToFileURL(path.join(globalApp, 'dist', 'actions', 'sandbox.js')).href);
   const runtime = await freshSandbox.inspectSkillsRuntime();
-  assert.equal(runtime.packageRoot, skillsRoot, 'Refreshed app must select the fresh project root dependency');
+  assert.equal(runtime.packageRoot, skillsRoot, 'The restarted app must select its own installed skills package');
   assert.equal(runtime.version, skillsManifest.version);
-  assert.equal(runtime.executable, await realpath(runtime.executable));
+  const skillsBin = typeof skillsManifest.bin === 'string' ? skillsManifest.bin : skillsManifest.bin?.skills;
+  assert.equal(typeof skillsBin, 'string');
+  assert.ok(skillsBin && !path.isAbsolute(skillsBin));
+  assert.equal(runtime.executable, await realpath(path.resolve(skillsRoot, skillsBin)));
   assert.ok(runtime.executable.startsWith(`${skillsRoot}${path.sep}`));
+
+  const { stdout } = await exec('npm', ['view', 'skills@latest', 'version', '--json'], {
+    cwd: work, env: { ...process.env, npm_config_cache: path.join(temporary, `tag-cache-${mode}`) },
+    maxBuffer: 1024 * 1024, timeout: 120_000,
+  });
+  const latest = JSON.parse(stdout);
+  assert.equal(typeof latest, 'string');
+  assert.equal(runtime.version, latest, 'The selected skills CLI must match the registry latest tag');
+  console.log(`Global ${mode}: skills ${runtime.version} matches npm latest; app commit ${identity.commit}.`);
+  return executable;
 }
-const localGitPrompt = 'Review optional local Git initialization? [y/N] (q to cancel): ';
-const remoteGitPrompt = 'Review optional remote backup? [y/N] (q to cancel): ';
-const startupQuestions = ['Review optional local Git initialization?', 'Review optional remote backup?'];
 const startupPromptMarkers = [
   'Choose a skills directory.',
   'Choose [',
   'Skills directory path',
   'Manage this resolved target?',
-  ...startupQuestions,
+  'Review optional remote backup?',
+  'Review optional local Git initialization?',
+  'Continue in read-only mode?',
 ];
 
 function startupPrompts(text) {
@@ -117,17 +145,20 @@ function startupPrompts(text) {
   }).sort((a, b) => a.index - b.index).map(({ prompt }) => prompt);
 }
 
-async function browseInTerminal(skillsDir, { saved = false, refresh = false, explicit = !saved } = {}) {
+async function browseInTerminal(skillsDir, {
+  saved = false, refresh = false, explicit = !saved, startingCli = cli, updateMode = 'install',
+} = {}) {
   const relay = fileURLToPath(new URL('./release-smoke-pty.py', import.meta.url));
+  if (refresh) await writeFile(launchTrace, '');
   let transcript = '';
   let stderr = '';
   let step = 0;
   let stageStart = 0;
   let failure;
-  let updateWorkspace;
+  let refreshedCli;
   const terminal = new xterm.Terminal({ cols: 140, rows: 40, allowProposedApi: true });
   let pending = Promise.resolve();
-  const child = spawn('python3', [relay, cli, ...(explicit ? ['--skills-dir', skillsDir] : [])], {
+  const child = spawn('python3', [relay, startingCli, ...(explicit ? ['--skills-dir', skillsDir] : [])], {
     cwd: work, env: process.env, stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -154,20 +185,15 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
       buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? '').join('\n');
     const browse = screen.includes('x app updates') && !screen.includes('Keyboard help')
       && !screen.includes('Application updates');
-    if (step <= 2) {
-      const prompts = startupPrompts(text);
-      const expected = saved ? [] : startupQuestions;
-      assert.deepEqual(prompts, expected.slice(0, prompts.length), 'Unexpected startup prompt or prompt order');
-      assert.ok(prompts.length <= (saved ? 0 : Math.min(step + 1, expected.length)), 'A startup question appeared before the previous answer');
+    const updatesReady = screen.includes('Application updates')
+      && screen.includes('skills-manager (app)') && screen.includes('Vercel skills CLI')
+      && (screen.match(/Automatic checks:\s*off/g) ?? []).length === 2
+      && !screen.includes('Checking...');
+    if (step === 0) {
+      assert.deepEqual(startupPrompts(text), [], 'Unexpected startup prompt before browsing');
     }
-    if (!saved && step === 0 && text.includes(localGitPrompt)) {
-      step = 1;
-      child.stdin.write('\n');
-    } else if (!saved && step === 1 && text.includes(remoteGitPrompt)) {
-      step = 2;
-      child.stdin.write('\n');
-    } else if (((saved && step === 0) || (!saved && step === 2)) && /Skills\s+1\s+shown/.test(screen) && browse) {
-      assert.deepEqual(startupPrompts(text), saved ? [] : startupQuestions, 'Incorrect startup questions before browsing');
+    if (step === 0 && /Skills\s+1\s+shown/.test(screen) && browse) {
+      assert.deepEqual(startupPrompts(text), [], 'Unexpected startup prompt before browsing');
       if (!saved) assert.ok(text.includes('Selected skills directory:'), 'The first launch must show its selected directory');
       step = 3;
       stageStart = transcript.length;
@@ -180,36 +206,48 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
       step = 5;
       stageStart = transcript.length;
       child.stdin.write('x');
-    } else if (step === 5 && screen.includes('Application updates')
-      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)) {
+    } else if (step === 5 && updatesReady) {
       step = 6;
       stageStart = transcript.length;
       child.stdin.write(refresh ? 'f' : '\x1b');
     } else if (step === 6 && !refresh && browse) {
       step = 7;
       child.stdin.write('q');
-    } else if (step === 6 && refresh && screen.includes('Refresh Vercel skills CLI')
-      && screen.includes(`Rebuild the same app commit ${previousEnv.RELEASE_EXPECTED_COMMIT}`)
-      && screen.includes('[y] Approve')) {
-      step = 8;
-      stageStart = transcript.length;
-      child.stdin.write('y');
+    } else if (step === 6 && refresh && screen.includes('Update Vercel skills CLI')
+      && new RegExp(`y\\s+${updateMode}`).test(screen)) {
+      const lines = screen.split('\n');
+      const title = lines.find((line) => line.includes('┌─Update Vercel skills CLI'));
+      assert.ok(title, 'Update review dialog must be visible');
+      const left = title.indexOf('┌─Update Vercel skills CLI');
+      const right = title.indexOf('┐', left);
+      assert.ok(right > left, 'Update review dialog must have a right border');
+      const review = lines.map((line) => line.slice(left + 1, right)).join('').replace(/\s/g, '');
+      assert.ok(screen.includes(updateMode === 'install' ? 'Install globally:' : 'Update global installation:'),
+        'Review must distinguish a new global install from an update');
+      assert.ok(review.includes(globalPrefix.replace(/\s/g, '')), 'Review must show the isolated global prefix');
+      assert.ok(screen.includes(previousEnv.RELEASE_EXPECTED_COMMIT.slice(0, 7)),
+        'CLI-only review must identify the app commit being kept');
+      step = 9;
+      const beforeApproval = updateMode === 'install'
+        ? Promise.all([missing(globalApp), missing(globalBin)])
+        : realpath(globalApp).then((root) => assert.equal(root, globalApp));
+      void beforeApproval.then(() => {
+        step = 8;
+        stageStart = transcript.length;
+        child.stdin.write('y');
+      }).catch((error) => {
+        failure = error;
+        child.kill('SIGTERM');
+      });
     } else if (step === 8) {
       assert.deepEqual(startupPrompts(text), [], 'The refreshed child must not show startup prompts for the unchanged root');
-      const marker = 'Starting the new application.';
+      const marker = 'Done. Restarting skills-manager…';
       const started = text.indexOf(marker);
       const childOutput = started === -1 ? '' : text.slice(started + marker.length);
       if (childOutput.trim() && /Skills\s+1\s+shown/.test(screen) && browse) {
-        assert.ok(text.includes('Installing the approved update in a private session.'));
-        const match = /Update workspace \(manual cleanup if interrupted\): ("[^\r\n]*")/.exec(text);
-        assert.ok(match, 'The update helper must print its workspace before starting the new application');
-        updateWorkspace = JSON.parse(match[1]);
-        assert.ok(path.isAbsolute(updateWorkspace));
-        assert.equal(path.dirname(updateWorkspace), temporary);
-        assert.ok(path.basename(updateWorkspace).startsWith('skills-manager-update-'));
         step = 12;
-        void inspectRefreshedSession(updateWorkspace).then(() => {
+        void inspectRefreshedSession(updateMode, startingCli).then((executable) => {
+          refreshedCli = executable;
           step = 13;
           stageStart = transcript.length;
           child.stdin.write('?');
@@ -226,9 +264,7 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
       step = 15;
       stageStart = transcript.length;
       child.stdin.write('x');
-    } else if (step === 15 && screen.includes('Application updates')
-      && /skills-manager \(app\)\s*·\s*automatic:\s*off/.test(screen)
-      && /Vercel skills CLI\s*·\s*automatic:\s*off/.test(screen)) {
+    } else if (step === 15 && updatesReady) {
       step = 16;
       stageStart = transcript.length;
       child.stdin.write('\x1b');
@@ -259,17 +295,47 @@ async function browseInTerminal(skillsDir, { saved = false, refresh = false, exp
   assert.equal(result.signal, null, diagnostic);
   assert.equal(result.code, 0, `${diagnostic}\nThe approved commit ${previousEnv.RELEASE_EXPECTED_COMMIT ?? '(not applicable)'} must be fetchable from the canonical GitHub repository for the real refresh.`);
   assert.equal(step, refresh ? 17 : 7, `Did not complete the installed PTY ${refresh ? 'refresh and restart' : 'browse'} flow.\n${diagnostic}`);
-  if (refresh) await missing(updateWorkspace);
+  if (refresh) {
+    assert.deepEqual((await readdir(temporary)).filter((entry) => entry.startsWith('skills-manager-update-')), [],
+      'Update staging must remain cleaned after the restarted app exits');
+  }
+  return refreshedCli;
 }
 
 async function run() {
   await Promise.all([home, temporary, outside, ...['config', 'cache', 'data', 'state'].map((name) => path.join(work, name))]
     .map((directory) => mkdir(directory)));
+  await mkdir(globalPrefix);
+  assert.ok(globalPrefix.startsWith(`${work}${path.sep}`), 'The npm prefix must belong to the smoke workspace');
+  assert.notEqual(installed, globalApp, 'The initial package must not be the sandbox global installation');
+  const unrelatedPackage = path.join(globalPrefix, 'lib', 'node_modules', 'smoke-unrelated');
+  const unrelatedBin = path.join(globalPrefix, 'bin', 'smoke-unrelated');
+  await put(path.join(unrelatedPackage, 'package.json'), '{"name":"smoke-unrelated","version":"1.0.0"}\n');
+  await put(path.join(unrelatedPackage, 'sentinel'), 'unrelated global package must remain unchanged\n');
+  await put(unrelatedBin, 'unrelated global command must remain unchanged\n');
+  const unrelatedBefore = await snapshot(unrelatedPackage);
+  const unrelatedBinBefore = await readFile(unrelatedBin);
+  const installedBefore = await snapshot(installed);
   await put(path.join(outside, 'sentinel.bin'), Buffer.from('outside sentinel\0keep these bytes\n'));
   await put(path.join(outside, 'external', 'SKILL.md'), 'external skill must remain unchanged\n');
   await writeFile(externalLock, 'outside lock must remain unchanged\n');
   const outsideBefore = await snapshot(outside);
   const lockBefore = await readFile(externalLock);
+  // Keep only the UI's one-shot checks offline. The approved npm installs and
+  // independent registry latest-tag queries still use the real network.
+  const fetchStub = path.join(work, 'offline-update-checks.mjs');
+  await put(fetchStub, [
+    "import { appendFileSync } from 'node:fs';",
+    "const entry = process.argv[1];",
+    "const explicit = process.argv.slice(2).includes('--skills-dir');",
+    `const installedCli = ${JSON.stringify(cli)};`,
+    `const launchTrace = ${JSON.stringify(launchTrace)};`,
+    "if (explicit) appendFileSync(launchTrace, JSON.stringify({ entry }) + '\\n');",
+    "if (entry === installedCli || explicit) {",
+    "  globalThis.fetch = async () => new Response(null, { status: 503 });",
+    "}",
+    "",
+  ].join('\n'));
 
   // Do not inherit the invoking user's home, credentials, sockets, or Git/Node configuration.
   for (const key of Object.keys(process.env)) delete process.env[key];
@@ -278,6 +344,12 @@ async function run() {
     HOME: home, TMPDIR: temporary, TERM: 'xterm-256color', LANG: 'C.UTF-8',
     XDG_CONFIG_HOME: path.join(work, 'config'), XDG_CACHE_HOME: path.join(work, 'cache'),
     XDG_DATA_HOME: path.join(work, 'data'), XDG_STATE_HOME: path.join(work, 'state'),
+    npm_config_registry: 'https://registry.npmjs.org/',
+    npm_config_userconfig: path.join(work, 'user.npmrc'),
+    npm_config_globalconfig: path.join(work, 'global.npmrc'),
+    npm_config_prefix: globalPrefix,
+    npm_config_cache: path.join(temporary, 'npm-cache'),
+    NODE_OPTIONS: `--import=${pathToFileURL(fetchStub).href}`,
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0',
     DISABLE_TELEMETRY: '1', DO_NOT_TRACK: '1', NODE_DISABLE_COMPILE_CACHE: '1', PYTHONDONTWRITEBYTECODE: '1',
   });
@@ -334,11 +406,39 @@ async function run() {
     ['skills-manager', 'directory'],
     ['skills-manager/config.json', 'file', configBytes.toString('hex')],
   ];
-  async function assertBrowseSafety() {
+  async function assertBrowseSafety({ refreshed = false } = {}) {
     assert.deepEqual(await snapshot(browseRoot), browseBefore);
-    assert.deepEqual(await readdir(home), []);
+    if (!refreshed) {
+      assert.deepEqual(await readdir(home), []);
+    } else {
+      let directory = home;
+      for (const name of ['Library', 'Caches', 'node-gyp']) {
+        const entries = await readdir(directory);
+        if (entries.length === 0) break;
+        assert.deepEqual(entries, [name], 'Only the node-gyp cache may be created in HOME');
+        directory = path.join(directory, name);
+        const entry = await lstat(directory);
+        assert.ok(entry.isDirectory() && !entry.isSymbolicLink(), 'The node-gyp cache path must contain only directories');
+      }
+    }
     assert.deepEqual(await snapshot(configDirectory), expectedConfig);
-    for (const name of ['cache', 'data', 'state']) assert.deepEqual(await readdir(path.join(work, name)), []);
+    assert.deepEqual(await snapshot(installed), installedBefore, 'The initial package must not be changed');
+    assert.deepEqual(await snapshot(unrelatedPackage), unrelatedBefore);
+    assert.deepEqual(await readFile(unrelatedBin), unrelatedBinBefore);
+    const cacheRoot = path.join(work, 'cache');
+    assert.deepEqual(await readdir(cacheRoot), ['skills-manager']);
+    const results = await readdir(path.join(cacheRoot, 'skills-manager'));
+    assert.ok(results.length >= 2, 'Opening updates must record the isolated check results');
+    const components = new Set();
+    for (const file of results) {
+      assert.match(file, /^result-(app|cli)-[a-f0-9-]+\.json$/);
+      const result = JSON.parse(await readFile(path.join(cacheRoot, 'skills-manager', file), 'utf8'));
+      assert.equal(result.kind, 'skills-manager-update-result');
+      assert.ok(result.component === 'app' || result.component === 'cli');
+      components.add(result.component);
+    }
+    assert.deepEqual(components, new Set(['app', 'cli']));
+    for (const name of ['data', 'state']) assert.deepEqual(await readdir(path.join(work, name)), []);
     await missing(path.join(browseRoot, '.git'));
     await missing(path.join(browseRoot, '.skills-manager'));
     assert.deepEqual(await snapshot(outside), outsideBefore);
@@ -351,9 +451,14 @@ async function run() {
   await assertBrowseSafety();
 
   if (previousEnv.RELEASE_EXPECTED_COMMIT !== undefined) {
-    // The refresh and its child also reuse the unchanged configuration, even with an explicit root.
-    await browseInTerminal(browseRoot, { saved: true, refresh: true, explicit: true });
-    await assertBrowseSafety();
+    // A local package must first offer a reviewed global install. The second
+    // pass starts from that persistent installation and reviews an update.
+    const globalCli = await browseInTerminal(browseRoot, { saved: true, refresh: true, explicit: true });
+    await assertBrowseSafety({ refreshed: true });
+    await browseInTerminal(browseRoot, {
+      saved: true, refresh: true, explicit: true, startingCli: globalCli, updateMode: 'update',
+    });
+    await assertBrowseSafety({ refreshed: true });
   }
 
   // Exercise the installed native boundary with independently reviewed source bytes.

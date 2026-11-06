@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,6 +9,14 @@ let home: string;
 
 function options(extra: DirectorySelectionOptions = {}): DirectorySelectionOptions {
   return { home, cwd: home, ...extra };
+}
+
+function git(dir: string, ...args: string[]): string {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")));
+  return execFileSync("git", ["-c", "init.templateDir=", ...args], {
+    cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    env: { ...env, HOME: home, XDG_CONFIG_HOME: path.join(home, "config"), GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
+  }).trimEnd();
 }
 
 function configPath(): string {
@@ -45,12 +54,10 @@ async function skills(name: string): Promise<string> {
 }
 
 async function saveSelection(selected: string) {
-  const session = scripted(["", ""]);
+  const session = scripted([""]);
   const result = await selectSavedSkillsDirectory(session.io, options({ explicitSkillsDir: selected }));
   expect(result).toEqual({
     root: { path: selected, identity: expect.any(String) },
-    reviewInitialize: false,
-    reviewBackup: false,
   });
   return result!;
 }
@@ -67,6 +74,57 @@ afterEach(async () => {
 });
 
 describe("saved startup selection", () => {
+  it.each(["leaf", "parent"] as const)("saves and reuses an existing %s repository without setup prompts", async (kind) => {
+    const repository = path.join(home, "repository");
+    const selected = kind === "leaf" ? repository : path.join(repository, "skills");
+    await mkdir(selected, { recursive: true });
+    git(repository, "init");
+    const sentinel = path.join(selected, "sentinel");
+    await writeFile(sentinel, "staged");
+    git(repository, "add", "--", path.relative(repository, sentinel));
+    await writeFile(sentinel, "unstaged");
+    const index = await readFile(path.join(repository, ".git", "index"));
+    const config = await readFile(path.join(repository, ".git", "config"));
+    const head = await readFile(path.join(repository, ".git", "HEAD"));
+    expect(git(repository, "remote")).toBe("");
+
+    const first = scripted([]);
+    const chosen = await selectSavedSkillsDirectory(first.io, options({ explicitSkillsDir: selected }));
+    expect(chosen).toEqual({
+      root: { path: selected, identity: expect.any(String) },
+    });
+    expect(first.prompts).toEqual([]);
+    expect(JSON.parse(await readFile(configPath(), "utf8"))).toEqual({
+      kind: "skills-manager-setup", version: 1, selectedPath: selected,
+      canonicalRoot: selected, identity: chosen!.root.identity,
+    });
+
+    const repeat = scripted([]);
+    await expect(selectSavedSkillsDirectory(repeat.io, options())).resolves.toEqual(chosen);
+    expect(repeat.prompts).toEqual([]);
+    expect(await readFile(path.join(repository, ".git", "index"))).toEqual(index);
+    expect(await readFile(path.join(repository, ".git", "config"))).toEqual(config);
+    expect(await readFile(path.join(repository, ".git", "HEAD"))).toEqual(head);
+    expect(await readFile(sentinel, "utf8")).toBe("unstaged");
+    expect(await readdir(selected)).toEqual(kind === "leaf" ? [".git", "sentinel"] : ["sentinel"]);
+  });
+
+  it("saves and reuses a selection when Git is unavailable", async () => {
+    const selected = await skills("selected");
+    vi.stubEnv("PATH", path.join(home, "missing-bin"));
+    const first = scripted([]);
+    const chosen = await selectSavedSkillsDirectory(first.io, options({ explicitSkillsDir: selected }));
+    expect(chosen).toEqual({
+      root: { path: selected, identity: expect.any(String) },
+    });
+    expect(first.prompts).toEqual([]);
+    const repeat = scripted([]);
+    await expect(selectSavedSkillsDirectory(repeat.io, options())).resolves.toEqual(chosen);
+    expect(repeat.prompts).toEqual([]);
+    expect(await readdir(selected)).toEqual(["sentinel"]);
+    expect(await readFile(path.join(selected, "sentinel"), "utf8")).toBe("selected unchanged");
+  });
+
   it("saves the chosen root without permissions and reuses it without any prompts or review flags", async () => {
     const selected = await skills("first");
     const configDirectory = path.dirname(configPath());
@@ -74,14 +132,12 @@ describe("saved startup selection", () => {
     for (const name of ["app.json", "cli.json"]) {
       await writeFile(path.join(configDirectory, name), `sentinel: ${name}\n`, { mode: 0o600 });
     }
-    const first = scripted(["6", selected, "yes", "yes"]);
+    const first = scripted(["2", selected]);
     const chosen = await selectSavedSkillsDirectory(first.io, options());
     expect(chosen).toEqual({
       root: { path: selected, identity: expect.any(String) },
-      reviewInitialize: true,
-      reviewBackup: true,
     });
-    expect(first.prompts).toHaveLength(4);
+    expect(first.prompts).toHaveLength(2);
 
     const record = JSON.parse(await readFile(configPath(), "utf8"));
     expect(record).toEqual({
@@ -95,8 +151,6 @@ describe("saved startup selection", () => {
     const repeat = scripted([]);
     await expect(selectSavedSkillsDirectory(repeat.io, options())).resolves.toEqual({
       root: chosen!.root,
-      reviewInitialize: false,
-      reviewBackup: false,
     });
     expect(repeat.prompts).toEqual([]);
     for (const name of ["app.json", "cli.json"]) {
@@ -114,21 +168,19 @@ describe("saved startup selection", () => {
     await expect(selectSavedSkillsDirectory(same.io, options({ explicitSkillsDir: first }))).resolves.toEqual(original);
     expect(same.prompts).toEqual([]);
 
-    const different = scripted(["yes", ""]);
+    const different = scripted([]);
     const chosen = await selectSavedSkillsDirectory(different.io, options({ explicitSkillsDir: second }));
     expect(chosen).toEqual({
       root: { path: second, identity: expect.any(String) },
-      reviewInitialize: true,
-      reviewBackup: false,
     });
-    expect(different.prompts).toHaveLength(2);
+    expect(different.prompts).toHaveLength(0);
     expect(JSON.parse(await readFile(configPath(), "utf8"))).toEqual({
       kind: "skills-manager-setup", version: 1, selectedPath: second,
       canonicalRoot: second, identity: chosen!.root.identity,
     });
     const repeat = scripted([]);
     await expect(selectSavedSkillsDirectory(repeat.io, options())).resolves.toEqual({
-      root: chosen!.root, reviewInitialize: false, reviewBackup: false,
+      root: chosen!.root,
     });
     expect(await readFile(path.join(first, "sentinel"), "utf8")).toBe("first unchanged");
     expect(await readFile(path.join(second, "sentinel"), "utf8")).toBe("second unchanged");
@@ -140,10 +192,10 @@ describe("saved startup selection", () => {
     await symlink(target, alias);
     const anotherAlias = path.join(home, "another-alias");
     await symlink(target, anotherAlias);
-    const first = scripted(["yes", "yes", "yes"]);
+    const first = scripted(["yes"]);
     const chosen = await selectSavedSkillsDirectory(first.io, options({ explicitSkillsDir: alias }));
     expect(chosen).toEqual({
-      root: { path: target, identity: expect.any(String) }, reviewInitialize: true, reviewBackup: true,
+      root: { path: target, identity: expect.any(String) },
     });
     const originalRecord = await readFile(configPath(), "utf8");
     expect(JSON.parse(originalRecord)).toEqual({
@@ -153,7 +205,7 @@ describe("saved startup selection", () => {
     for (const explicitSkillsDir of [alias, target, anotherAlias]) {
       const repeat = scripted([]);
       await expect(selectSavedSkillsDirectory(repeat.io, options({ explicitSkillsDir }))).resolves.toEqual({
-        root: chosen!.root, reviewInitialize: false, reviewBackup: false,
+        root: chosen!.root,
       });
       expect(repeat.prompts).toEqual([]);
     }
@@ -166,12 +218,12 @@ describe("saved startup selection", () => {
     const first = await skills("first");
     const second = await skills("second");
     await saveSelection(first);
-    const revisit = scripted(["6", second, "yes", ""]);
+    const revisit = scripted(["2", second]);
     const changed = await selectSavedSkillsDirectory(revisit.io, options({ currentSkillsDir: first }));
     expect(changed).toEqual({
-      root: { path: second, identity: expect.any(String) }, reviewInitialize: true, reviewBackup: false,
+      root: { path: second, identity: expect.any(String) },
     });
-    expect(revisit.prompts).toHaveLength(4);
+    expect(revisit.prompts).toHaveLength(2);
     const saved = await readFile(configPath(), "utf8");
     expect(JSON.parse(saved)).toEqual({
       kind: "skills-manager-setup", version: 1, selectedPath: second,
@@ -185,13 +237,13 @@ describe("saved startup selection", () => {
 
     const notDirectory = path.join(home, "not-a-directory");
     await writeFile(notDirectory, "file sentinel");
-    const failed = scripted(["6", notDirectory, "q"]);
+    const failed = scripted(["2", notDirectory, "q"]);
     await expect(selectSavedSkillsDirectory(failed.io, options({ currentSkillsDir: second }))).resolves.toBeNull();
     expect(await readFile(configPath(), "utf8")).toBe(saved);
     expect(await readFile(notDirectory, "utf8")).toBe("file sentinel");
     const repeat = scripted([]);
     await expect(selectSavedSkillsDirectory(repeat.io, options())).resolves.toEqual({
-      root: changed!.root, reviewInitialize: false, reviewBackup: false,
+      root: changed!.root,
     });
     expect(await readFile(path.join(first, "sentinel"), "utf8")).toBe("first unchanged");
     expect(await readFile(path.join(second, "sentinel"), "utf8")).toBe("second unchanged");
@@ -211,12 +263,12 @@ describe("saved startup selection", () => {
     expect(cancelled.prompts).toHaveLength(1);
     expect(await readFile(configPath(), "utf8")).toBe(saved);
 
-    const fresh = scripted(["yes", ""]);
+    const fresh = scripted(["yes"]);
     const chosen = await selectSavedSkillsDirectory(fresh.io, options({ explicitSkillsDir: selected }));
     expect(chosen).toEqual({
-      root: { path: selected, identity: expect.any(String) }, reviewInitialize: true, reviewBackup: false,
+      root: { path: selected, identity: expect.any(String) },
     });
-    expect(fresh.prompts).toHaveLength(2);
+    expect(fresh.prompts).toHaveLength(1);
     expect(chosen!.root.identity).not.toBe(initial.root.identity);
     expect(JSON.parse(await readFile(configPath(), "utf8")).identity).toBe(chosen!.root.identity);
     expect(await readFile(path.join(original, "sentinel"), "utf8")).toBe("selected unchanged");
@@ -248,11 +300,11 @@ describe("saved startup selection", () => {
     expect(cancelled.prompts).toHaveLength(1);
     expect(await readFile(configPath(), "utf8")).toBe(saved);
 
-    const missing = scripted(["", ""]);
+    const missing = scripted([""]);
     await expect(selectSavedSkillsDirectory(missing.io, options({ explicitSkillsDir: selected }))).resolves.toEqual({
-      root: { path: selected, identity: null }, reviewInitialize: false, reviewBackup: false,
+      root: { path: selected, identity: null },
     });
-    expect(missing.prompts).toHaveLength(2);
+    expect(missing.prompts).toEqual(["Continue in read-only mode? [Y/n]: "]);
     const restart = scripted(["q"]);
     await expect(selectSavedSkillsDirectory(restart.io, options())).resolves.toBeNull();
     expect(restart.prompts).toHaveLength(1);
@@ -273,7 +325,7 @@ describe("saved startup selection", () => {
     const second = await skills("second");
     const alias = path.join(home, "alias");
     await symlink(first, alias);
-    const setup = scripted(["yes", "", ""]);
+    const setup = scripted(["yes"]);
     await selectSavedSkillsDirectory(setup.io, options({ explicitSkillsDir: alias }));
     const saved = await readFile(configPath(), "utf8");
     await unlink(alias);
@@ -284,12 +336,12 @@ describe("saved startup selection", () => {
     expect(oldCanonical.prompts.length).toBeGreaterThan(0);
     expect(await readFile(configPath(), "utf8")).toBe(saved);
 
-    const fresh = scripted(["6", alias, "yes", "yes", ""]);
+    const fresh = scripted(["2", alias, "yes"]);
     const chosen = await selectSavedSkillsDirectory(fresh.io, options());
     expect(chosen).toEqual({
-      root: { path: second, identity: expect.any(String) }, reviewInitialize: true, reviewBackup: false,
+      root: { path: second, identity: expect.any(String) },
     });
-    expect(fresh.prompts).toHaveLength(5);
+    expect(fresh.prompts).toHaveLength(3);
     expect(fresh.prompts.some((prompt) => /resolved target/i.test(prompt))).toBe(true);
     expect(JSON.parse(await readFile(configPath(), "utf8"))).toEqual({
       kind: "skills-manager-setup", version: 1, selectedPath: alias,
@@ -308,7 +360,7 @@ describe("saved startup selection", () => {
     const saved = await readFile(configPath(), "utf8");
     const alias = path.join(home, "alias");
     await symlink(firstTarget, alias);
-    const selection = scripted(["6", alias, "yes", "", "", "q"]);
+    const selection = scripted(["2", alias, "yes", "q"]);
     const ask = selection.io.ask;
     let retargeted = false;
     selection.io.ask = async (prompt) => {
@@ -344,11 +396,11 @@ describe("unsafe or overlapping startup configuration", () => {
     await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
     await writeFile(file, contents, { mode: 0o600 });
     const before = await lstat(file);
-    const session = scripted(["6", selected, "", ""]);
+    const session = scripted(["2", selected]);
     await expect(selectSavedSkillsDirectory(session.io, options())).resolves.toEqual({
-      root: { path: selected, identity: expect.any(String) }, reviewInitialize: false, reviewBackup: false,
+      root: { path: selected, identity: expect.any(String) },
     });
-    expect(session.prompts).toHaveLength(4);
+    expect(session.prompts).toHaveLength(2);
     expectConfigWarning(session.output);
     expect(await readFile(file, "utf8")).toBe(contents);
     expect((await lstat(file)).ino).toBe(before.ino);
@@ -376,11 +428,11 @@ describe("unsafe or overlapping startup configuration", () => {
     }
     await writeFile(file, contents);
     const before = await lstat(file);
-    const session = scripted(["6", second, "", ""]);
+    const session = scripted(["2", second]);
     await expect(selectSavedSkillsDirectory(session.io, options())).resolves.toEqual({
-      root: { path: second, identity: expect.any(String) }, reviewInitialize: false, reviewBackup: false,
+      root: { path: second, identity: expect.any(String) },
     });
-    expect(session.prompts).toHaveLength(4);
+    expect(session.prompts).toHaveLength(2);
     expectConfigWarning(session.output);
     expect((await readFile(file)).equals(contents)).toBe(true);
     expect((await lstat(file)).ino).toBe(before.ino);
@@ -417,11 +469,11 @@ describe("unsafe or overlapping startup configuration", () => {
     }
     const beforeFile = await lstat(file);
     const beforeDirectory = await lstat(directory);
-    const session = scripted(["6", second, "", ""]);
+    const session = scripted(["2", second]);
     await expect(selectSavedSkillsDirectory(session.io, options())).resolves.toEqual({
-      root: { path: second, identity: expect.any(String) }, reviewInitialize: false, reviewBackup: false,
+      root: { path: second, identity: expect.any(String) },
     });
-    expect(session.prompts).toHaveLength(4);
+    expect(session.prompts).toHaveLength(2);
     expectConfigWarning(session.output);
     expect(await readFile(file, "utf8")).toBe(stored);
     const afterFile = await lstat(file);
@@ -450,9 +502,9 @@ describe("unsafe or overlapping startup configuration", () => {
   it("does not create configuration lexically inside the selected root", async () => {
     const selected = await skills("selected");
     vi.stubEnv("XDG_CONFIG_HOME", selected);
-    const session = scripted(["", ""]);
+    const session = scripted([""]);
     await expect(selectSavedSkillsDirectory(session.io, options({ explicitSkillsDir: selected }))).resolves.toEqual({
-      root: { path: selected, identity: expect.any(String) }, reviewInitialize: false, reviewBackup: false,
+      root: { path: selected, identity: expect.any(String) },
     });
     expectConfigWarning(session.output);
     await expect(lstat(path.join(selected, "skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -470,11 +522,11 @@ describe("unsafe or overlapping startup configuration", () => {
     await writeFile(inside, contents, { mode: 0o600 });
     const before = await lstat(inside);
     vi.stubEnv("XDG_CONFIG_HOME", selected);
-    const session = scripted(["6", selected, "", ""]);
+    const session = scripted(["2", selected]);
     await expect(selectSavedSkillsDirectory(session.io, options())).resolves.toEqual({
-      root: { path: selected, identity: expect.any(String) }, reviewInitialize: false, reviewBackup: false,
+      root: { path: selected, identity: expect.any(String) },
     });
-    expect(session.prompts).toHaveLength(4);
+    expect(session.prompts).toHaveLength(2);
     expectConfigWarning(session.output);
     expect(await readFile(inside, "utf8")).toBe(contents);
     expect((await lstat(inside)).ino).toBe(before.ino);
@@ -486,9 +538,9 @@ describe("unsafe or overlapping startup configuration", () => {
     const alias = path.join(home, "config-alias");
     await symlink(selected, alias);
     vi.stubEnv("XDG_CONFIG_HOME", alias);
-    const session = scripted(["", ""]);
+    const session = scripted([""]);
     await expect(selectSavedSkillsDirectory(session.io, options({ explicitSkillsDir: selected }))).resolves.toEqual({
-      root: { path: selected, identity: expect.any(String) }, reviewInitialize: false, reviewBackup: false,
+      root: { path: selected, identity: expect.any(String) },
     });
     expectConfigWarning(session.output);
     expect(await readlink(alias)).toBe(selected);
@@ -501,7 +553,7 @@ describe("unsafe or overlapping startup configuration", () => {
     const selected = await skills("selected");
     const outside = path.join(home, "selected-config");
     vi.stubEnv("XDG_CONFIG_HOME", outside);
-    const session = scripted(["", ""]);
+    const session = scripted([""]);
     const result = await selectSavedSkillsDirectory(session.io, options({ explicitSkillsDir: selected }));
     expect(result!.root.path).toBe(selected);
     const record = JSON.parse(await readFile(path.join(outside, "skills-manager", "config.json"), "utf8"));
@@ -518,7 +570,7 @@ describe("startup configuration location", () => {
     vi.stubEnv("XDG_CONFIG_HOME", value);
     const workspace = path.join(home, "workspace");
     const selected = await skills("workspace/skills");
-    const session = scripted(["", ""]);
+    const session = scripted([""]);
     const result = await selectSavedSkillsDirectory(session.io, options({ cwd: workspace, explicitSkillsDir: "skills" }));
     expect(result!.root.path).toBe(selected);
     expect(JSON.parse(await readFile(path.join(home, ".config", "skills-manager", "config.json"), "utf8"))).toEqual({
@@ -535,7 +587,7 @@ describe("startup configuration location", () => {
     expect(path.isAbsolute(relativeXdg)).toBe(false);
     vi.stubEnv("XDG_CONFIG_HOME", relativeXdg);
     const selected = await skills("workspace/skills");
-    const session = scripted(["", ""]);
+    const session = scripted([""]);
     const result = await selectSavedSkillsDirectory(session.io, options({
       cwd: path.join(home, "workspace"), explicitSkillsDir: "skills",
     }));

@@ -79,6 +79,8 @@ async function reviewedBareRemote() {
   return {
     env,
     expectedRoot: await rootIdentity(root),
+    repositoryRoot: root,
+    expectedRepositoryRoot: await identity(root),
     gitDir,
     expectedGitDir: await identity(gitDir),
     expectedGitEntry: await entryIdentity(path.join(root, ".git")),
@@ -87,6 +89,25 @@ async function reviewedBareRemote() {
     remoteDir,
     expectedRemoteDir: await identity(remoteDir),
   };
+}
+
+async function reviewedNestedRepository() {
+  fixtureGit(root, "init", "-b", "main");
+  const selected = path.join(root, "project", "skills");
+  await mkdir(selected, { recursive: true });
+  const gitDir = await realpath(path.join(root, ".git"));
+  const options = {
+    env,
+    expectedRoot: await rootIdentity(selected),
+    repositoryRoot: root,
+    expectedRepositoryRoot: await identity(root),
+    gitDir,
+    expectedGitDir: await identity(gitDir),
+    expectedGitEntry: await entryIdentity(path.join(root, ".git")),
+    commonDir: gitDir,
+    expectedCommonDir: await identity(gitDir),
+  };
+  return { selected, options };
 }
 
 function wrapperArguments(moduleUrl: string, rootPath: string, expectedRoot: ReviewedRoot, file: string): string[] {
@@ -140,6 +161,148 @@ describe("confined Git process", () => {
     expect(await readFile(existing, "utf8")).toBe(original);
     await expectMissing(missing);
   });
+
+  it("allows only selected skills, pinned parent metadata and an approved bare remote, not sibling worktree writes", async () => {
+    const { selected, options } = await reviewedNestedRepository();
+    const remoteDir = path.join(sandbox, "remote.git");
+    fixtureGit(sandbox, "init", "--bare", remoteDir);
+    const bound = { ...options, remoteDir, expectedRemoteDir: await identity(remoteDir) };
+    for (const file of [
+      path.join(selected, "allowed.config"),
+      path.join(root, ".git", "allowed.config"),
+      path.join(remoteDir, "allowed.config"),
+    ]) {
+      const result = await runConfinedGit(selected, ["config", "--file", file, "inside.key", "allowed"], bound);
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(await readFile(file, "utf8")).toContain("key = allowed");
+    }
+
+    const siblingDir = path.join(root, "sibling");
+    await mkdir(siblingDir);
+    const sibling = path.join(siblingDir, "protected.config");
+    const original = "[inside]\n\tkey = unchanged\n";
+    await writeFile(sibling, original);
+    await symlink(siblingDir, path.join(selected, "escape"), "dir");
+    for (const file of [sibling, path.join(selected, "escape", "protected.config"), path.join(root, "new.config")]) {
+      await expectRefused(runConfinedGit(selected, ["config", "--file", file, "inside.key", "changed"], bound), permissionDenied);
+      await expectMissing(`${file}.lock`);
+    }
+    expect(await readFile(sibling, "utf8")).toBe(original);
+    await expectMissing(path.join(root, "new.config"));
+  }, 30_000);
+
+  it("rejects a replaced or symlinked containing repository while the selected root and metadata remain pinned", async () => {
+    const { selected, options } = await reviewedNestedRepository();
+    const alias = path.join(sandbox, "parent-alias");
+    await symlink(root, alias, "dir");
+    const file = path.join(selected, "protected.config");
+    await expectRefused(
+      runConfinedGit(selected, ["config", "--file", file, "inside.key", "changed"], { ...options, repositoryRoot: alias }),
+      /repository|root|symbolic|symlink|loop|directory|relationship/i,
+    );
+    await expectMissing(file);
+
+    const old = `${root}-old`;
+    await rename(root, old);
+    await mkdir(root);
+    await rename(path.join(old, ".git"), path.join(root, ".git"));
+    await rename(path.join(old, "project"), path.join(root, "project"));
+    expect(await identity(selected)).toEqual({ dev: options.expectedRoot.dev, ino: options.expectedRoot.ino });
+    expect(await entryIdentity(path.join(root, ".git"))).toEqual(options.expectedGitEntry);
+    expect(await identity(root)).not.toEqual(options.expectedRepositoryRoot);
+    await expectRefused(
+      runConfinedGit(selected, ["config", "--file", file, "inside.key", "changed"], options),
+      /repository|root|identity|mismatch|changed|stale/i,
+    );
+    await expectMissing(file);
+    await expectMissing(`${file}.lock`);
+  });
+
+  it("rejects incomplete repository or metadata bindings before running Git", async () => {
+    const { selected, options } = await reviewedNestedRepository();
+    const incomplete = [
+      { ...options, repositoryRoot: undefined },
+      { ...options, expectedRepositoryRoot: undefined },
+      { ...options, gitDir: undefined },
+      { ...options, expectedGitDir: undefined },
+      { ...options, expectedGitEntry: undefined },
+      { ...options, commonDir: undefined },
+      { ...options, expectedCommonDir: undefined },
+    ];
+    for (const [index, binding] of incomplete.entries()) {
+      const file = path.join(selected, `incomplete-${index}.config`);
+      await expectRefused(
+        runConfinedGit(selected, ["config", "--file", file, "inside.key", "changed"], binding),
+        /repository|root|metadata|Git|identity|required/i,
+      );
+      await expectMissing(file);
+      await expectMissing(`${file}.lock`);
+    }
+  });
+
+  it("rejects a newly inserted nested Git boundary or a symlinked intermediate directory", async () => {
+    const { selected, options } = await reviewedNestedRepository();
+    const file = path.join(selected, "protected.config");
+    for (const directory of [path.dirname(selected), selected]) {
+      const nestedGit = path.join(directory, ".git");
+      await mkdir(nestedGit);
+      await expectRefused(
+        runConfinedGit(selected, ["config", "--file", file, "inside.key", "changed"], options),
+        /git|nested|repository|boundary|relationship|stale/i,
+      );
+      await expectMissing(file);
+      await rm(nestedGit, { recursive: true });
+    }
+    const project = path.dirname(selected);
+    const saved = `${project}-saved`;
+    await rename(project, saved);
+    await symlink(saved, project, "dir");
+    expect(await identity(selected)).toEqual({ dev: options.expectedRoot.dev, ino: options.expectedRoot.ino });
+    await expectRefused(
+      runConfinedGit(selected, ["config", "--file", file, "inside.key", "changed"], options),
+      /root|directory|symbolic|symlink|loop|relationship/i,
+    );
+    await expectMissing(file);
+    await expectMissing(`${file}.lock`);
+  });
+
+  it("rejects parent Git metadata hardlinked to a file outside the allowed boundary", async () => {
+    const { selected, options } = await reviewedNestedRepository();
+    const metadata = path.join(options.gitDir, "config");
+    const sentinel = path.join(outside, "linked-config");
+    const before = await readFile(metadata);
+    await link(metadata, sentinel);
+    expect((await stat(metadata, { bigint: true })).nlink).toBe(2n);
+    const file = path.join(selected, "blocked.config");
+    await expectRefused(
+      runConfinedGit(selected, ["config", "--file", file, "inside.key", "changed"], options),
+      /hardlinked file or link in writable tree is unsafe/i,
+    );
+    expect(await readFile(metadata)).toEqual(before);
+    expect(await readFile(sentinel)).toEqual(before);
+    await expectMissing(file);
+    await expectMissing(`${file}.lock`);
+  });
+
+  it("does not select a Git executable from the containing worktree or a symlink to it", async () => {
+    const { selected, options } = await reviewedNestedRepository();
+    const bin = path.join(root, "bin");
+    const alias = path.join(outside, "bin");
+    const sentinel = path.join(selected, "fake-git-executed");
+    await mkdir(bin);
+    await mkdir(alias);
+    await writeFile(path.join(bin, "git"), `#!/bin/sh\nprintf executed > '${sentinel}'\nexit 0\n`, { mode: 0o755 });
+    await symlink(path.join(bin, "git"), path.join(alias, "git"));
+    for (const [index, directory] of [bin, alias].entries()) {
+      const file = path.join(selected, `control-${index}.config`);
+      const result = await runConfinedGit(selected, ["config", "--file", file, "inside.key", "control"], {
+        ...options, env: { ...env, PATH: [directory, env.PATH].join(path.delimiter) },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(await readFile(file, "utf8")).toContain("key = control");
+      await expectMissing(sentinel);
+    }
+  }, 30_000);
 
   it("refuses a replacement root after its identity was reviewed", async () => {
     const expectedRoot = await rootIdentity(root);
@@ -349,6 +512,8 @@ describe("confined Git process", () => {
     const options = {
       env,
       expectedRoot: await rootIdentity(linked),
+      repositoryRoot: linked,
+      expectedRepositoryRoot: await identity(linked),
       gitDir,
       expectedGitDir: await identity(gitDir),
       expectedGitEntry: await entryIdentity(path.join(linked, ".git")),
@@ -400,6 +565,8 @@ describe("confined Git process", () => {
     const options = {
       env,
       expectedRoot: await rootIdentity(root),
+      repositoryRoot: root,
+      expectedRepositoryRoot: await identity(root),
       gitDir,
       expectedGitDir: await identity(gitDir),
       expectedGitEntry: await entryIdentity(path.join(root, ".git")),

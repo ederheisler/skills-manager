@@ -96,7 +96,11 @@ describe("external upstream lock claims", () => {
       ["entries array", JSON.stringify({ version: 3, skills: [entry] })],
       ["missing fields", JSON.stringify({ version: 3, skills: { example: { source: entry.source } } })],
       ["wrong field type", JSON.stringify({ version: 3, skills: { example: { ...entry, ref: 42 } } })],
-      ["corrupt sibling entry", JSON.stringify({ version: 3, skills: { example: entry, other: null } })],
+      ["selected well-known entry", JSON.stringify({ version: 3, skills: { example: {
+        source: "https://example.com", sourceType: "well-known", sourceUrl: "https://example.com",
+        skillFolderHash: "", sourceBaseUrl: "https://example.com", wellKnownDigest: "digest",
+        installedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+      } } })],
       ["oversized lock", " ".repeat(1024 * 1024 + 1)],
     ];
     for (const [label, bytes] of invalidLocks) {

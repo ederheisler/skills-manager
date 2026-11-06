@@ -16,6 +16,8 @@ export interface ConfinedGitOptions {
   env: NodeJS.ProcessEnv;
   input?: Buffer;
   expectedRoot: DirectoryIdentity & { identity: string };
+  repositoryRoot?: string;
+  expectedRepositoryRoot?: DirectoryIdentity;
   gitDir?: string;
   expectedGitDir?: DirectoryIdentity;
   expectedGitEntry?: DirectoryIdentity;
@@ -61,25 +63,47 @@ function checkIdentity(value: DirectoryIdentity | undefined, label: string): ass
   }
 }
 
-async function gitExecutable(env: NodeJS.ProcessEnv, untrustedDirectories: string[]): Promise<string> {
-  // PATH must not select executable content from a reviewed repository, even
-  // through an absolute symlink to that content.
+function isUntrustedPath(value: string, directories: readonly string[]): boolean {
+  return directories.some((base) => {
+    const relative = path.relative(base, value);
+    return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  });
+}
+
+async function gitExecutable(env: NodeJS.ProcessEnv, untrustedDirectories: string[]): Promise<{ git: string; executablePath: string }> {
+  // Neither Git nor the PATH inherited by its helpers may come from an
+  // approved repository, including through an absolute directory symlink.
+  const trustedDirectories: string[] = [];
+  let git: string | undefined;
   for (const directory of (env.PATH ?? "").split(path.delimiter)) {
     if (!directory || !path.isAbsolute(directory)) continue;
     try {
-      const executable = await realpath(path.join(directory, "git"));
-      if (untrustedDirectories.some((base) => {
-        const relative = path.relative(base, executable);
-        return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
-      })) continue;
-      if (!(await stat(executable)).isFile()) continue;
-      await access(executable, constants.X_OK);
-      return executable;
+      const resolved = await realpath(directory);
+      if (isUntrustedPath(resolved, untrustedDirectories)) continue;
+      let executable: string | undefined;
+      try {
+        executable = await realpath(path.join(resolved, "git"));
+      } catch {
+        // A directory without Git can still contain a required Git helper.
+      }
+      if (executable && isUntrustedPath(executable, untrustedDirectories)) continue;
+      trustedDirectories.push(resolved);
+      if (!git && executable) {
+        try {
+          if ((await stat(executable)).isFile()) {
+            await access(executable, constants.X_OK);
+            git = executable;
+          }
+        } catch {
+          // Try the next absolute PATH entry.
+        }
+      }
     } catch {
-      // Try the next absolute PATH entry.
+      // Ignore missing or otherwise inaccessible PATH directories.
     }
   }
-  throw new Error("Cannot find an executable Git binary in the absolute PATH entries");
+  if (!git) throw new Error("Cannot find an executable Git binary in the absolute PATH entries");
+  return { git, executablePath: trustedDirectories.join(path.delimiter) };
 }
 
 async function runConfined(root: string, args: readonly string[], options: ConfinedGitOptions, transaction: boolean): Promise<ConfinedGitResult> {
@@ -91,15 +115,20 @@ async function runConfined(root: string, args: readonly string[], options: Confi
 
   const metadataPresent = options.gitDir !== undefined || options.expectedGitDir !== undefined ||
     options.expectedGitEntry !== undefined || options.commonDir !== undefined || options.expectedCommonDir !== undefined;
+  const repositoryPresent = options.repositoryRoot !== undefined || options.expectedRepositoryRoot !== undefined;
   const nativeArgs = ["--root", root, options.expectedRoot.dev, options.expectedRoot.ino, options.expectedRoot.identity];
-  if (metadataPresent) {
+  if (metadataPresent || repositoryPresent) {
+    if (options.repositoryRoot === undefined) throw new Error("A reviewed repository root is required for the Git write boundary");
     if (options.gitDir === undefined || options.commonDir === undefined) throw new Error("Both reviewed Git directories are required for the Git write boundary");
+    checkDirectory(options.repositoryRoot, "repository root");
+    checkIdentity(options.expectedRepositoryRoot, "repository root");
     checkDirectory(options.gitDir, "Git metadata");
     checkDirectory(options.commonDir, "Git common");
     checkIdentity(options.expectedGitDir, "Git metadata");
     checkIdentity(options.expectedGitEntry, "Git entry");
     checkIdentity(options.expectedCommonDir, "Git common");
-    nativeArgs.push("--git-entry", options.expectedGitEntry.dev, options.expectedGitEntry.ino,
+    nativeArgs.push("--repository-root", options.repositoryRoot, options.expectedRepositoryRoot.dev, options.expectedRepositoryRoot.ino,
+      "--git-entry", options.expectedGitEntry.dev, options.expectedGitEntry.ino,
       "--git-dir", options.gitDir, options.expectedGitDir.dev, options.expectedGitDir.ino,
       "--common-dir", options.commonDir, options.expectedCommonDir.dev, options.expectedCommonDir.ino);
   }
@@ -110,9 +139,9 @@ async function runConfined(root: string, args: readonly string[], options: Confi
     nativeArgs.push("--remote-dir", options.remoteDir, options.expectedRemoteDir.dev, options.expectedRemoteDir.ino);
   }
   if (transaction) nativeArgs.push("--transaction-worker");
-  const untrustedDirectories = [root, options.gitDir, options.commonDir, options.remoteDir]
+  const untrustedDirectories = [root, options.repositoryRoot, options.gitDir, options.commonDir, options.remoteDir]
     .filter((directory): directory is string => directory !== undefined);
-  const git = await gitExecutable(options.env, untrustedDirectories);
+  const { git, executablePath } = await gitExecutable(options.env, untrustedDirectories);
   let executable = git;
   let commandArgs = args;
   if (transaction) {
@@ -120,12 +149,13 @@ async function runConfined(root: string, args: readonly string[], options: Confi
     const extension = import.meta.url.endsWith(".ts") ? "ts" : "js";
     const worker = fileURLToPath(new URL(`./gitTransactionWorker.${extension}`, import.meta.url));
     executable = await realpath(process.execPath);
+    if (isUntrustedPath(executable, untrustedDirectories)) throw new Error("The transaction worker executable is inside an untrusted repository");
     commandArgs = [worker, git, options.gitDir, options.commonDir];
   }
   let result;
   try {
     result = await execa(helper, [...nativeArgs, "--", executable, ...commandArgs], {
-      env: options.env,
+      env: { ...options.env, PATH: executablePath },
       extendEnv: false,
       reject: false,
       stripFinalNewline: false,

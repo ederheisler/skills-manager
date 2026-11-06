@@ -12,9 +12,9 @@ The original [design](../superpowers/specs/2026-09-16-skills-manager-design.md) 
 - Keep the name and executable `skills-manager`. Make the project open source.
 - Support macOS and Linux. Windows is out of scope.
 - Use `~/.agents/skills` as the default skills directory. Adopt an explicitly selected directory in place without forced relocation or merging.
-- Keep disabled entries in `.disabled_skills` inside the selected skills directory. Make that directory itself the optional Git repository root.
-- Offer Git initialization as an explicit action. Support local skills without a Git repository. Do not use a containing repository as the app's storage repository.
-- Suggest an optional remote push for backup during onboarding. Local Git setup and remote backup are separate choices, both skipped by default. A backup is not public publishing.
+- Keep disabled entries in `.disabled_skills` inside the selected skills directory.
+- Support local skills without Git. Onboarding does not ask about Git. Git initialization requires explicit confirmation in Git view.
+- Push only through an explicit action in Git view. Push sends whole-branch history, not uncommitted files. See the [existing repository choice](#existing-repository-choice).
 - Manage skills only. The previous decision to offer shared global instructions is superseded. Instruction files and their sharing are out of scope.
 - Use the MIT license. The required rights and copyright were confirmed, and the distribution includes third-party notices.
 - Protect existing files and links. Do not use personal machine paths or personal setup assumptions.
@@ -27,7 +27,7 @@ The choices below replace the corresponding open choices in the reviewed plan. T
 
 The project must work for other users and machines without disrupting existing skills, files, or links. A Git repository for skill storage must not be a prerequisite.
 
-The selected skills directory is the repository boundary because the app manages skills, not the surrounding harness. A containing repository remains under its owner's control. The [release plan](../superpowers/plans/2026-11-03-portable-open-source-release.md#git-safety) explains the nested-repository and consent boundaries.
+The original decision made the selected skills directory the repository boundary because the app manages skills, not the surrounding harness. A containing repository remained under its owner's control. [Existing repository choice](#existing-repository-choice) supersedes the leaf-only boundary while retaining scoped writes.
 
 MIT is a permissive license. The copyright name is `Eder Heisler`.
 
@@ -49,7 +49,13 @@ The [release evidence](../superpowers/plans/2026-11-03-portable-open-source-rele
 
 Date: 2026-11-04
 
-The primary installation route is the unpinned GitHub `npx` command in the [README](../../README.md). It requests the latest code on `main` without a manual clone. This supersedes the [tagged primary route](#implementation-choices) because a fixed tag prevents users from receiving new fixes when they run the command again. The existing `v0.1.0` tag remains part of the release history.
+The primary installation route was the unpinned GitHub `npx` command. It requested the latest code on `main` without a manual clone. This superseded the [tagged primary route](#implementation-choices) because a fixed tag prevented users from receiving fixes on later runs. The existing `v0.1.0` tag remains part of the release history. [Persistent installation](#persistent-installation) supersedes repeated `npx` launches.
+
+## Persistent installation
+
+Date: 2026-11-05
+
+The user explicitly chose to install once and run `skills-manager` on later launches. The implementation starts with a one-time GitHub `npx` launch. The user then approves persistent installation through the existing Application updates confirmation. Approved in-app updates must refresh the persistent installation, not only a temporary session.
 
 ## Concurrency limits
 
@@ -89,11 +95,35 @@ Date: 2026-11-05
 
 The user chose to persist completed setup. The implementation saves it in `$XDG_CONFIG_HOME/skills-manager/config.json` when `XDG_CONFIG_HOME` is absolute. Otherwise, the path is `~/.config/skills-manager/config.json`. Later launches reuse completed setup for an unchanged root, including launches by an update child. Each launch must still validate the physical root. A new or changed root requires setup again. An explicit `--skills-dir` takes precedence.
 
+The user requested removal of the in-app `i` directory switch because it had no value. Startup directory selection, saved setup, adoption, and `--skills-dir` remain available.
+
 This supersedes the [update plan's original repeat-onboarding requirement](../superpowers/plans/2026-11-05-in-app-updates.md#3-add-review-and-guarded-handoff).
 
-Saved setup does not grant approval for later writes, Git initialization, backup, or other actions. It does not change the separate app and CLI update consent in `app.json` and `cli.json`, or the startup network policy.
+Saved setup does not grant approval for later writes, Git initialization, push, or other actions. It does not change the separate app and CLI update consent in `app.json` and `cli.json`, or the startup network policy.
 
 Valid existing Vercel installer lock entries can provide source tracking and version checks without skills-manager receipts. The recorded baseline is not proof of ownership, prior review, or unchanged local files. Version checks compare upstream with that baseline, not with current local content. Browsing and checking do not rewrite installer locks or create receipts. Replacement still requires review and the existing path and source safeguards.
+
+The user chose an immediate, read-only version check for a known GitHub source without a separate source review. Skill updates still require approval.
+
+## Existing repository choice
+
+Date: 2026-11-05
+
+The user explicitly chose to use an existing repository that contains the selected skills directory. This supersedes the original leaf-only Git restriction and onboarding push suggestion. Existing repositories at the selected directory or above it need no Git setup during onboarding. Ordinary startup opens the browse view.
+
+Skill file writes and local commits remain scoped to the selected skills directory. Unrelated staged and unstaged files must remain intact. The app must not automatically initialize Git, commit, change a remote, push, add exclusions, or untrack files.
+
+Push is explicit in Git view. The review must show the actual repository, destination, and history scope. A push sends whole-branch history, including commits outside the selected skills directory. It does not preserve uncommitted files. Pull must refuse incoming changes outside the selected directory.
+
+Date: 2026-11-06
+
+The user requested simpler onboarding. Onboarding no longer asks about Git. Git initialization moved to Git view, where `i` opens its confirmation.
+
+## Browse category labels
+
+Date: 2026-11-05
+
+The user reported confusion about unknown, local, and source labels. In response, the app uses All, From a repo, and Local for browse categories. Local groups skills without a recorded remote association, including internally unknown and local origins. It does not assert authorship. Authorship remains separate and can be unknown. This presentation does not change provenance, scanning, or permission rules.
 
 ## Automated releases
 
@@ -125,7 +155,15 @@ The latest-main installation, automated releases, and main-branch protection dec
 
 Date: 2026-11-05
 
-The user chose update controls that match the main view's colored letter controls. Enter must not enable automatic checks. Approval requires `y` or an intentional click. App and CLI update actions remain available without an available version or a prior check. The screen must not use fake `unknown` or `latest` placeholders.
+Update controls use colored shortcuts consistent with the main view. Enter controls automatic checks, not `a`. If automatic checks are off, Enter opens a separate consent prompt. Only `y` or an intentional click enables checks. If checks are on, Enter disables them. App and CLI update actions remain available without an available version or a prior check. The screen must not use fake `unknown` or `latest` placeholders.
+
+The user explicitly chose immediate checks for both components whenever the updates screen opens, even with automatic checks off. Opening the screen authorizes those one-shot requests. Pressing `c` directly authorizes another check for the selected component. Foreground checks do not wait for a daily interval or enable automatic checks. Progress, results, and errors appear inline.
+
+The user rejected `n` as a redundant cancel control in all confirmations. Escape is the sole visible cancel action, and `n` does not cancel. Confirmation labels identify the specific action instead of using a generic label.
+
+The CLI refresh and application update confirmations remain separate. The CLI refresh confirmation stays short and discloses network access and trust in executed code. It explains that a known, clean, reproducible app commit and the selected root are kept across restart. An unknown, dirty, or nonreproducible build requires an explicit switch to `main`. The [security policy](../../SECURITY.md#application-and-cli-updates) retains the details, including normal permissions for scripts.
+
+The normal updates menu does not offer a recovery command action. If an update fails or is unavailable, the app can show instructions to start it again.
 
 Automatic checks remain off by default, with separate permission for each host scope. The user requested a check when permission is valid but no completed result exists, even if an old attempt was recorded. Completed results persist. The implementation stores these results in a private, host-scoped cache. A new approval starts a check and permits later daily checks.
 
@@ -137,4 +175,4 @@ The user also requested that the Vercel `skills` CLI stay up to date through the
 This request covers the CLI package, not installed skill documents. It does not require a global CLI installation.
 The [upstream version decision](#upstream-skills-versions) remains in force. Tested versions are not an allowlist.
 The user later explicitly approved the [CLI refresh mechanism](../superpowers/plans/2026-11-05-in-app-updates.md#4-refresh-the-vercel-skills-cli).
-The [update plan](../superpowers/plans/2026-11-05-in-app-updates.md#verification) records runtime and platform evidence for the prior CLI refresh. The canonical `npx` app recovery command does not guarantee a fresh CLI.
+The [update plan](../superpowers/plans/2026-11-05-in-app-updates.md#verification) records runtime and platform evidence for the prior CLI refresh. The later [persistent installation](#persistent-installation) decision changes its installation target.
