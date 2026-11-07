@@ -1,9 +1,7 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: [Native portability]
-    types: [completed]
+  push:
     branches: [main]
 
 permissions:
@@ -18,28 +16,27 @@ jobs:
     name: Publish release
     if: >-
       github.repository == 'ederheisler/skills-manager' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      github.event.workflow_run.conclusion == 'success'
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.deleted == false
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      # This job never checks out, executes, or downloads artifacts from the validated commit.
-      - name: Publish the validated main commit
+      # This job never checks out or executes code from the release commit.
+      - name: Publish the protected main commit
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const { owner, repo } = context.repo;
-            const run = context.payload.workflow_run;
-            const sha = run.head_sha;
+            const sha = context.sha;
             if (`${owner}/${repo}` !== 'ederheisler/skills-manager' ||
-                run.event !== 'push' || run.head_branch !== 'main' ||
-                run.head_repository?.full_name !== `${owner}/${repo}` ||
-                run.conclusion !== 'success' || !/^[0-9a-f]{40}$/.test(sha)) {
-              throw new Error('Release requires a successful main push in the trusted repository.');
+                context.eventName !== 'push' || context.ref !== 'refs/heads/main' ||
+                context.payload.repository?.full_name !== `${owner}/${repo}` ||
+                context.payload.deleted !== false || context.payload.after !== sha ||
+                !/^[0-9a-f]{40}$/.test(sha)) {
+              throw new Error('Release requires a main push in the trusted repository.');
             }
 
             async function isCurrentMain() {
@@ -48,9 +45,9 @@ jobs:
               return data.commit.sha === sha;
             }
 
-            // Stale successful runs never release; the latest main commit must pass its own checks.
+            // Stale runs never release; only the current protected main commit can publish.
             if (!await isCurrentMain()) {
-              core.notice(`Skipping stale validated commit ${sha}.`);
+              core.notice(`Skipping stale main commit ${sha}.`);
               return;
             }
 
@@ -107,12 +104,12 @@ jobs:
                   });
                 } catch (error) {
                   if (error.status === 404 || error.status === 409) {
-                    throw new Error(`Cannot verify that ${tag} is in validated main history; resolve it before retrying.`);
+                    throw new Error(`Cannot verify that ${tag} is in main history; resolve it before retrying.`);
                   }
                   throw error;
                 }
                 if (comparison.data.merge_base_commit.sha !== object.sha) {
-                  throw new Error(`${tag} points outside validated main history; resolve it before retrying.`);
+                  throw new Error(`${tag} points outside main history; resolve it before retrying.`);
                 }
               }
               if ((await versionAt(object.sha)).version !== version) {
@@ -123,7 +120,7 @@ jobs:
             }
 
             if (!await isCurrentMain()) {
-              core.notice(`Skipping stale validated commit ${sha}.`);
+              core.notice(`Skipping stale main commit ${sha}.`);
               return;
             }
             await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha });
