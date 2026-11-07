@@ -12,6 +12,7 @@ These records explain accepted decisions and their reasons. For current behavior
 - [Upstream skills versions](2026-11-03-open-source-portability.md#upstream-skills-versions).
 - [In-app keyboard help](2026-11-03-open-source-portability.md#in-app-keyboard-help).
 - [Persisted setup and existing installer tracking](2026-11-03-open-source-portability.md#persisted-setup-and-existing-installer-tracking).
+- [Background skill update checks](2026-11-03-open-source-portability.md#background-skill-update-checks).
 - [Existing repository choice](2026-11-03-open-source-portability.md#existing-repository-choice).
 - [Browse category labels](2026-11-03-open-source-portability.md#browse-category-labels).
 - [Automated releases](2026-11-03-open-source-portability.md#automated-releases).

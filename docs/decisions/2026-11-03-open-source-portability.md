@@ -36,7 +36,7 @@ MIT is a permissive license. The copyright name is `Eder Heisler`.
 The project uses Node. The original primary installation route was a tagged GitHub `npx` command. It required neither a manual clone nor npm registry publication. Repository and tarball distribution remain supported. [Latest main installation](#latest-main-installation) supersedes the tagged primary route.
 
 Other choices:
-- The original network policy required a user action and kept startup and local browsing offline. [Application update approval](#application-update-planning) later introduced an exception for opted-in checks. Upstream telemetry remains disabled.
+- The original network policy required a user action and kept startup and local browsing offline. [Application update approval](#application-update-planning) later introduced an exception for opted-in checks; [background skill update checks](#background-skill-update-checks) supersede the offline-startup policy for known skill sources. Upstream telemetry remains disabled.
 - Allow explicitly reviewed changes for adopted skills with an unknown owner or edit baseline. Unknown status remains visible and does not imply ownership.
 - Target macOS and Linux on arm64 and x86_64, with glibc on Linux. Test each combination before claiming support.
 - Use GitHub private vulnerability reporting as the security contact. It is enabled on the public repository.
@@ -101,11 +101,25 @@ The user requested removal of the in-app `i` directory switch because it had no 
 
 This supersedes the [update plan's original repeat-onboarding requirement](../superpowers/plans/2026-11-05-in-app-updates.md#3-add-review-and-guarded-handoff).
 
-Saved setup does not grant approval for later writes, Git initialization, push, or other actions. It does not change the separate app and CLI update consent in `app.json` and `cli.json`, or the startup network policy.
+Saved setup does not grant approval for later writes, Git initialization, push, or other actions. It does not change the separate app and CLI update consent in `app.json` and `cli.json`. [Background skill update checks](#background-skill-update-checks) supersede the original startup network policy for known skill sources.
 
-Valid existing Vercel installer lock entries can provide source tracking and version checks without skills-manager receipts. The recorded baseline is not proof of ownership, prior review, or unchanged local files. Version checks compare upstream with that baseline, not with current local content. Browsing and checking do not rewrite installer locks or create receipts. Replacement still requires review and the existing path and source safeguards.
+Valid existing Vercel installer lock entries can provide source tracking and version checks without skills-manager receipts. The recorded baseline is not proof of ownership, prior review, or unchanged local files. The original checks compared upstream with that baseline, not with current local content; [background skill update checks](#background-skill-update-checks) supersede that comparison. Browsing and checking do not rewrite installer locks or create receipts. Replacement still requires review and the existing path and source safeguards.
 
 The user chose an immediate, read-only version check for a known GitHub source without a separate source review. Skill updates still require approval.
+
+## Background skill update checks
+
+Date: 2026-11-07
+
+The user chose background checks for known skill sources on initialization and refresh, replacing the manual `v` check and its dialog. The header counts known available updates and affected skills have an indicator. `u` updates the selected skill only when an update is known to be available; `p` updates all such skills. Updates still require review and are never installed automatically. An unavailable check is not a current result.
+
+The installed skill tree is compared with upstream so a stale recorded baseline alone does not produce a false update when contents already match. Checks do not modify installed skills or discard meaningful local changes. This supersedes the original offline-startup and baseline-only decisions above. App and CLI automatic checks retain their separate opt-ins.
+
+The user later chose the underlying `skills` CLI for update checks instead of direct unauthenticated GitHub API requests, to avoid restrictive API rate limits. The CLI can report all skills current after a source failure and does not expose the upstream hash needed for the existing comparison. The app treats CLI non-updates and errors as unavailable. For a CLI-reported update, it stages a separate remote snapshot and compares its contents with the installed skill. A matching tree suppresses the stale-baseline update. Failed or ambiguous staging does not establish that a skill is current. Checks use disposable locks and do not modify the installed skill or external installer locks.
+
+The user subsequently chose not to count ordinary CLI up-to-date results as unavailable. This supersedes the non-update classification above: the app accepts the CLI's up-to-date summary unless it also reports a failure. Explicit failures and unrecognized results remain unavailable. The CLI may silently skip unresolved paths or missing hashes, so its summary does not independently prove every source was checked.
+
+The user rejected update and unavailable indicators in the header and chose the footer for this information. Individual skill markers and reviewed update actions remain.
 
 ## Existing repository choice
 

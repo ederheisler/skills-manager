@@ -100,7 +100,7 @@ function macProfile(workspace: string, packages: RuntimePackage[], node: string,
   const readable = ["/usr/bin", "/usr/sbin", "/usr/lib", "/usr/libexec", "/usr/share", "/System/Library",
     "/Library/Apple", "/Library/Developer/CommandLineTools/usr", "/bin", "/sbin",
     "/private/etc/resolv.conf", "/private/etc/hosts", "/private/etc/nsswitch.conf", "/private/etc/ssl/cert.pem",
-    "/private/etc/ssl/certs", "/dev/null", "/dev/random", "/dev/urandom", "/dev/fd",
+    "/private/etc/ssl/certs", "/private/var/run/mDNSResponder", "/dev/null", "/dev/random", "/dev/urandom", "/dev/fd",
     workspace, node, ...libraries, ...packages.map((entry) => entry.root)];
   if (source) readable.push(source);
   if (git) readable.push(...git.runtimeDirectories);
@@ -116,6 +116,8 @@ function macProfile(workspace: string, packages: RuntimePackage[], node: string,
     // Recent macOS dyld opens the filesystem root during startup. Grant access
     // to that directory alone, not the tree below it.
     '(allow file-read-data (literal "/"))',
+    // Resolver and TLS paths pass through these system symlinks.
+    '(allow file-read-metadata (literal "/var") (literal "/etc"))',
     ...[...ancestors].map((entry) => `(allow file-read-metadata (literal ${seatbeltString(entry)}))`),
     ...readable.map((entry) => `(allow file-read* (subpath ${seatbeltString(entry)}))`),
     ...readableFiles.map((entry) => `(allow file-read* (literal ${seatbeltString(entry)}))`),
@@ -178,7 +180,7 @@ async function selectedMacGit(workspace: string, env: NodeJS.ProcessEnv): Promis
   return { executable, resolvedExecutable, runtimeDirectories };
 }
 
-async function invoke(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
+async function invoke(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, allowCheckExit = false): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     const stdout: Buffer[] = [];
@@ -211,7 +213,7 @@ async function invoke(command: string, args: string[], cwd: string, env: NodeJS.
       clearTimeout(timeout);
       killGroup();
       if (failure) return reject(new Error(failure));
-      if (code !== 0) {
+      if (code !== 0 && !(allowCheckExit && code === 1 && !signal)) {
         const diagnostic = Buffer.concat(stderr).toString("utf8").replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 500);
         return reject(new Error(`Confined upstream command failed${signal ? ` (${signal})` : ` (exit ${code})`}${diagnostic ? `: ${diagnostic}` : "."}`));
       }
@@ -238,16 +240,16 @@ export async function runConfinedSkills(workspace: string, args: string[], local
     const libraries = await Promise.all(shared.map((entry) => realpath(entry).catch(() => entry)));
     const env = cleanEnvironment(root);
     const source = args[0] === "add" ? args[1] : undefined;
-    const remote = source && !localSource && !path.isAbsolute(source) && !source.startsWith("./") && !source.startsWith("../");
+    const remote = args[0] === "check" || (source && !localSource && !path.isAbsolute(source) && !source.startsWith("./") && !source.startsWith("../"));
     const git = remote ? await selectedMacGit(root, env) : undefined;
     if (git) env.PATH = `${path.dirname(git.executable)}:${env.PATH}`;
-    return invoke("/usr/bin/sandbox-exec", ["-p", macProfile(root, location.packages, node, libraries, localSource, git), node, location.executable, ...args], root, env);
+    return invoke("/usr/bin/sandbox-exec", ["-p", macProfile(root, location.packages, node, libraries, localSource, git), node, location.executable, ...args], root, env, args[0] === "check");
   }
   if (process.platform === "linux") {
     // No host home, runtime sockets, or credentials are mounted in this namespace.
     const sandboxArgs = linuxArguments(root, location, node, localSource);
     sandboxArgs.push("--chdir", "/workspace", "--", "/app/node", path.join("/app/node_modules/skills", location.relativeExecutable), ...args);
-    return invoke("bwrap", sandboxArgs, root, cleanEnvironment("/workspace"));
+    return invoke("bwrap", sandboxArgs, root, cleanEnvironment("/workspace"), args[0] === "check");
   }
   throw new Error("Remote actions require macOS sandbox-exec or Linux bubblewrap; this platform is unsupported.");
 }

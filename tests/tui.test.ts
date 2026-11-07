@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { watch } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setImmediate as nextTurn, setTimeout as delay } from "node:timers/promises";
@@ -10,6 +9,7 @@ import { RGBA, TreeSitterClient, type ClipboardService } from "@opentui/core";
 import { createTestRenderer as createOpenTuiTestRenderer, MouseButtons } from "@opentui/core/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { approveSkillsRoot, fingerprintContents } from "../src/actions/boundary.js";
+import * as skillUpdateChecks from "../src/actions/checkUpdates.js";
 import { SoftwareUpdateService } from "../src/actions/softwareUpdates.js";
 import * as appUpdateHandoff from "../src/actions/appUpdateHandoff.js";
 import * as appBuild from "../src/state/appBuild.js";
@@ -85,8 +85,8 @@ async function fixture(directoryName = "chosen-skills"): Promise<{ home: string;
   return { home, skillsDir };
 }
 
-async function savedSourceFixture(skillsDir: string) {
-  const skill = path.join(skillsDir, "alpha");
+async function savedSourceFixture(skillsDir: string, name = "alpha") {
+  const skill = path.join(skillsDir, name);
   const metadata = path.join(skillsDir, ".skills-manager", "metadata");
   await mkdir(metadata, { recursive: true, mode: 0o700 });
   await writeFile(path.join(skillsDir, ".skills-manager", "owner"), "skills-manager-owned-state-v1\n", { mode: 0o600 });
@@ -94,14 +94,14 @@ async function savedSourceFixture(skillsDir: string) {
   const stat = await lstat(skillsDir, { bigint: true });
   const entry = {
     source: "example/project", sourceType: "github", sourceUrl: "https://github.com/example/project",
-    skillPath: "skills/alpha/SKILL.md", skillFolderHash: "a".repeat(40),
+    skillPath: `skills/${name}/SKILL.md`, skillFolderHash: "a".repeat(40),
     installedAt: "2026-01-01", updatedAt: "2026-01-01", ref: "release/v1",
   };
   const receipt = {
-    version: 2, root: skillsDir, name: "alpha", fingerprint: await fingerprintContents(skill),
+    version: 2, root: skillsDir, name, fingerprint: await fingerprintContents(skill),
     historicalBaseline: "unknown", rootIdentity: { device: stat.dev.toString(), inode: stat.ino.toString() }, entry,
   };
-  const file = path.join(metadata, "alpha.json");
+  const file = path.join(metadata, `${name}.json`);
   await writeFile(file, JSON.stringify(receipt), { mode: 0o600 });
   return { file, receipt };
 }
@@ -176,6 +176,8 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       expect(frame).toContain("○   beta");
       await setup.mockInput.typeText("r");
       await setup.waitFor(() => setup.captureCharFrame().includes("Alpha body"));
+      expect(frame).not.toContain("Checking skill updates");
+      expect(frame).not.toContain("skills could not be checked");
       expect(fetch).not.toHaveBeenCalled();
       expect(await exists(path.join(skillsDir, ".skills-manager"))).toBe(false);
       const rootAfter = await lstat(skillsDir);
@@ -184,6 +186,145 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       expect([fileAfter.mode, fileAfter.mtimeMs, fileAfter.ctimeMs]).toEqual([fileBefore.mode, fileBefore.mtimeMs, fileBefore.ctimeMs]);
       expect(await exists(path.join(skillsDir, ".git"))).toBe(false);
     } finally {
+      setup.renderer.destroy();
+    }
+  });
+
+  it("reserves one footer notification row across resize and update results", async () => {
+    const { skillsDir } = await fixture();
+    await savedSourceFixture(skillsDir);
+    const pending = Promise.withResolvers<skillUpdateChecks.UpdateCheckReport>();
+    const check = vi.spyOn(skillUpdateChecks, "checkForUpdates").mockReturnValueOnce(pending.promise);
+    const setup = await createTestRenderer({ width: 120, height: 24 });
+    try {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir), { fileOpener: async () => {} }).start();
+      await setup.waitFor(() => check.mock.calls.length === 1 && setup.captureCharFrame().includes("│ alpha "));
+      for (const [width, height] of [[120, 24], [100, 20]]) {
+        setup.resize(width!, height!);
+        await setup.renderOnce();
+        const rows = setup.captureCharFrame().split("\n");
+        const directory = rows.findIndex((row) => row.includes("Directory: "));
+        expect(directory).toBeGreaterThanOrEqual(2);
+        expect(rows[directory - 2]).toContain("x app updates · ? help");
+        expect(rows[directory - 1]).toContain("Checking skill updates…");
+      }
+      const alpha = check.mock.calls[0]![0].find((skill) => skill.name === "alpha")!;
+      check.mock.calls[0]![3]!({ updated: [], unavailable: [{ id: alpha.id, name: alpha.name, reason: "unknown", category: "unknown" }] });
+      await setup.waitFor(() => setup.captureCharFrame().includes("1 skills could not be checked"));
+      const rows = setup.captureCharFrame().split("\n");
+      const directory = rows.findIndex((row) => row.includes("Directory: "));
+      expect(rows[directory - 1]).toContain("1 skills could not be checked");
+      expect(rows[directory - 1]).toContain("Checking skill updates…");
+      expect(rows[directory - 2]).toContain("x app updates · ? help");
+      await setup.mockInput.typeText("o");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Opened SKILL.md."));
+      const sharedRows = setup.captureCharFrame().split("\n");
+      const sharedDirectory = sharedRows.findIndex((row) => row.includes("Directory: "));
+      expect(sharedRows[sharedDirectory - 1]).toContain("Opened SKILL.md.");
+      expect(sharedRows[sharedDirectory - 1]).toContain("1 skills could not be checked");
+      expect(sharedRows[sharedDirectory - 2]).toContain("x app updates · ? help");
+      expect(rows[0]).not.toMatch(/checking|update|unavailable|s cope|e nabled/i);
+      pending.resolve({ updated: [], unavailable: [{ id: alpha.id, name: alpha.name, reason: "unknown", category: "unknown" }] });
+    } finally {
+      pending.resolve({ updated: [], unavailable: [] });
+      setup.renderer.destroy();
+    }
+  });
+
+  it("shows distinct progressive update and unavailable counts until the check completes", async () => {
+    const { skillsDir } = await fixture();
+    await mkdir(path.join(skillsDir, "gamma"));
+    await writeFile(path.join(skillsDir, "gamma", "SKILL.md"), "---\nname: gamma\n---\n");
+    await savedSourceFixture(skillsDir);
+    await savedSourceFixture(skillsDir, "gamma");
+    const pending = Promise.withResolvers<skillUpdateChecks.UpdateCheckReport>();
+    const check = vi.spyOn(skillUpdateChecks, "checkForUpdates").mockReturnValueOnce(pending.promise);
+    const setup = await createTestRenderer({ width: 120, height: 24 });
+    try {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.waitFor(() => check.mock.calls.length === 1 && setup.captureCharFrame().includes("Checking skill updates…"));
+      const candidates = check.mock.calls[0]![0];
+      expect(candidates.map((skill) => skill.name).sort()).toEqual(["alpha", "gamma"]);
+      const alpha = candidates.find((skill) => skill.name === "alpha")!;
+      const gamma = candidates.find((skill) => skill.name === "gamma")!;
+      const report: skillUpdateChecks.UpdateCheckReport = {
+        updated: [alpha.id],
+        unavailable: [{ id: gamma.id, name: gamma.name, reason: "unknown", category: "unknown" }],
+      };
+      check.mock.calls[0]![3]!(report);
+      await setup.waitFor(() => setup.captureCharFrame().includes("1 update available · 1 skills could not be checked · Checking skill updates…"));
+      pending.resolve(report);
+      await setup.waitFor(() => {
+        const frame = setup.captureCharFrame();
+        return frame.includes("1 update available · 1 skills could not be checked") && !frame.includes("Checking skill updates…");
+      });
+      expect(setup.captureCharFrame()).not.toContain("Skill update check failed");
+    } finally {
+      pending.resolve({ updated: [], unavailable: [] });
+      setup.renderer.destroy();
+    }
+  });
+
+  it("keeps keyboard-selected skills visible across both viewport edges and list boundaries", async () => {
+    const { skillsDir } = await fixture();
+    await savedSourceFixture(skillsDir);
+    const pending = Promise.withResolvers<skillUpdateChecks.UpdateCheckReport>();
+    const check = vi.spyOn(skillUpdateChecks, "checkForUpdates").mockReturnValueOnce(pending.promise);
+    for (let index = 0; index < 24; index++) {
+      const name = `item-${String(index).padStart(2, "0")}`;
+      await mkdir(path.join(skillsDir, name));
+      await writeFile(path.join(skillsDir, name, "SKILL.md"), `---\nname: ${name}\n---\n\n# Body ${name}\n`);
+    }
+    const setup = await createTestRenderer({ width: 100, height: 16 });
+    try {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.waitFor(() => check.mock.calls.length === 1 && setup.captureCharFrame().includes("│ alpha "));
+      const listContents = (frame: string) => frame.split("\n")
+        .filter((row) => row.startsWith("│"))
+        .map((row) => row.split("│")[1]!.replace(/[█▀▄]/g, " ").trimEnd());
+      const expectBoundaryUnchanged = async (keys: string[], name: string) => {
+        const list = listContents(setup.captureCharFrame());
+        for (const key of keys) {
+          if (key === "j" || key === "k") await setup.mockInput.typeText(key);
+          else setup.mockInput.pressKey(key);
+          await setup.renderOnce();
+          const frame = setup.captureCharFrame();
+          expect(listContents(frame)).toEqual(list);
+          expect(frame).toContain(`│ ${name} `);
+          expect(check).toHaveBeenCalledTimes(1);
+        }
+      };
+      await expectBoundaryUnchanged(["\u001b[A", "k"], "alpha");
+
+      const select = async (key: string, label: string, name: string) => {
+        if (key === "up" || key === "down") setup.mockInput.pressKey(key === "up" ? "\u001b[A" : "\u001b[B");
+        else await setup.mockInput.typeText(key);
+        await setup.waitFor(() => {
+          const frame = setup.captureCharFrame();
+          return frame.includes(label) && frame.includes(`│ ${name} `);
+        });
+      };
+      await select("j", "○   beta", "beta");
+      for (let index = 0; index < 24; index++) {
+        const name = `item-${String(index).padStart(2, "0")}`;
+        await select(index % 2 ? "j" : "down", `◉   ${name}`, name);
+      }
+      await expectBoundaryUnchanged(["\u001b[B", "j"], "item-23");
+      const alpha = check.mock.calls[0]![0].find((skill) => skill.name === "alpha")!;
+      pending.resolve({ updated: [alpha.id], unavailable: [] });
+      await setup.waitFor(() => setup.captureCharFrame().includes("1 update available") && setup.captureCharFrame().includes("◉   item-23"));
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("◉   item-23");
+      expect(setup.captureCharFrame()).toContain("│ item-23 ");
+      expect(check).toHaveBeenCalledTimes(1);
+      for (let index = 22; index >= 0; index--) {
+        const name = `item-${String(index).padStart(2, "0")}`;
+        await select(index % 2 ? "k" : "up", `◉   ${name}`, name);
+      }
+      await select("k", "○   beta", "beta");
+      await select("up", "◉ ⎇ alpha", "alpha");
+    } finally {
+      pending.resolve({ updated: [], unavailable: [] });
       setup.renderer.destroy();
     }
   });
@@ -594,7 +735,7 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
       await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("x app updates · open");
+      expect(frame).toContain("x app updates · ? help");
       expect(frame).not.toContain("o pen");
       expect(frame).toContain("scope: All · enabled: all");
       expect(frame).not.toContain("s cope: All");
@@ -1248,7 +1389,7 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
     try {
       await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("quit · ? help");
+      expect(setup.captureCharFrame()).toContain("x app updates · ? help");
       const controls = setup.captureSpans().lines.find((line) =>
         line.spans.map((span) => span.text).join("").includes("? help"));
       expect(controls?.spans.some((span) => span.text === "?" && span.fg.equals(RGBA.fromHex("#C6A0F6")))).toBe(true);
@@ -1815,165 +1956,134 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
     }
   });
 
-  it("lets an adopted unknown-source skill choose an explicit replacement source", async () => {
+  it("checks in the background and offers updates only for flagged skills", async () => {
     const { skillsDir } = await fixture();
+    const { file, receipt } = await savedSourceFixture(skillsDir);
+    await writeFile(path.join(skillsDir, ".skills-manager", "metadata", "beta.json"), JSON.stringify({
+      ...receipt,
+      name: "beta",
+      fingerprint: await fingerprintContents(path.join(skillsDir, ".disabled_skills", "beta")),
+      entry: { ...receipt.entry, skillPath: "skills/beta/SKILL.md" },
+    }), { mode: 0o600 });
+    const pending = Promise.withResolvers<skillUpdateChecks.UpdateCheckReport>();
+    const check = vi.spyOn(skillUpdateChecks, "checkForUpdates").mockReturnValueOnce(pending.promise);
+    const setup = await createTestRenderer({ width: 200, height: 30 });
+    try {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.waitFor(() => check.mock.calls.length === 1);
+      const checkingHeader = setup.captureCharFrame().split("\n")[0]!;
+      expect(checkingHeader).toContain("Skills 2 shown · scope: All · enabled: all");
+      expect(checkingHeader).not.toMatch(/checking|update|unavailable|s cope|e nabled/i);
+      await setup.mockInput.typeText("uvp");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Review saved sources");
+      expect(setup.captureCharFrame()).not.toContain("Update check");
+      const skills = check.mock.calls[0]![0];
+      const alpha = skills.find((skill) => skill.name === "alpha")!;
+      const beta = skills.find((skill) => skill.name === "beta")!;
+      check.mock.calls[0]![3]!({ updated: [alpha.id], unavailable: [] });
+      await setup.waitFor(() => setup.captureCharFrame().includes("◉ ⎇ alpha *"));
+      expect(setup.captureCharFrame()).toContain("1 update available");
+      check.mock.calls[0]![3]!({ updated: [alpha.id], unavailable: [{ id: beta.id, name: beta.name, reason: "HTTP 403" }] });
+      await setup.waitFor(() => setup.captureCharFrame().includes("1 skills could not be checked"));
+      pending.resolve({ updated: [alpha.id], unavailable: [{ id: beta.id, name: beta.name, reason: "HTTP 403" }] });
+      let frame = setup.captureCharFrame();
+      const header = frame.split("\n")[0]!;
+      expect(header).toContain("Skills 2 shown · scope: All · enabled: all");
+      expect(header).not.toMatch(/checking|update|unavailable|s cope|e nabled/i);
+      expect(frame).toContain("◉ ⎇ alpha *");
+      expect(frame).toContain("u update · p update all");
+      expect(frame).toContain("x app updates · ? help");
+      await setup.mockInput.typeText("j");
+      await setup.waitFor(() => !setup.captureCharFrame().includes("u update ·"));
+      await setup.mockInput.typeText("u");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Review saved sources");
+      await setup.mockInput.typeText("p");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
+      frame = confirmationText(setup.captureCharFrame(), "Review saved sources");
+      expect(frame).toContain("skills/alpha/SKILL.md");
+      expect(frame).not.toContain("beta");
+      setup.mockInput.pressEscape();
+      await setup.waitFor(() => !setup.captureCharFrame().includes("Review saved sources"));
+      await setup.mockInput.typeText("k");
+      await setup.mockInput.typeText("u");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
+      await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, ref: "changed" } }));
+      await setup.mockInput.typeText("y");
+      await setup.waitFor(() => setup.captureCharFrame().includes("The saved source changed since approval."));
+      expect(await readFile(path.join(skillsDir, "alpha", "SKILL.md"), "utf8")).toContain("Alpha body");
+    } finally {
+      pending.resolve({ updated: [], unavailable: [] });
+      setup.renderer.destroy();
+    }
+  });
+
+  it("refreshes checks without allowing an older result to overwrite the latest", async () => {
+    const { skillsDir } = await fixture();
+    await savedSourceFixture(skillsDir);
+    const first = Promise.withResolvers<skillUpdateChecks.UpdateCheckReport>();
+    const second = Promise.withResolvers<skillUpdateChecks.UpdateCheckReport>();
+    const check = vi.spyOn(skillUpdateChecks, "checkForUpdates")
+      .mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const setup = await createTestRenderer({ width: 200, height: 30 });
+    try {
+      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
+      await setup.waitFor(() => check.mock.calls.length === 1);
+      await setup.mockInput.typeText("r");
+      await setup.waitFor(() => check.mock.calls.length === 2);
+      const staleAlpha = check.mock.calls[0]![0].find((skill) => skill.name === "alpha")!;
+      check.mock.calls[0]![3]!({ updated: [staleAlpha.id], unavailable: [] });
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("◉ ⎇ alpha *");
+      const alpha = check.mock.calls[1]![0].find((skill) => skill.name === "alpha")!;
+      second.resolve({ updated: [alpha.id], unavailable: [] });
+      await setup.waitFor(() => setup.captureCharFrame().includes("◉ ⎇ alpha *"));
+      first.resolve({ updated: [], unavailable: [] });
+      await nextTurn();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("◉ ⎇ alpha *");
+      expect(setup.captureCharFrame()).not.toContain("Update check");
+    } finally {
+      first.resolve({ updated: [], unavailable: [] });
+      second.resolve({ updated: [], unavailable: [] });
+      setup.renderer.destroy();
+    }
+  });
+
+  it("does not warn about skills without a known source", async () => {
+    const { skillsDir } = await fixture();
+    const check = vi.spyOn(skillUpdateChecks, "checkForUpdates");
     const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
       await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
-      await setup.mockInput.typeText("u");
-      await setup.waitFor(() => setup.captureCharFrame().includes("Replacement source for alpha:"));
-      await setup.mockInput.typeText("owner/repository@alpha");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("owner/repository@alpha");
-      setup.mockInput.pressEscape();
-      await setup.waitFor(() => !setup.captureCharFrame().includes("Replacement source for alpha:"));
-      expect(await readFile(path.join(skillsDir, "alpha", "SKILL.md"), "utf8")).toContain("Alpha body");
-      expect(await exists(path.join(skillsDir, ".skills-manager"))).toBe(false);
+      const header = setup.captureCharFrame().split("\n")[0]!;
+      expect(header).toContain("Skills 2 shown · scope: All · enabled: all");
+      expect(header).not.toMatch(/checking|update|unavailable|s cope|e nabled/i);
+      expect(check).not.toHaveBeenCalled();
     } finally {
       setup.renderer.destroy();
     }
   });
 
-  it("groups update sources while retaining skills, refs and paths", async () => {
-    const { home, skillsDir } = await fixture();
-    for (const name of ["gamma", "delta"]) {
-      await mkdir(path.join(skillsDir, name));
-      await writeFile(path.join(skillsDir, name, "SKILL.md"), `---\nname: ${name}\n---\n`);
-    }
-    const base = {
-      source: "example/project", sourceType: "github", sourceUrl: "https://github.com/example/project",
-      skillFolderHash: "a".repeat(40), installedAt: "2026-01-01", updatedAt: "2026-01-01",
-    };
-    await writeFile(path.join(home, ".skill-lock.json"), JSON.stringify({ version: 3, skills: {
-      alpha: { ...base, skillPath: "skills/alpha/SKILL.md", ref: "release/v1" },
-      beta: { ...base, skillPath: "skills/beta/SKILL.md" },
-      gamma: { ...base, source: "other/project", sourceUrl: "https://github.com/other/project", skillPath: "tools/gamma/SKILL.md" },
-      delta: { ...base, source: "https://git.example.org/team/repo", sourceUrl: "https://git.example.org/team/repo", sourceType: "git", skillPath: "delta/SKILL.md" },
-    } }));
-    const { receipt } = await savedSourceFixture(skillsDir);
-    await writeFile(path.join(skillsDir, ".skills-manager", "metadata", "delta.json"), JSON.stringify({
-      ...receipt,
-      name: "delta",
-      fingerprint: await fingerprintContents(path.join(skillsDir, "delta")),
-      entry: { ...base, source: "https://git.example.org/team/repo", sourceUrl: "https://git.example.org/team/repo", sourceType: "git", skillPath: "delta/SKILL.md" },
-    }), { mode: 0o600 });
-    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
-    const setup = await createTestRenderer({ width: 200, height: 30 });
-    try {
-      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
-      await setup.mockInput.typeText("p");
-      await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
-      const review = confirmationText(setup.captureCharFrame(), "Review saved sources");
-      expect(review.match(/https:\/\/github\.com\/example\/project/g)).toHaveLength(1);
-      expect(review).toContain("https://github.com/other/project");
-      expect(review).toContain("skills/alpha/SKILL.md");
-      expect(review).toContain("release/v1");
-      expect(review).toContain("skills/beta/SKILL.md");
-      expect(review).toContain("tools/gamma/SKILL.md");
-      expect(review).toContain("delta");
-      expect(review).toContain("https://git.example.org/team/repo");
-      expect(review.match(new RegExp(skillsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))).toHaveLength(1);
-      expect(fetch).not.toHaveBeenCalled();
-      setup.mockInput.pressEnter();
-      await setup.waitFor(() => !setup.captureCharFrame().includes("Review saved sources"));
-      expect(fetch).not.toHaveBeenCalled();
-    } finally {
-      setup.renderer.destroy();
-    }
-  });
-
-  it.each(["u", "p"])("reviews saved source and cancels without contact for %s", async (key) => {
+  it("shows failed background checks in the footer", async () => {
     const { skillsDir } = await fixture();
     await savedSourceFixture(skillsDir);
-    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
-    const setup = await createTestRenderer({ width: 200, height: 30 });
+    vi.spyOn(skillUpdateChecks, "checkForUpdates").mockRejectedValue(new Error("offline"));
+    const setup = await createTestRenderer({ width: 180, height: 30 });
     try {
       await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
-      await setup.mockInput.typeText(key);
-      await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
-      setup.mockInput.pressEnter();
-      await setup.waitFor(() => !setup.captureCharFrame().includes("Review saved sources"));
-      expect(fetch).not.toHaveBeenCalled();
-      expect(await readFile(path.join(skillsDir, "alpha", "SKILL.md"), "utf8")).toContain("Alpha body");
+      await setup.waitFor(() => setup.captureCharFrame().includes("Skill update check failed"));
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("u update");
+      expect(frame).not.toContain("p update all");
+      expect(frame.split("\n")[0]).not.toMatch(/checking|update|unavailable/i);
     } finally {
       setup.renderer.destroy();
     }
   });
 
-  it.each(["u", "p"])("refuses changed saved source before preparing update for %s", async (key) => {
-    const { skillsDir } = await fixture();
-    const { file, receipt } = await savedSourceFixture(skillsDir);
-    const setup = await createTestRenderer({ width: 200, height: 30 });
-    try {
-      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
-      await setup.mockInput.typeText(key);
-      await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
-      await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, ref: "changed-ref" } }));
-      await setup.mockInput.typeText("y");
-      await setup.waitFor(() => setup.captureCharFrame().includes("The saved source changed since approval."));
-      expect(setup.captureCharFrame()).not.toContain("Review prepared skill changes");
-      expect(await readFile(path.join(skillsDir, "alpha", "SKILL.md"), "utf8")).toContain("Alpha body");
-    } finally {
-      setup.renderer.destroy();
-    }
-  });
-
-  it.each([false, true])("checks only an unchanged saved source without confirmation (changed: %s)", async (changed) => {
-    const { skillsDir } = await fixture();
-    const { file, receipt } = await savedSourceFixture(skillsDir);
-    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ sha: "a".repeat(40), tree: [] }), { status: 200 }));
-    const setup = await createTestRenderer({ width: 200, height: 30 });
-    try {
-      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
-      expect(fetch).not.toHaveBeenCalled();
-      if (changed) {
-        await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, source: "other/project", sourceUrl: "https://github.com/other/project", ref: "other" } }));
-      }
-      await setup.mockInput.typeText("v");
-      if (changed) {
-        await setup.waitFor(() => setup.captureCharFrame().includes("The saved source changed since approval."));
-        expect(fetch).not.toHaveBeenCalled();
-      } else {
-        await setup.waitFor(() => setup.captureCharFrame().includes("Update check"));
-        expect(fetch).toHaveBeenCalledOnce();
-        expect(fetch.mock.calls[0]![0]).toBe("https://api.github.com/repos/example/project/git/trees/release%2Fv1?recursive=1");
-      }
-    } finally {
-      setup.renderer.destroy();
-    }
-  });
-  it.each([false, true])("checks an unchanged Vercel lock source without confirmation (changed: %s)", async (changed) => {
-    const { home, skillsDir } = await fixture();
-    const entry = {
-      source: "example/project", sourceType: "github", sourceUrl: "https://github.com/example/project",
-      skillPath: "skills/alpha/SKILL.md", skillFolderHash: "a".repeat(40),
-      installedAt: "2026-01-01", updatedAt: "2026-01-01", ref: "release/v1",
-    };
-    const lock = path.join(home, ".skill-lock.json");
-    await writeFile(lock, JSON.stringify({ version: 3, skills: { alpha: entry } }));
-    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ sha: "a".repeat(40), tree: [] }), { status: 200 }));
-    const setup = await createTestRenderer({ width: 200, height: 30 });
-    try {
-      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
-      await setup.waitFor(() => setup.captureCharFrame().includes("https://github.com/example/project"));
-      expect(setup.captureCharFrame()).toContain("◉ ⎇ alpha");
-      expect(setup.captureCharFrame().split("\n").filter((row) => row.includes("example/project"))).toHaveLength(1);
-      expect(fetch).not.toHaveBeenCalled();
-      if (changed) await writeFile(lock, JSON.stringify({ version: 3, skills: { alpha: { ...entry, ref: "changed" } } }));
-      await setup.mockInput.typeText("v");
-      if (changed) {
-        await setup.waitFor(() => setup.captureCharFrame().includes("The saved source changed since approval."));
-        expect(fetch).not.toHaveBeenCalled();
-      } else {
-        await setup.waitFor(() => setup.captureCharFrame().includes("Update check"));
-        expect(fetch).toHaveBeenCalledOnce();
-        expect(fetch.mock.calls[0]![0]).toBe("https://api.github.com/repos/example/project/git/trees/release%2Fv1?recursive=1");
-        expect(setup.captureCharFrame()).toContain("not your local edits");
-      }
-    } finally {
-      setup.renderer.destroy();
-    }
-  });
   it("shows a conflicting external source separately from the installed source", async () => {
     const { home, skillsDir } = await fixture();
     const { receipt } = await savedSourceFixture(skillsDir);
@@ -1991,57 +2101,6 @@ describe("SkillsManagerTui", { timeout: 30_000 }, () => {
     }
   });
 
-
-
-  it.each(["u", "p"])("does not contact a saved update endpoint when cancelling %s", async (key) => {
-    const { skillsDir } = await fixture();
-    const { file, receipt } = await savedSourceFixture(skillsDir);
-    let requests = 0;
-    const server = createServer((_request, response) => {
-      requests++;
-      response.writeHead(404).end();
-    });
-    const listening = Promise.withResolvers<void>();
-    server.once("error", listening.reject);
-    server.listen(0, "127.0.0.1", listening.resolve);
-    await listening.promise;
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("Expected a TCP listener");
-    const url = `http://127.0.0.1:${address.port}/repository`;
-    await writeFile(file, JSON.stringify({ ...receipt, entry: { ...receipt.entry, source: url, sourceUrl: url, sourceType: "git" } }));
-    const setup = await createTestRenderer({ width: 200, height: 30 });
-    try {
-      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
-      await setup.mockInput.typeText(key);
-      await setup.waitFor(() => setup.captureCharFrame().includes("Review saved sources"));
-      expect(confirmationText(setup.captureCharFrame(), "Review saved sources")).toContain(`"${url}"`);
-      setup.mockInput.pressEnter();
-      await setup.waitFor(() => !setup.captureCharFrame().includes("Review saved sources"));
-      expect(requests).toBe(0);
-    } finally {
-      setup.renderer.destroy();
-      const closed = Promise.withResolvers<void>();
-      server.close((error) => error ? closed.reject(error) : closed.resolve());
-      await closed.promise;
-    }
-  });
-
-  it("reports unavailable manual update checks instead of claiming unknown sources are current", async () => {
-    const { skillsDir } = await fixture();
-    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected network"));
-    const setup = await createTestRenderer({ width: 180, height: 30 });
-    try {
-      await createTrackedTui(setup.renderer, await approveSkillsRoot(skillsDir)).start();
-      await setup.mockInput.typeText("v");
-      await setup.waitFor(() => setup.captureCharFrame().includes("Update check"));
-      expect(setup.captureCharFrame()).toContain("not your local edits");
-      expect(setup.captureCharFrame()).toContain("some checks were unavailable");
-      expect(setup.captureCharFrame()).toContain("alpha: unavailable");
-      expect(fetch).not.toHaveBeenCalled();
-    } finally {
-      setup.renderer.destroy();
-    }
-  });
 
   it("shows the actual Git root once and a clean working-tree message", async () => {
     const { skillsDir } = await fixture();
