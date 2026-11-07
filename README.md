@@ -68,13 +68,19 @@ Onboarding does not merge or move skills, create Git state, rewrite installer lo
 
 Push is an explicit action in Git view. It sends branch history for the whole repository, including commits outside the selected skills directory. Review the repository, destination, and history before approving a push. Push does not include uncommitted changes.
 
-Existing Vercel installer records provide source tracking and update checks without skills-manager receipts. Press `?` for help in the current view. Git controls and repository status appear in Git view, not the browse footer. Shortcuts use Option on macOS and Alt on Linux.
+Existing Vercel installer records provide source tracking and update checks without skills-manager receipts. The app uses the underlying `skills` CLI to check known sources in the background on startup and refresh. It does not install updates automatically.
+
+The footer shows the number of available updates and the number of source-associated skills that could not be checked. Skills without a recorded source are not included in the latter count. While checks run, the footer also shows `Checking skill updates…`. The list marks skills with available updates.
+
+Press `u` to update the selected skill when an update is available, or `p` to update all skills with known available updates. Both actions require review. Up-to-date skills are not counted as unavailable. A failed or unrecognized check does not mean a skill is current.
+
+Press `?` for help in the current view. In browse mode, `x` opens Application updates and appears immediately before `?`. Git controls and repository status appear in Git view, not the browse footer. Shortcuts use Option on macOS and Alt on Linux.
 
 The browse filter offers All, From a repo, and Local. Local includes skills without a recorded remote association. It does not mean that you authored them.
 
-In the skill list, ◉ means enabled, ○ means disabled, and ! means missing. ⎇ marks a repository source. No source marker means local. No special font is required.
+In the skill list, ◉ means enabled, ○ means disabled, and ! means missing. ⎇ marks a repository source. No source marker means local. No special font is required. Up and Down keep the selected skill visible and stop at the ends of the list.
 
-Local browsing works without network access. Automatic update checks require the separate opt-ins described above. Search, remote preparation, fetch, pull, and push require explicit actions. Remote preparation runs behind an operating-system boundary, not a general-purpose hostile-code sandbox. Do not edit or move files, or run Git commands, concurrently with an app action.
+Local browsing works without network access, though background skill update checks can be unavailable. Automatic app and CLI update checks require the separate opt-ins described above. Search, remote installation, fetch, pull, and push require explicit actions. Remote preparation runs behind an operating-system boundary, not a general-purpose hostile-code sandbox. Do not edit or move files, or run Git commands, concurrently with an app action.
 
 See the [security policy](https://github.com/ederheisler/skills-manager/blob/main/SECURITY.md) for file operations, remote actions, privacy, recovery, and vulnerability reporting.
 

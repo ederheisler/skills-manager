@@ -1,106 +1,117 @@
+import { mkdir, mkdtemp, readdir, realpath, rmdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { LockEntry, Skill } from "../state/types.js";
-import { isRecord } from "../state/validation.js";
 import { validSourceEntry } from "../state/upstreamProvenance.js";
-
-interface GitHubTreeEntry {
-  path: string;
-  type: string;
-  sha: string;
-}
-
-interface GitHubTree {
-  sha?: string;
-  tree: GitHubTreeEntry[];
-  truncated?: boolean;
-}
+import { approveSkillsRoot, directoryIdentity, gitTreeHash, removeDisposableTree } from "./boundary.js";
+import { runConfinedSkills } from "./sandbox.js";
+import { discardPreparedChange } from "./skillsCli.js";
+import { prepareUpdate } from "./update.js";
 
 export interface UpdateCheckReport {
   updated: string[];
-  unavailable: Array<{ id: string; name: string; reason: string }>;
+  unavailable: Array<{ id: string; name: string; reason: string; category?: "unknown" | "failed" }>;
 }
 
-type TreeFetcher = (repository: string, ref: string) => Promise<unknown>;
+type CheckRunner = (workspace: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
+type CompareInstalled = (skill: Skill, entry: LockEntry) => Promise<boolean>;
+class UnknownUpdateStatus extends Error {}
 
-function isGitHubTree(value: unknown): value is GitHubTree {
-  return isRecord(value) && Array.isArray(value.tree)
-    && value.tree.every((item: unknown) => isRecord(item) && typeof item.path === "string"
-      && typeof item.type === "string" && typeof item.sha === "string")
-    && (value.sha === undefined || typeof value.sha === "string")
-    && (value.truncated === undefined || typeof value.truncated === "boolean");
-}
-
-function githubRepository(entry: LockEntry): string | null {
-  return entry.sourceType === "github" && validSourceEntry(entry) ? entry.source : null;
-}
-
-function skillDirectory(entry: LockEntry): string | null {
-  const value = entry.skillPath.replace(/\\/g, "/");
-  if (value.startsWith("/") || value.split("/").some((part) => part === ".." || part === ".")) return null;
-  return value.replace(/\/?SKILL\.md$/i, "").replace(/\/$/, "");
-}
-
-async function fetchGitHubTree(repository: string, ref: string): Promise<unknown> {
-  let response: Response;
+async function matchesStagedContent(skill: Skill, entry: LockEntry): Promise<boolean> {
+  const root = skill.enabled ? path.dirname(skill.path) : path.dirname(path.dirname(skill.path));
+  const approved = await approveSkillsRoot(root);
+  const prepared = await prepareUpdate(approved, skill, entry);
   try {
-    response = await fetch(`https://api.github.com/repos/${repository}/git/trees/${encodeURIComponent(ref)}?recursive=1`, {
-      headers: { Accept: "application/vnd.github+json", "User-Agent": "skills-manager" },
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch (error) {
-    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
-      throw new Error("Upstream check timed out.");
-    }
-    throw new Error("Upstream check failed; network or remote service unavailable.");
+    const stagedRoot = path.join(prepared.workspace, "home", ".agents", "skills");
+    const names = await readdir(stagedRoot);
+    if (names.length !== 1) throw new Error("The staged update did not identify exactly one skill.");
+    const [installed, staged] = await Promise.all([gitTreeHash(skill.path), gitTreeHash(path.join(stagedRoot, names[0]))]);
+    return installed === staged;
+  } finally {
+    await discardPreparedChange(prepared);
   }
-  if (!response.ok) throw new Error(`Upstream check failed (HTTP ${response.status}).`);
-  try { return await response.json(); } catch { throw new Error("Upstream returned invalid JSON."); }
 }
 
-/** Network checks are explicit; a failed or unsupported check is not an up-to-date result. */
-export async function checkForUpdates(skills: readonly Skill[], fetchTree: TreeFetcher = fetchGitHubTree): Promise<UpdateCheckReport> {
-  const report: UpdateCheckReport = { updated: [], unavailable: [] };
-  const groups = new Map<string, Array<{ skill: Skill; entry: LockEntry; directory: string }>>();
-  for (const skill of skills) {
-    const unavailable = (reason: string) => report.unavailable.push({ id: skill.id, name: skill.name, reason });
-    if (!skill.lockEntry || skill.provenance.kind !== "source") {
-      unavailable("No matching saved source association; update checks are unavailable.");
-      continue;
-    }
-    const entry = skill.lockEntry;
-    const repository = githubRepository(entry);
-    if (!repository) {
-      unavailable("Update checks are not supported for this source.");
-      continue;
-    }
-    const directory = skillDirectory(entry);
-    if (directory === null || !entry.skillPath || !/^[a-f0-9]{40}$/i.test(entry.skillFolderHash)) {
-      unavailable("No verifiable upstream content baseline is recorded.");
-      continue;
-    }
-    const key = `${repository}\u0000${entry.ref ?? "HEAD"}`;
-    const group = groups.get(key) ?? [];
-    group.push({ skill, entry, directory });
-    groups.set(key, group);
+async function checkOne(skill: Skill, entry: LockEntry, run: CheckRunner, compare: CompareInstalled): Promise<"updated" | "same"> {
+  const workspace = await realpath(await mkdtemp(path.join(tmpdir(), "skills-manager-check-")));
+  let identity: string;
+  try { identity = await directoryIdentity(workspace); }
+  catch (error) {
+    try { await rmdir(workspace); } catch (cleanup) { throw new Error(`Cannot identify check workspace; cleanup failed: ${String(cleanup)}`); }
+    throw error;
   }
+  try {
+    await Promise.all(["home", "config", "cache", "data", "state", "tmp"].map((name) => mkdir(path.join(workspace, name))));
+    const placeholder = path.join(workspace, "home", ".agents", "skills", "smcheck");
+    const state = path.join(workspace, "state", "skills");
+    await Promise.all([mkdir(placeholder, { recursive: true }), mkdir(state, { recursive: true })]);
+    await Promise.all([
+      writeFile(path.join(placeholder, "SKILL.md"), "---\nname: smcheck\ndescription: Temporary update check\n---\n"),
+      writeFile(path.join(state, ".skill-lock.json"), JSON.stringify({ version: 3, skills: { smcheck: entry } })),
+    ]);
+    const result = await run(workspace, ["check", "--global"]);
+    const output = `${result.stdout}\n${result.stderr}`.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+    const failure = output.split(/[\r\n]+/).find((line) => /failed|cannot be checked|appear to have been deleted|multiple current paths|skipping deletion/i.test(line));
+    if (failure) throw new Error(`The skills CLI could not check the recorded source reliably: ${failure.trim().slice(0, 500)}`);
+    if (/(?:^|\n)\s*✓ All global skills are up to date\s*(?:\n|$)/.test(output)) return "same";
+    if (!/(?:^|\n)\s*↑ smcheck has an update\s*(?:\n|$)/.test(output)) {
+      throw new UnknownUpdateStatus("The skills CLI did not confirm an update; the upstream status is unknown.");
+    }
+    return await compare(skill, entry) ? "same" : "updated";
+  } finally {
+    await removeDisposableTree(workspace, identity);
+  }
+}
 
-  await Promise.all(Array.from(groups, async ([key, group]) => {
-    const [repository, ref] = key.split("\u0000");
-    let tree: GitHubTree;
-    try {
-      const value = await fetchTree(repository, ref);
-      if (!isGitHubTree(value)) throw new Error("Upstream returned an invalid tree.");
-      if (value.truncated) throw new Error("Upstream tree is incomplete; update status is unknown.");
-      tree = value;
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : "Upstream check failed.";
-      for (const { skill } of group) report.unavailable.push({ id: skill.id, name: skill.name, reason });
-      return;
+/** A failed or ambiguous check is not an up-to-date result. */
+export async function checkForUpdates(
+  skills: readonly Skill[],
+  run: CheckRunner = runConfinedSkills,
+  compare: CompareInstalled = matchesStagedContent,
+  onProgress?: (report: UpdateCheckReport) => void,
+): Promise<UpdateCheckReport> {
+  const results: UpdateCheckReport[] = new Array(skills.length);
+  const accumulated = (): UpdateCheckReport => ({
+    updated: results.flatMap((report) => report.updated),
+    unavailable: results.flatMap((report) => report.unavailable),
+  });
+  let next = 0;
+  let progressFailed = false;
+  const worker = async () => {
+    while (!progressFailed) {
+      const index = next++;
+      if (index >= skills.length) return;
+      const skill = skills[index];
+      const report: UpdateCheckReport = { updated: [], unavailable: [] };
+      const unavailable = (reason: string, category: "unknown" | "failed" = "unknown") => report.unavailable.push({ id: skill.id, name: skill.name, reason, category });
+      const entry = skill.lockEntry;
+      if (!entry || skill.provenance.kind !== "source") {
+        unavailable("No matching saved source association; update checks are unavailable.");
+      } else if (entry.sourceType !== "github" || !validSourceEntry(entry)) {
+        unavailable("Update checks are not supported for this source.");
+      } else {
+        const parts = entry.skillPath.replace(/\\/g, "/").split("/");
+        if (!entry.skillPath || parts.some((part) => !part || part === "." || part === "..") || !/^[a-f0-9]{40}$/i.test(entry.skillFolderHash)) {
+          unavailable("No verifiable upstream content baseline is recorded.");
+        } else {
+          try {
+            if (await checkOne(skill, entry, run, compare) === "updated") report.updated.push(skill.id);
+          } catch (error) {
+            unavailable(error instanceof Error ? error.message : "Upstream check failed.", error instanceof UnknownUpdateStatus ? "unknown" : "failed");
+          }
+        }
+      }
+      results[index] = report;
+      if (onProgress && !progressFailed) {
+        try {
+          onProgress(accumulated());
+        } catch (error) {
+          progressFailed = true;
+          throw error;
+        }
+      }
     }
-    for (const { skill, entry, directory } of group) {
-      const hash = directory === "" ? tree.sha : tree.tree.find((item) => item.type === "tree" && item.path === directory)?.sha;
-      if (!hash) report.unavailable.push({ id: skill.id, name: skill.name, reason: "Skill folder was not found in the upstream tree." });
-      else if (hash.toLowerCase() !== entry.skillFolderHash.toLowerCase()) report.updated.push(skill.id);
-    }
-  }));
-  return report;
+  };
+  await Promise.all(Array.from({ length: Math.min(4, skills.length) }, () => worker()));
+  return accumulated();
 }

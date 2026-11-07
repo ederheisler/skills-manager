@@ -31,7 +31,7 @@ import {
   type Selection,
 } from "@opentui/core";
 import { applyPreparedChange, discardPreparedChange, findSkills, prepareAdd, type PreparedSkillChange, type SkillSearchResult } from "./actions/skillsCli.js";
-import { prepareReplacement, prepareUpdate } from "./actions/update.js";
+import { prepareUpdate } from "./actions/update.js";
 import { assertApprovedSkillsRoot, fingerprintSkill, recoverSkills, withSkillsLock, type ApprovedSkillsRoot } from "./actions/boundary.js";
 import { removeManagedSkill } from "./actions/remove.js";
 import { openFile, openRepository } from "./actions/open.js";
@@ -47,7 +47,7 @@ import { filterSkills } from "./state/filter.js";
 import { countSkillFileLines, listSkillFiles, readSkillFile, readSkillSource, readSkillText, scanSkills } from "./state/repo.js";
 import type { Skill, SkillFile } from "./state/types.js";
 import { readInstalledSource } from "./state/upstreamProvenance.js";
-import { checkForUpdates } from "./actions/checkUpdates.js";
+import { checkForUpdates, type UpdateCheckReport } from "./actions/checkUpdates.js";
 import { SoftwareUpdateService, type SoftwareUpdateCheck, type UpdateComponent } from "./actions/softwareUpdates.js";
 import { prepareUpdateHandoff, resolveGlobalUpdate, type GlobalUpdateInstallation, type PreparedUpdateHandoff, type UpdateTarget } from "./actions/appUpdateHandoff.js";
 import type { SkillsRootSelection } from "./onboarding.js";
@@ -154,7 +154,7 @@ function formatFrontmatter(skill: Skill | null | undefined): FrontmatterItem[] {
 }
 
 
-type Mode = "browse" | "search" | "add" | "replace-source" | "search-results" | "git" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch" | "confirm" | "help" | "software-updates";
+type Mode = "browse" | "search" | "add" | "search-results" | "git" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch" | "confirm" | "help" | "software-updates";
 type DetailRendering = "markdown" | "raw";
 
 interface GitFile {
@@ -229,7 +229,6 @@ export class SkillsManagerTui {
   #destroyed = false;
   #remoteName = "";
   #fetchRemote = "";
-  #replacementSkill: Skill | null = null;
   #selectedText = "";
   #selectedSource = "";
   #selectedLineCount: number | null = null;
@@ -237,6 +236,13 @@ export class SkillsManagerTui {
   #selectedFileIndex = 0;
   #detailRendering: DetailRendering = "markdown";
   #root: BoxRenderable;
+  #skillList: ScrollBoxRenderable | null = null;
+  #browsePanes: BoxRenderable | null = null;
+  #filePane: BoxRenderable | null = null;
+  #detailPane: BoxRenderable | null = null;
+  #skillRows: Array<{ row: BoxRenderable; text: TextRenderable }> = [];
+  #renderedSkillIndex = 0;
+  #browseControls: TextRenderable | null = null;
   #detailContent: ScrollBoxRenderable | null = null;
   #metadataContent: ScrollBoxRenderable | null = null;
   #entryText: TextRenderable | null = null;
@@ -251,6 +257,9 @@ export class SkillsManagerTui {
   #searchFilter = "";
   #searchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   #availableUpdates = new Set<string>();
+  #skillUpdateFailed = false;
+  #skillUpdateUnavailable = 0;
+  #skillUpdateChecking = false;
   #updateRevision = 0;
   #contextMenu: ContextMenu | null = null;
   #contextMenuAction: ContextAction = "open";
@@ -491,7 +500,7 @@ export class SkillsManagerTui {
     clearTimeout(this.#transientMessageTimer);
     this.#transientMessage = "";
     this.#message = message;
-    if (this.#noticeText) this.#noticeText.content = escapeTerminalSingleLine(message);
+    this.#syncSoftwareBadge();
   }
 
   async #handleKey(key: KeyEvent): Promise<void> {
@@ -607,7 +616,7 @@ export class SkillsManagerTui {
       this.#root.add(this.#helpOverlay);
       return;
     }
-    if (this.#mode === "search" || this.#mode === "add" || this.#mode === "replace-source" || this.#mode === "remote-name" || this.#mode === "remote-url" || this.#mode === "fetch-remote" || this.#mode === "fetch-branch") {
+    if (this.#mode === "search" || this.#mode === "add" || this.#mode === "remote-name" || this.#mode === "remote-url" || this.#mode === "fetch-remote" || this.#mode === "fetch-branch") {
       await this.#handleTextEntry(key);
       return;
     }
@@ -658,9 +667,8 @@ export class SkillsManagerTui {
     else if ((key.name === "delete" || key.name === "d") && this.#selected) await this.#prepareRemove();
     else if (key.name === "space" && this.#selected && !this.#selected.orphaned) await this.#prepareToggle();
     else if (key.name === "o" && this.#selected && !this.#selected.orphaned) await this.#openSelected();
-    else if (key.name === "p") await this.#updateAll();
-    else if (key.name === "u" && this.#selected && !this.#selected.orphaned) await this.#updateSelected();
-    else if (key.name === "v") await this.#reviewUpdateCheck();
+    else if (key.name === "p" && this.#availableUpdates.size > 0) await this.#updateAll();
+    else if (key.name === "u" && this.#selected && this.#availableUpdates.has(this.#selected.id)) await this.#updateSelected();
     else if (key.name === "x") {
       this.#mode = "software-updates";
       this.#message = "";
@@ -687,8 +695,6 @@ export class SkillsManagerTui {
         this.#render();
       } else if (this.#mode === "add") {
         await this.#searchSkills();
-      } else if (this.#mode === "replace-source") {
-        await this.#prepareExplicitReplacement();
       } else if (this.#mode === "remote-name") {
         if (this.#input.trim() === "") return;
         this.#remoteName = this.#input.trim();
@@ -718,7 +724,7 @@ export class SkillsManagerTui {
     if (this.#mode === "search") this.#scheduleSearchFilter();
   }
 
-  #beginEntry(mode: "search" | "add" | "replace-source" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch"): void {
+  #beginEntry(mode: "search" | "add" | "commit-message" | "remote-name" | "remote-url" | "fetch-remote" | "fetch-branch"): void {
     if ((mode === "commit-message" || mode === "remote-name" || mode === "remote-url" || mode === "fetch-remote" || mode === "fetch-branch")
       && this.#git?.kind !== "leaf" && this.#git?.kind !== "parent") {
       this.#showError("Git actions require an available repository.");
@@ -819,10 +825,15 @@ export class SkillsManagerTui {
     if (this.#softwareUpdates.results.cli?.status === "unavailable" || this.#softwareCheckErrors.cli) failed.push("Vercel skills CLI");
     if (failed.length) notices.push(`${failed.join(" and ")} update check failed · x review`);
     if (this.#softwareUpdates.errors.length) notices.push("Update settings need attention · x review");
+    if (this.#availableUpdates.size) notices.push(`${this.#availableUpdates.size} ${this.#availableUpdates.size === 1 ? "update" : "updates"} available`);
+    if (this.#skillUpdateUnavailable) notices.push(`${this.#skillUpdateUnavailable} skills could not be checked`);
+    if (this.#skillUpdateChecking) notices.push("Checking skill updates…");
+    if (this.#skillUpdateFailed) notices.push("Skill update check failed");
     return notices.join(" · ");
   }
 
   #syncSoftwareBadge(): void {
+    if (this.#noticeText) this.#noticeText.content = escapeTerminalSingleLine(this.#status || this.#transientMessage || this.#message);
     if (this.#softwareBadge) this.#softwareBadge.content = this.#softwareBadgeText();
   }
 
@@ -1030,6 +1041,7 @@ export class SkillsManagerTui {
       const skills = await scanSkills(skillsDir);
       if (revision !== this.#revision || this.#destroyed) return;
       this.#skills = skills;
+      this.#startUpdateCheck(skills);
       this.#selectedIndex = Math.min(this.#selectedIndex, Math.max(0, this.#visibleSkills.length - 1));
       await this.#loadSelectedText();
     } catch (error) {
@@ -1040,27 +1052,63 @@ export class SkillsManagerTui {
     await this.#refreshGit();
   }
 
-  async #checkForUpdates(skills: readonly Skill[]): Promise<void> {
+  #startUpdateCheck(skills: readonly Skill[]): void {
     const revision = ++this.#updateRevision;
     const installation = this.#revision;
-    this.#status = "Checking for updates...";
-    this.#render();
-    const report = await checkForUpdates(skills);
-    if (revision !== this.#updateRevision || installation !== this.#revision || this.#destroyed) return;
-    this.#status = "";
-    this.#availableUpdates = new Set(report.updated);
-    this.#confirm({
-      title: "Update check",
-      lines: [
-        "Checks upstream changes, not your local edits.",
-        report.updated.length ? `Updates available: ${report.updated.map((id) => this.#skills.find((skill) => skill.id === id)?.name ?? id).join(", ")}` : report.unavailable.length ? "No updates identified; some checks were unavailable." : "No updates found.",
-        ...report.unavailable.map(({ name, reason }) => `${name}: unavailable - ${reason}`),
-      ],
-      returnMode: "browse",
-      informational: true,
-      approve: async () => {},
+    this.#availableUpdates.clear();
+    this.#skillUpdateFailed = false;
+    this.#skillUpdateUnavailable = 0;
+    const candidates = skills.filter((skill) => skill.lockEntry && skill.provenance.kind === "source");
+    this.#skillUpdateChecking = candidates.length > 0;
+    this.#syncSoftwareBadge();
+    if (candidates.length === 0) return;
+    void this.#validatedUpdateCheck(candidates, revision, installation).then((result) => {
+      if (!result || revision !== this.#updateRevision || installation !== this.#revision || this.#destroyed) return;
+      this.#skillUpdateChecking = false;
+      this.#applySkillUpdateReport(result.report, result.unavailable);
+    }).catch(() => {
+      if (revision !== this.#updateRevision || installation !== this.#revision || this.#destroyed) return;
+      this.#skillUpdateChecking = false;
+      this.#skillUpdateFailed = true;
+      this.#syncSoftwareBadge();
     });
   }
+
+  #applySkillUpdateReport(report: UpdateCheckReport, unavailable: number): void {
+    this.#availableUpdates = new Set(report.updated);
+    this.#skillUpdateUnavailable = unavailable + report.unavailable.length;
+    this.#visibleSkills.forEach((skill, index) => {
+      const row = this.#skillRows[index];
+      if (row) row.text.content = this.#skillLabel(skill);
+    });
+    if (this.#browseControls) this.#browseControls.content = this.#browseToolbarText();
+    this.#syncSoftwareBadge();
+  }
+
+  async #validatedUpdateCheck(skills: readonly Skill[], revision: number, installation: number) {
+    const root = this.#approvedRoot();
+    const eligible: Skill[] = [];
+    let unavailable = 0;
+    for (const skill of skills) {
+      try {
+        const current = await readInstalledSource(root.path, skill.path, skill.name, root);
+        if (!isDeepStrictEqual(current, skill.lockEntry)) throw new Error("Saved source changed.");
+        eligible.push(skill);
+      } catch {
+        unavailable++;
+      }
+    }
+    await assertApprovedSkillsRoot(root);
+    if (revision !== this.#updateRevision || installation !== this.#revision || this.#destroyed) return null;
+    return {
+      report: await checkForUpdates(eligible, undefined, undefined, (report) => {
+        if (revision !== this.#updateRevision || installation !== this.#revision || this.#destroyed) return;
+        this.#applySkillUpdateReport(report, unavailable);
+      }),
+      unavailable,
+    };
+  }
+
 
   async #loadSelectedText(): Promise<void> {
     const revision = ++this.#fileRevision;
@@ -1130,14 +1178,14 @@ export class SkillsManagerTui {
     }
     const visible = this.#visibleSkills;
     if (visible.length === 0) return;
-    this.#selectedIndex = Math.max(0, Math.min(visible.length - 1, this.#selectedIndex + delta));
-    await this.#loadSelectedText();
-    this.#render();
+    const index = Math.max(0, Math.min(visible.length - 1, this.#selectedIndex + delta));
+    if (index === this.#selectedIndex) return;
+    await this.#selectIndex(index);
   }
 
   #contextMenuActions(): readonly ContextAction[] {
     if (this.#contextMenu?.kind === "file") return ["open"];
-    return this.#selected?.orphaned ? [] : ["open", "toggle", "update", "delete"];
+    return this.#selected?.orphaned ? [] : ["open", "toggle", ...(this.#selected && this.#availableUpdates.has(this.#selected.id) ? ["update" as const] : []), "delete"];
   }
 
   #moveContextMenuSelection(delta: number): void {
@@ -1297,32 +1345,10 @@ export class SkillsManagerTui {
     });
   }
 
-  async #reviewUpdateCheck(): Promise<void> {
-    const root = this.#approvedRoot();
-    const snapshots = this.#skills.map((skill) => ({
-      ...skill,
-      lockEntry: skill.lockEntry ? structuredClone(skill.lockEntry) : null,
-      provenance: { ...skill.provenance },
-    }));
-    await this.#runExclusive(async () => {
-      for (const skill of snapshots) {
-        if (!skill.lockEntry || skill.provenance.kind !== "source") continue;
-        const current = await readInstalledSource(root.path, skill.path, skill.name, root);
-        if (!isDeepStrictEqual(current, skill.lockEntry)) throw new Error("The saved source changed since approval.");
-      }
-      await assertApprovedSkillsRoot(root);
-      await this.#checkForUpdates(snapshots);
-    });
-  }
 
   async #updateSelected(): Promise<void> {
     const skill = this.#selected;
-    if (!skill || skill.orphaned) return;
-    if (skill.provenance.kind !== "source" || !skill.lockEntry) {
-      this.#replacementSkill = skill;
-      this.#beginEntry("replace-source");
-      return;
-    }
+    if (!skill || skill.orphaned || !this.#availableUpdates.has(skill.id) || skill.provenance.kind !== "source" || !skill.lockEntry) return;
     this.#reviewSources([skill], async (root, snapshots) => {
       const approved = snapshots[0]!;
       this.#status = `Preparing update for ${approved.name}...`;
@@ -1333,26 +1359,10 @@ export class SkillsManagerTui {
     });
   }
 
-  async #prepareExplicitReplacement(): Promise<void> {
-    const source = this.#input.trim();
-    const skill = this.#replacementSkill;
-    if (!source || !skill) return;
-    await this.#runExclusive(async () => {
-      this.#status = `Preparing replacement for ${skill.name}...`;
-      this.#render();
-      const change = await prepareReplacement(this.#approvedRoot(), skill, source);
-      this.#status = "";
-      this.#reviewPrepared([change], "browse");
-    });
-  }
 
   async #updateAll(): Promise<void> {
-    const candidates = this.#skills.filter((skill) => !skill.orphaned && skill.provenance.kind === "source" && skill.lockEntry);
-    if (candidates.length === 0) {
-      this.#showError("No skills have a saved source. Select a skill and supply a source to review a replacement.");
-      return;
-    }
-    const skipped = this.#skills.filter((skill) => !skill.orphaned && (skill.provenance.kind !== "source" || !skill.lockEntry)).map((skill) => skill.name);
+    const candidates = this.#skills.filter((skill) => this.#availableUpdates.has(skill.id) && !skill.orphaned && skill.provenance.kind === "source" && skill.lockEntry);
+    if (candidates.length === 0) return;
     this.#reviewSources(candidates, async (root, snapshots) => {
       const changes: PreparedSkillChange[] = [];
       this.#status = "Preparing updates...";
@@ -1368,7 +1378,7 @@ export class SkillsManagerTui {
         throw error;
       }
       this.#status = "";
-      this.#reviewPrepared(changes, "browse", skipped.length ? [`Skipped without a saved source: ${skipped.join(", ")}. Select a skill and press u to supply a source.`] : []);
+      this.#reviewPrepared(changes, "browse");
     });
   }
 
@@ -1424,12 +1434,8 @@ export class SkillsManagerTui {
         } catch (error) {
           failure = new Error(`${failure ? `${errorMessage(failure)}; ` : ""}cleanup failed: ${errorMessage(error)}`);
         }
-        const changedPaths = new Set(changes.flatMap((change) => change.changes.map((entry) => entry.destination)));
-        const changedIds = this.#skills.filter((skill) => changedPaths.has(skill.path)).map((skill) => skill.id);
-        this.#updateRevision++;
         await this.#reload();
         if (failure) throw new Error(`${applied}/${changes.length} completed; ${attempted} attempted. An attempted change may have been applied; inspect the installation and recovery state. ${errorMessage(failure)}`);
-        for (const id of changedIds) this.#availableUpdates.delete(id);
         this.#mode = "browse";
         this.#showTransient(`Applied ${applied} reviewed change${applied === 1 ? "" : "s"}.`);
       },
@@ -1782,6 +1788,13 @@ export class SkillsManagerTui {
 
   #render(): void {
     const helpScrollTop = this.#helpContent?.scrollTop ?? 0;
+    const skillListScrollTop = this.#skillList?.scrollTop ?? 0;
+    this.#skillList = null;
+    this.#browsePanes = null;
+    this.#filePane = null;
+    this.#detailPane = null;
+    this.#skillRows = [];
+    this.#browseControls = null;
     this.#helpContent = null;
     this.#helpOverlay = null;
     this.#helpDialog = null;
@@ -1865,10 +1878,13 @@ export class SkillsManagerTui {
     if (isGitMode) {
       panes.add(this.#createGitListPane());
     } else {
-      panes.add(this.#createListPane());
-      panes.add(this.#createFilePane());
+      this.#browsePanes = panes;
+      panes.add(this.#createListPane(skillListScrollTop));
+      this.#filePane = this.#createFilePane();
+      panes.add(this.#filePane);
     }
-    panes.add(this.#createDetailPane());
+    this.#detailPane = this.#createDetailPane();
+    panes.add(this.#detailPane);
     screen.add(panes);
     screen.add(this.#createFooter());
     if (this.#contextMenu) this.#root.add(this.#createContextMenu());
@@ -1881,12 +1897,15 @@ export class SkillsManagerTui {
     }
   }
 
+  #browseToolbarText(): StyledText {
+    return t`${fg(colors.accent)(bold("o"))}pen · ${fg(colors.accent)(bold("space"))} enable/disable · ${fg(colors.accent)(bold("r"))}efresh${this.#selected && this.#availableUpdates.has(this.#selected.id) ? " · u update" : ""}${this.#availableUpdates.size ? " · p update all" : ""} · ${fg(colors.accent)(bold("a"))}dd · ${fg(colors.accent)(bold("d"))}elete · ${fg(colors.accent)(bold("g"))}it · ${fg(colors.accent)(bold("q"))}uit`;
+  }
+
   #createFooter(): BoxRenderable {
     const mode = this.#mode === "help" ? this.#helpReturnMode : this.#mode;
-    const notice = this.#status || this.#transientMessage || this.#message;
     const footer = new BoxRenderable(this.renderer, {
       width: "100%",
-      height: 4,
+      height: 3,
       flexDirection: "column",
       backgroundColor: colors.background,
     });
@@ -1937,29 +1956,33 @@ export class SkillsManagerTui {
       this.#entryText = entry;
       controls.add(entry);
     } else {
-      controls.add(new TextRenderable(this.renderer, {
-        content: t`${fg(colors.accent)(bold("x"))} app updates · ${fg(colors.accent)(bold("o"))}pen · ${fg(colors.accent)(bold("space"))} enable/disable · ${fg(colors.accent)(bold("r"))}efresh · ${fg(colors.accent)(bold("u"))}pdate · u${fg(colors.accent)(bold("p"))}date all · ${fg(colors.accent)(bold("v"))} check · ${fg(colors.accent)(bold("a"))}dd · ${fg(colors.accent)(bold("d"))}elete · ${fg(colors.accent)(bold("g"))}it · ${fg(colors.accent)(bold("q"))}uit`,
+      this.#browseControls = new TextRenderable(this.renderer, {
+        content: this.#browseToolbarText(),
         fg: colors.muted,
         height: 1,
         minWidth: 0,
         flexShrink: 1,
         wrapMode: "none",
         selectable: false,
-      }));
+      });
+      controls.add(this.#browseControls);
       controls.add(new TextRenderable(this.renderer, {
-        content: t` · ${fg(colors.accent)(bold("?"))} help`,
+        content: t` · ${fg(colors.accent)(bold("x"))} app updates · ${fg(colors.accent)(bold("?"))} help`,
         fg: colors.muted, height: 1, flexShrink: 0, wrapMode: "none", selectable: false,
       }));
     }
     footer.add(controls);
-    this.#softwareBadge = new TextRenderable(this.renderer, {
-      content: this.#softwareBadgeText(), fg: colors.warning, height: 1, wrapMode: "none", selectable: false,
-    });
-    footer.add(this.#softwareBadge);
+    const notifications = new BoxRenderable(this.renderer, { width: "100%", height: 1, flexDirection: "row", overflow: "hidden" });
     this.#noticeText = new TextRenderable(this.renderer, {
-      content: escapeTerminalSingleLine(notice), fg: colors.warning, height: 1, wrapMode: "none", selectable: false,
+      content: escapeTerminalSingleLine(this.#status || this.#transientMessage || this.#message),
+      fg: colors.warning, height: 1, flexGrow: 1, flexBasis: 0, minWidth: 0, wrapMode: "none", selectable: false,
     });
-    footer.add(this.#noticeText);
+    notifications.add(this.#noticeText);
+    this.#softwareBadge = new TextRenderable(this.renderer, {
+      content: this.#softwareBadgeText(), fg: colors.warning, height: 1, flexShrink: 1, minWidth: 0, wrapMode: "none", selectable: false,
+    });
+    notifications.add(this.#softwareBadge);
+    footer.add(notifications);
     footer.add(new TextRenderable(this.renderer, {
       content: this.#isGitMode ? escapeTerminalSingleLine(this.#gitStatus || "Git: checking...") : `Directory: ${quoteTerminalPath(this.#skillsDir)}`,
       fg: colors.muted,
@@ -1970,16 +1993,20 @@ export class SkillsManagerTui {
     return footer;
   }
 
+  #skillLabel(skill: Skill): string {
+    return escapeTerminalSingleLine(`${skill.orphaned ? "!" : skill.enabled ? "◉" : "○"} ${skill.provenance.kind === "source" ? "⎇" : " "} ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`);
+  }
+
   #skillListWidth(): number {
     let longest = 0;
     for (const skill of this.#visibleSkills) {
-      const label = escapeTerminalSingleLine(`${skill.orphaned ? "!" : skill.enabled ? "◉" : "○"} ${skill.provenance.kind === "source" ? "⎇" : " "} ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`);
+      const label = escapeTerminalSingleLine(`${skill.orphaned ? "!" : skill.enabled ? "◉" : "○"} ${skill.provenance.kind === "source" ? "⎇" : " "} ${skill.name} *`);
       longest = Math.max(longest, label.length);
     }
     return Math.min(40, Math.max(24, longest + 3));
   }
 
-  #createListPane(): BoxRenderable {
+  #createListPane(scrollTop: number): BoxRenderable {
     const panel = new BoxRenderable(this.renderer, {
       width: this.#skillListWidth(),
       minWidth: 0,
@@ -1995,8 +2022,10 @@ export class SkillsManagerTui {
       viewportOptions: { backgroundColor: colors.panel, overflow: "hidden" },
       scrollbarOptions: { trackOptions: { foregroundColor: colors.accent, backgroundColor: colors.panel } },
     });
+    this.#skillList = list;
     panel.add(list);
     const skills = this.#visibleSkills;
+    this.#renderedSkillIndex = this.#selectedIndex;
     skills.forEach((skill, index) => {
       const selected = index === this.#selectedIndex;
       const row = new BoxRenderable(this.renderer, {
@@ -2006,8 +2035,8 @@ export class SkillsManagerTui {
         overflow: "hidden",
         backgroundColor: selected ? colors.selection : colors.panel,
       });
-      row.add(new TextRenderable(this.renderer, {
-        content: escapeTerminalSingleLine(`${skill.orphaned ? "!" : skill.enabled ? "◉" : "○"} ${skill.provenance.kind === "source" ? "⎇" : " "} ${skill.name}${this.#availableUpdates.has(skill.id) ? " *" : ""}`),
+      const text = new TextRenderable(this.renderer, {
+        content: this.#skillLabel(skill),
         fg: skill.orphaned ? colors.warning : skill.enabled ? colors.enabled : colors.disabled,
         attributes: selected ? TextAttributes.BOLD : 0,
         onMouseDown: (event) => {
@@ -2017,9 +2046,18 @@ export class SkillsManagerTui {
         width: "100%",
         selectable: false,
         wrapMode: "none",
-      }));
+      });
+      row.add(text);
+      this.#skillRows.push({ row, text });
       list.add(row);
     });
+    if (skills.length > 0) {
+      this.renderer.once("frame", () => {
+        if (list.isDestroyed) return;
+        const lastVisibleOffset = Math.max(0, list.viewport.height - 1);
+        list.scrollTo(Math.max(0, Math.min(scrollTop, this.#selectedIndex), this.#selectedIndex - lastVisibleOffset));
+      });
+    }
     return panel;
   }
 
@@ -2027,7 +2065,33 @@ export class SkillsManagerTui {
     if (this.#busy || this.#mode !== "browse") return;
     this.#selectedIndex = index;
     await this.#loadSelectedText();
-    this.#render();
+    if (this.#destroyed || this.#mode !== "browse" || this.#selectedIndex !== index) return;
+    const panes = this.#browsePanes;
+    const list = this.#skillList;
+    if (!panes || !list || !this.#filePane || !this.#detailPane) {
+      this.#render();
+      return;
+    }
+    const previous = this.#skillRows[this.#renderedSkillIndex];
+    const selected = this.#skillRows[index];
+    if (previous) {
+      previous.row.backgroundColor = colors.panel;
+      previous.text.attributes = 0;
+    }
+    if (selected) {
+      selected.row.backgroundColor = colors.selection;
+      selected.text.attributes = TextAttributes.BOLD;
+    }
+    this.#renderedSkillIndex = index;
+    if (this.#browseControls) this.#browseControls.content = this.#browseToolbarText();
+    const lastVisibleOffset = Math.max(0, list.viewport.height - 1);
+    list.scrollTo(Math.max(0, Math.min(list.scrollTop, index), index - lastVisibleOffset));
+    this.#filePane.destroyRecursively();
+    this.#detailPane.destroyRecursively();
+    this.#filePane = this.#createFilePane();
+    this.#detailPane = this.#createDetailPane();
+    panes.add(this.#filePane);
+    panes.add(this.#detailPane);
   }
 
   #createFilePane(): BoxRenderable {
@@ -2453,7 +2517,6 @@ export class SkillsManagerTui {
           ["Space", "Enable/disable"],
           ["a", "Find/add skills"],
           ["d", "Remove skill"],
-          ["v", "Check for updates"],
           ["u", "Update selected"],
           ["p", "Update all"],
         ] },
@@ -2753,7 +2816,6 @@ export class SkillsManagerTui {
   #footerText(): string {
     if (this.#mode === "search") return `Search: ${this.#input}`;
     if (this.#mode === "add") return `Search skills: ${this.#input}`;
-    if (this.#mode === "replace-source") return `Replacement source for ${this.#replacementSkill?.name ?? "skill"}: ${this.#input}`;
     if (this.#mode === "fetch-remote") return `Fetch remote (${this.#git?.remotes.join(", ") ?? "none"}): ${this.#input}`;
     if (this.#mode === "fetch-branch") return `Fetch branch: ${this.#input}`;
     if (this.#mode === "remote-name") return `Remote name: ${this.#input}`;

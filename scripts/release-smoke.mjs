@@ -146,7 +146,7 @@ function startupPrompts(text) {
 }
 
 async function browseInTerminal(skillsDir, {
-  saved = false, refresh = false, explicit = !saved, startingCli = cli, updateMode = 'install',
+  saved = false, refresh = false, explicit = !saved, startingCli = cli, updateMode = 'install', expectedNotice,
 } = {}) {
   const relay = fileURLToPath(new URL('./release-smoke-pty.py', import.meta.url));
   if (refresh) await writeFile(launchTrace, '');
@@ -192,7 +192,18 @@ async function browseInTerminal(skillsDir, {
     if (step === 0) {
       assert.deepEqual(startupPrompts(text), [], 'Unexpected startup prompt before browsing');
     }
-    if (step === 0 && /Skills\s+1\s+shown/.test(screen) && browse) {
+    if (step === 0 && /Skills\s+1\s+shown/.test(screen) && browse
+      && (!expectedNotice || screen.includes(expectedNotice))) {
+      const lines = screen.split('\n');
+      const header = lines.find((line) => /Skills\s+1\s+shown/.test(line));
+      assert.doesNotMatch(header, /\b\d+\s+updates?\b/i, 'The header must not contain an update count');
+      if (expectedNotice) {
+        const noticeRow = lines.findIndex((line) => line.includes(expectedNotice));
+        const controlsRow = lines.findIndex((line) => line.includes('x app updates'));
+        const directoryRow = lines.findIndex((line) => line.includes('Directory:'));
+        assert.ok(noticeRow > controlsRow && directoryRow > noticeRow,
+          'The skill update notice must appear in the footer between controls and directory');
+      }
       assert.deepEqual(startupPrompts(text), [], 'Unexpected startup prompt before browsing');
       if (!saved) assert.ok(text.includes('Selected skills directory:'), 'The first launch must show its selected directory');
       step = 3;
@@ -581,6 +592,17 @@ async function run() {
   assert.deepEqual(await snapshot(upstreamSource), sourceBefore);
   assert.deepEqual(await snapshot(outside), outsideBefore);
   assert.deepEqual(await readFile(externalLock), lockBefore);
+
+  // An unsupported recorded source produces a deterministic status notice without network access.
+  const receiptText = await boundary.readManagedMetadata(upstreamRoot, 'example', upstreamApproved);
+  const metadata = (await snapshot(path.join(upstreamRoot, '.skills-manager')))
+    .filter(([, kind, bytes]) => kind === 'file' && Buffer.from(bytes, 'hex').toString('utf8') === receiptText);
+  assert.equal(metadata.length, 1, 'The installed receipt must have one metadata file');
+  receipt.entry = { ...receipt.entry, source: 'fixture', sourceType: 'git', sourceUrl: 'https://example.invalid/fixture' };
+  await writeFile(path.join(upstreamRoot, '.skills-manager', metadata[0][0]), JSON.stringify(receipt));
+  const upstreamBeforeBrowse = await snapshot(upstreamRoot);
+  await browseInTerminal(upstreamRoot, { saved: true, explicit: true, expectedNotice: '1 skills could not be checked' });
+  assert.deepEqual(await snapshot(upstreamRoot), upstreamBeforeBrowse, 'Browsing the source fixture must be read-only');
 
   // Real Git transactions, including a local bare push/fetch/pull, must retain
   // unrelated index entries and worktree bytes while advancing only reviewed paths.
