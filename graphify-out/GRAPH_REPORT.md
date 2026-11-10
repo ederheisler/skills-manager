@@ -1,9 +1,7 @@
 # Graph Report - skill-manager  (2026-11-10)
 
 ## Corpus Check
-- 174 files · ~275,644 words
-- Verdict: corpus is large enough that graph structure adds value.
-- Unclassified: 11 file(s) not represented in the graph (top: (none) 9, .0 1, .template 1)
+- cluster-only mode — file stats not available
 
 ## Summary
 - 2400 nodes · 4695 edges · 171 communities (139 shown, 32 thin omitted)
@@ -11,7 +9,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `7788fecd`
+- Built from commit: `be2166a1`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -102,7 +100,7 @@
 - TypeScript Expert
 - Getting started
 - Node.js SEA
-- SSH
+- sandbox.ts
 - Quickstart
 - Native crash debugging
 - whats-next-for-opentui.mdx
@@ -110,10 +108,10 @@
 - packages.md
 - skillsCli.ts
 - compilerOptions
-- sandbox.ts
+- onboarding.ts
 - ts_diagnostic.py
 - TypeScript Cheatsheet
-- Embedded terminal
+- SSH
 - devDependencies
 - gitTransaction.ts
 - git.ts
@@ -121,32 +119,32 @@
 - createTestRenderer
 - release-smoke.mjs
 - .registry
-- onboarding.ts
+- Embedded terminal
 - config.ts
 - build-identity.mjs
 - Solid plugin slots
 - Lifecycle and cleanup
 - appBuild.test.ts
-- skills-manager
+- skills
 - Hooks
-- check-package.mjs
+- skills-manager
 - tui.test.ts
 - Portable open-source release plan
-- Texture and sprite helpers
-- `Node`
+- check-package.mjs
+- cli.ts
 - Renderables
 - skills-manager design doc
 - `@opentui/core`
-- cli.ts
+- appUpdatePreparation.test.ts
 - dependencies
 - Test renderer
 - scripts
 - Open-source portability
 - run
-- skills
-- appUpdatePreparation.test.ts
-- Method reference
 - Implementation slices and dependencies
+- Texture and sprite helpers
+- Method reference
+- `Node`
 - tui.ts
 - Security policy
 - terminalText.ts
@@ -162,13 +160,15 @@
 3. `error()` - 46 edges
 4. `Transaction` - 40 edges
 5. `assertApprovedSkillsRoot()` - 38 edges
-6. `vitest` - 32 edges
-7. `prepareSourceChange()` - 32 edges
+6. `prepareSourceChange()` - 32 edges
+7. `vitest` - 32 edges
 8. `approveSkillsRoot()` - 29 edges
 9. `quoteTerminalPath()` - 29 edges
 10. `previewPull()` - 28 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `Yoga` --references--> `Node`  [INFERRED]
+  .agents/skills/opentui/docs/reference/api-index.mdx → src/actions/gitTransaction.ts
 - `Capture a PCM stream` --references--> `error()`  [INFERRED]
   .agents/skills/opentui/docs/application-apis/audio-capture.mdx → src/actions/boundary.ts
 - `Record a WAV file` --references--> `error()`  [INFERRED]
@@ -176,8 +176,6 @@
 - `Play a URL` --references--> `error()`  [INFERRED]
   .agents/skills/opentui/docs/application-apis/audio-streaming.mdx → src/actions/boundary.ts
 - `Events and errors` --references--> `error()`  [INFERRED]
-  .agents/skills/opentui/docs/core-concepts/audio.mdx → src/actions/boundary.ts
-- `Play a loaded sound` --references--> `error()`  [INFERRED]
   .agents/skills/opentui/docs/core-concepts/audio.mdx → src/actions/boundary.ts
 
 ## Import Cycles
@@ -534,9 +532,9 @@ Nodes (6): Choose a framework, Explore the examples, Find a topic, Getting start
 Cohesion: 0.29
 Nodes (6): Bun, Extraction ownership, Linux libc, Node asset manifest, Node.js SEA, Standalone executables
 
-### Community 92 - "SSH"
-Cohesion: 0.13
-Nodes (15): Authentication, Basic server, Builder lifecycle, Cleanup, errors, and shutdown, Host keys, Install and runtime, Logging middleware, Middleware (+7 more)
+### Community 92 - "sandbox.ts"
+Cohesion: 0.14
+Nodes (17): cleanEnvironment(), execFileAsync, inspectSkillsRuntime(), invoke(), linuxArguments(), locatePackage(), MacGit, macProfile() (+9 more)
 
 ### Community 93 - "Quickstart"
 Cohesion: 0.33
@@ -566,9 +564,9 @@ Nodes (27): directoryIdentity(), fingerprintSkill(), addReviewFile(), applyPrepa
 Cohesion: 0.06
 Nodes (33): compilerOptions, allowSyntheticDefaultImports, baseUrl, declaration, declarationMap, esModuleInterop, exactOptionalPropertyTypes, forceConsistentCasingInFileNames (+25 more)
 
-### Community 108 - "sandbox.ts"
-Cohesion: 0.14
-Nodes (17): cleanEnvironment(), execFileAsync, inspectSkillsRuntime(), invoke(), linuxArguments(), locatePackage(), MacGit, macProfile() (+9 more)
+### Community 108 - "onboarding.ts"
+Cohesion: 0.18
+Nodes (14): chooseSkillsDirectory(), CompletedSelection, DirectoryCandidate, documentedSkillsDirectories(), InspectedSkillsDirectory, inspectSelectedSkillsDirectory(), isMissing(), OnboardingPrompt (+6 more)
 
 ### Community 109 - "ts_diagnostic.py"
 Cohesion: 0.05
@@ -578,9 +576,9 @@ Nodes (25): Availability, Basic usage, Events, Example: file menu, Item selected
 Cohesion: 0.13
 Nodes (14): Best Practices, Branded Types, Conditional Types, Discriminated Unions, Generics, Mapped Types, Module Declarations, Template Literal Types (+6 more)
 
-### Community 111 - "Embedded terminal"
-Cohesion: 0.12
-Nodes (16): Events and error actions, Attach a process, Availability, Cursor and paint, Draw VT output, Embedded terminal, Focus and keyboard, I/O model (+8 more)
+### Community 111 - "SSH"
+Cohesion: 0.13
+Nodes (15): Authentication, Basic server, Builder lifecycle, Cleanup, errors, and shutdown, Host keys, Install and runtime, Logging middleware, Middleware (+7 more)
 
 ### Community 112 - "devDependencies"
 Cohesion: 0.33
@@ -610,9 +608,9 @@ Nodes (16): args, exec, externalLock, git(), globalApp, globalBin, globalPrefix,
 Cohesion: 0.20
 Nodes (9): Basic usage, Example, Lifecycle and disposal, Optional convenience helper, Plugin failure placeholders, React plugin slots, `ReactSlotOptions` (for `createSlot`), `<Slot>` props (+1 more)
 
-### Community 121 - "onboarding.ts"
-Cohesion: 0.18
-Nodes (14): chooseSkillsDirectory(), CompletedSelection, DirectoryCandidate, documentedSkillsDirectories(), InspectedSkillsDirectory, inspectSelectedSkillsDirectory(), isMissing(), OnboardingPrompt (+6 more)
+### Community 121 - "Embedded terminal"
+Cohesion: 0.12
+Nodes (16): Events and error actions, Attach a process, Availability, Cursor and paint, Draw VT output, Embedded terminal, Focus and keyboard, I/O model (+8 more)
 
 ### Community 122 - "config.ts"
 Cohesion: 0.31
@@ -634,17 +632,17 @@ Nodes (11): Custom renderables, Destroy the renderer, Framework roots, Keep clea
 Cohesion: 0.26
 Nodes (13): commitFixture(), environment(), extractArchive(), generate(), git(), productionBuildFixture(), project, readCompiledBuild() (+5 more)
 
-### Community 127 - "skills-manager"
-Cohesion: 0.17
-Nodes (12): Application and CLI updates, Browse, Development, Git, More information, Onboarding, Paste this into your coding agent, Quick start (+4 more)
+### Community 127 - "skills"
+Cohesion: 0.11
+Nodes (21): Background skill update checks, Skills CLI backend and immediate updates, Upstream skills versions, Vercel skills CLI updates, Execution order, Phase 1: P0 inert parsing and filesystem boundaries, Phase 2: P0 scope upstream CLI operations, Phase 3: P0 scope Git operations (+13 more)
 
 ### Community 128 - "Hooks"
 Cohesion: 0.20
 Nodes (10): Hooks, `useBlur(handler)`, `useFocus(handler)`, `useKeyboard(handler, options?)`, `useOnResize(callback)`, `usePaste(handler)`, `useRenderer()`, `useSelectionHandler(handler)` (+2 more)
 
-### Community 129 - "check-package.mjs"
-Cohesion: 0.18
-Nodes (8): directories, expected, generatedAssets, inspectSources(), listed, manifest, requiredAssets, root
+### Community 129 - "skills-manager"
+Cohesion: 0.17
+Nodes (12): Application and CLI updates, Browse, Development, Git, More information, Onboarding, Paste this into your coding agent, Quick start (+4 more)
 
 ### Community 130 - "tui.test.ts"
 Cohesion: 0.15
@@ -654,13 +652,13 @@ Nodes (9): applications, commitFixture(), createTrackedTui(), execFileAsync, git
 Cohesion: 0.12
 Nodes (16): Accepted decisions, Adoption and Git safety, Approved concurrency contract, Declared author and source, Earlier candidate checks and limits, Git safety, Network and mutation policy, Plan scope (+8 more)
 
-### Community 132 - "Texture and sprite helpers"
-Cohesion: 0.29
-Nodes (7): Low-level canvas and Three namespace, Particles and explosions, Physics adapters, Resources and instancing, Sprite animation, Texture and sprite helpers, Textures and basic sprites
+### Community 132 - "check-package.mjs"
+Cohesion: 0.18
+Nodes (8): directories, expected, generatedAssets, inspectSources(), listed, manifest, requiredAssets, root
 
-### Community 133 - "`Node`"
-Cohesion: 0.33
-Nodes (6): Baselines and containing blocks, Enum styles, Factories and tree ownership, Layout state, `Node`, Numeric and value styles
+### Community 133 - "cli.ts"
+Cohesion: 0.42
+Nodes (6): errorText(), main(), CliOptions, helpText, parseCliOptions(), runtimeError()
 
 ### Community 134 - "Renderables"
 Cohesion: 0.25
@@ -674,9 +672,9 @@ Nodes (3): Decisions, skills-manager design doc, Tech stack: TypeScript, Ink, ex
 Cohesion: 0.20
 Nodes (10): Buffers, editing, animation, and effects, Components and component helpers, Images, audio, and native span output, Input and selection, Low-level native binding exports, `@opentui/core`, Plugins, console, and process services, Renderer and render tree (+2 more)
 
-### Community 138 - "cli.ts"
-Cohesion: 0.42
-Nodes (6): errorText(), main(), CliOptions, helpText, parseCliOptions(), runtimeError()
+### Community 138 - "appUpdatePreparation.test.ts"
+Cohesion: 0.25
+Nodes (6): typescript, PreparedUpdateHandoff, ApplicationUpdateHandoff, cleanBuild, originalEnv, prepared
 
 ### Community 139 - "dependencies"
 Cohesion: 0.40
@@ -698,21 +696,21 @@ Nodes (22): Application update planning, Automated releases, Browse category lab
 Cohesion: 0.31
 Nodes (10): browseInTerminal(), missing(), put(), run(), assertBrowseSafety(), prepare(), snapshot(), visit() (+2 more)
 
-### Community 144 - "skills"
-Cohesion: 0.11
-Nodes (21): Background skill update checks, Skills CLI backend and immediate updates, Upstream skills versions, Vercel skills CLI updates, Execution order, Phase 1: P0 inert parsing and filesystem boundaries, Phase 2: P0 scope upstream CLI operations, Phase 3: P0 scope Git operations (+13 more)
+### Community 144 - "Implementation slices and dependencies"
+Cohesion: 0.33
+Nodes (6): 1. Prove and package build identity, 2. Add consent, scheduling, and comparison, 3. Add review and guarded handoff, 4. Refresh the Vercel skills CLI, 5. Update affected interfaces and documentation, Implementation slices and dependencies
 
-### Community 145 - "appUpdatePreparation.test.ts"
-Cohesion: 0.25
-Nodes (6): typescript, PreparedUpdateHandoff, ApplicationUpdateHandoff, cleanBuild, originalEnv, prepared
+### Community 145 - "Texture and sprite helpers"
+Cohesion: 0.29
+Nodes (7): Low-level canvas and Three namespace, Particles and explosions, Physics adapters, Resources and instancing, Sprite animation, Texture and sprite helpers, Textures and basic sprites
 
 ### Community 146 - "Method reference"
 Cohesion: 0.33
 Nodes (6): Method reference, Mixing, tap, and statistics, Output lifecycle, Playback devices, Sounds, Voices and groups
 
-### Community 147 - "Implementation slices and dependencies"
+### Community 147 - "`Node`"
 Cohesion: 0.33
-Nodes (6): 1. Prove and package build identity, 2. Add consent, scheduling, and comparison, 3. Add review and guarded handoff, 4. Refresh the Vercel skills CLI, 5. Update affected interfaces and documentation, Implementation slices and dependencies
+Nodes (6): Baselines and containing blocks, Enum styles, Factories and tree ownership, Layout state, `Node`, Numeric and value styles
 
 ### Community 148 - "tui.ts"
 Cohesion: 0.10
@@ -747,22 +745,22 @@ Cohesion: 0.25
 Nodes (8): Choose packages, Current skill entry pages, OpenTUI Skill, Path invariant, Quick routing by intent, Reading order by area, Terminal layout defaults, Working rules
 
 ## Knowledge Gaps
-- **1108 isolated node(s):** `$schema`, `display`, `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride` (+1103 more)
+- **1108 isolated node(s):** `ImportOptions`, `Journal`, `JournalMove`, `ChildResult`, `Operation` (+1103 more)
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1300 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
 - **32 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `error()` connect `boundary.ts` to `onboarding.ts`, `OnboardingIO`, `cli.ts`, `Embedded terminal`, `Custom keymap addons`, `gitTransaction.ts`, `Core keymap API`, `git.ts`, `Streaming audio`, `update.test.ts`, `Audio`, `Audio capture and recording`, `Clipboard`, `Syntax highlighting with Tree-sitter`?**
-  _High betweenness centrality (0.107) - this node is a cross-community bridge._
+- **Why does `error()` connect `boundary.ts` to `cli.ts`, `OnboardingIO`, `onboarding.ts`, `Custom keymap addons`, `gitTransaction.ts`, `Core keymap API`, `git.ts`, `Streaming audio`, `update.test.ts`, `Audio`, `Audio capture and recording`, `Embedded terminal`, `Syntax highlighting with Tree-sitter`, `Clipboard`?**
+  _High betweenness centrality (0.124) - this node is a cross-community bridge._
 - **Why does `SoftwareUpdateService` connect `SoftwareUpdateService` to `tui.test.ts`, `SkillsManagerTui`, `.dispose`, `tui.ts`, `.registry`?**
-  _High betweenness centrality (0.102) - this node is a cross-community bridge._
-- **Why does `createTestRenderer()` connect `createTestRenderer` to `Other `@opentui/core` entry points`, `Keyboard input`, `tui.test.ts`, `React keymap integration`, `Solid keymap integration`?**
-  _High betweenness centrality (0.071) - this node is a cross-community bridge._
+  _High betweenness centrality (0.085) - this node is a cross-community bridge._
+- **Why does `skills()` connect `skills` to `skills-manager`, `tui.test.ts`, `Portable open-source release plan`, `boundary.ts`, `appUpdatePreparation.test.ts`, `Implementation slices and dependencies`, `tui.ts`, `Security policy`, `Global constraints`, `startupConfig.test.ts`?**
+  _High betweenness centrality (0.078) - this node is a cross-community bridge._
 - **Are the 24 inferred relationships involving `error()` (e.g. with `Capture a PCM stream` and `Events and error actions`) actually correct?**
   _`error()` has 24 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `$schema`, `display`, `strict` to the rest of the system?**
+- **What connects `ImportOptions`, `Journal`, `JournalMove` to the rest of the system?**
   _1108 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `package.json` be split into smaller, more focused modules?**
   _Cohesion score 0.10526315789473684 - nodes in this community are weakly interconnected._
