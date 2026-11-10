@@ -9,6 +9,7 @@ These records explain accepted decisions and their reasons. For current behavior
 - [Concurrency limits](2026-11-03-open-source-portability.md#concurrency-limits).
 - [Hosted history replacement](2026-11-03-open-source-portability.md#hosted-history-replacement).
 - [macOS arm64 verification](2026-11-03-open-source-portability.md#macos-arm64-verification).
+- [Removal of eleven skipped test cases](2026-11-03-open-source-portability.md#removal-of-eleven-skipped-test-cases).
 - [Upstream skills versions](2026-11-03-open-source-portability.md#upstream-skills-versions).
 - [In-app keyboard help](2026-11-03-open-source-portability.md#in-app-keyboard-help).
 - [Persisted setup and existing installer tracking](2026-11-03-open-source-portability.md#persisted-setup-and-existing-installer-tracking).

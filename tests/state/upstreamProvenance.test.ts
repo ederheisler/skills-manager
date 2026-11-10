@@ -427,18 +427,6 @@ describe("controlled import receipts", () => {
     expect(await listOrphanedReceipts(skills)).toEqual([]);
   });
 
-  it.skipIf(process.platform !== "linux")("rejects invalid UTF-8 orphan receipt names instead of aliasing another filename", async () => {
-    const { skills, staged } = await fixture();
-    const root = await approveSkillsRoot(skills);
-    await applyPreparedChange(await prepareAdd(root, staged));
-    await rm(path.join(skills, "example"), { recursive: true });
-    const metadata = path.join(skills, ".skills-manager", "metadata");
-    const invalid = Buffer.concat([Buffer.from(`${metadata}/`), Buffer.from([0xff]), Buffer.from(".json")]);
-    await writeFile(invalid, "{}", { mode: 0o600 });
-    await expect(listOrphanedReceipts(skills)).rejects.toThrow(/not valid UTF-8/);
-    await expect(scanSkills(skills)).rejects.toThrow(/not valid UTF-8/);
-  });
-
   it("does not promote legacy or precomputed adopted receipt data", async () => {
     const { skills, staged, entry } = await fixture();
     const installed = path.join(skills, "example");

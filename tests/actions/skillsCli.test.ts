@@ -172,17 +172,6 @@ describe("approved subtree listing", () => {
     expect(await readFile(path.join(source, "selected", "outside-secret"), "utf8")).toBe("outside");
     expect(await readFile(path.join(base, "outside.txt"), "utf8")).toBe("unchanged");
   }, 30000);
-
-  it.skipIf(process.platform !== "linux")("rejects both final and intermediate mount crossings", async (context) => {
-    const proc = await stat("/proc").catch(() => null);
-    const rootStat = await stat("/");
-    if (!proc || proc.dev === rootStat.dev) context.skip("No separate proc mount is available");
-    const root = await approveSkillsRoot("/");
-    for (const relativePath of ["proc", "proc/self"]) {
-      await expect(listSkillPaths("/", { expectedRoot: root, relativePath }))
-        .rejects.toMatchObject({ code: "EXDEV" });
-    }
-  });
 });
 
 

@@ -39,18 +39,6 @@ describe("listSkillFiles", () => {
       { path: path.join("references", "notes.txt"), depth: 1, kind: "file" },
     ]);
   });
-
-  it.skipIf(process.platform !== "linux")("refuses non-UTF-8 nested filenames instead of aliasing a valid name", async () => {
-    const skillPath = path.join(agentRoot, "skill");
-    await mkdir(skillPath, { recursive: true });
-    await writeFile(path.join(skillPath, "file-\uFFFD"), "valid");
-    const invalid = Buffer.concat([Buffer.from(`${skillPath}/file-`), Buffer.from([0xff])]);
-    await writeFile(invalid, "invalid");
-
-    await expect(listSkillFiles(skillPath)).rejects.toThrow(/utf-?8/i);
-    expect(await readFile(invalid, "utf8")).toBe("invalid");
-    expect(await readFile(path.join(skillPath, "file-\uFFFD"), "utf8")).toBe("valid");
-  });
 });
 
 describe("scanSkills", () => {

@@ -606,16 +606,6 @@ describe("reviewed commits", () => {
     expect(git(root, "show", `HEAD:${odd}`)).toBe("literal file");
   });
 
-  it.skipIf(process.platform !== "linux")("refuses non-UTF-8 filenames instead of selecting a lossy alias", async () => {
-    const root = path.join(sandbox, "skills");
-    await repository(root);
-    await skill(root, "alpha");
-    const invalid = Buffer.concat([Buffer.from(`${root}/alpha/`), Buffer.from([0xff])]);
-    await writeFile(invalid, "untouched\n");
-    await expect(getStatus(root)).rejects.toThrow(/non-UTF-8/);
-    expect(await readFile(invalid, "utf8")).toBe("untouched\n");
-  });
-
   it("records reviewed deletions and symlink targets without following the link", async () => {
     const root = path.join(sandbox, "skills");
     const outside = path.join(sandbox, "outside");

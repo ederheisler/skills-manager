@@ -79,6 +79,14 @@ On 2026-11-06, the user removed the hosted macOS x86_64 and Linux arm64 jobs. Ho
 
 On 2026-11-10, GitHub showed only the Release workflow, triggered by pushes to `main`. No hosted build or test checks remain.
 
+## Removal of eleven skipped test cases
+
+Date: 2026-11-10
+
+The user chose to remove eleven specific skipped cases from the local test suite because the developer uses macOS without Linux test CI. These are the five identified Linux-only cases and six cases for a hardlinked `.git` symlink. The six cases cover active disable, remove, and replace actions and disabled enable, remove, and replace actions.
+
+This decision removes only those cases. It does not prohibit future Linux tests or change production platform support or runtime safety checks. The five physical case-insensitive metadata alias cases and ordinary symlink and hardlink safety cases remain.
+
 ## Upstream skills versions
 
 Date: 2026-11-04

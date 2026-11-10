@@ -34,16 +34,6 @@ describe("listed path encoding", () => {
     expect(await listSkillPaths(root)).toContainEqual({ path, kind: "file" });
     expect((await readSkillPath(root, path)).content).toEqual(content);
   });
-
-  it.runIf(process.platform === "linux")("does not review an invalid byte filename as a distinct replacement-character filename", async () => {
-    const path = "alpha/docs/\uFFFD.txt";
-    await writeFile(join(root, path), "legitimate");
-    expect((await readSkillFiles(root)).files).toContainEqual({ path, content: "legitimate" });
-
-    const invalidPath = Buffer.concat([Buffer.from(join(root, "alpha", "docs") + "/"), Buffer.from([0xff]), Buffer.from(".txt")]);
-    await writeFile(invalidPath, "invalid filename");
-    await expect(readSkillFiles(root)).rejects.toThrow();
-  });
 });
 
 describe("stable path identity", () => {
