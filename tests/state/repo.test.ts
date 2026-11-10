@@ -39,18 +39,6 @@ describe("listSkillFiles", () => {
       { path: path.join("references", "notes.txt"), depth: 1, kind: "file" },
     ]);
   });
-
-  it.skipIf(process.platform !== "linux")("refuses non-UTF-8 nested filenames instead of aliasing a valid name", async () => {
-    const skillPath = path.join(agentRoot, "skill");
-    await mkdir(skillPath, { recursive: true });
-    await writeFile(path.join(skillPath, "file-\uFFFD"), "valid");
-    const invalid = Buffer.concat([Buffer.from(`${skillPath}/file-`), Buffer.from([0xff])]);
-    await writeFile(invalid, "invalid");
-
-    await expect(listSkillFiles(skillPath)).rejects.toThrow(/utf-?8/i);
-    expect(await readFile(invalid, "utf8")).toBe("invalid");
-    expect(await readFile(path.join(skillPath, "file-\uFFFD"), "utf8")).toBe("valid");
-  });
 });
 
 describe("scanSkills", () => {
@@ -242,7 +230,6 @@ describe("scanSkills", () => {
       JSON.stringify({ version: 2, skills: { manual: entry } }),
       JSON.stringify({ version: 3, skills: { other: entry } }),
       JSON.stringify({ version: 3, skills: { manual: { ...entry, sourceUrl: "https://github.com/other/repo" } } }),
-      JSON.stringify({ version: 3, skills: { manual: { ...entry, skillFolderHash: "not-a-hash" } } }),
       JSON.stringify({ version: 3, skills: { manual: { ...entry, skillPath: "../outside/SKILL.md" } } }),
     ]) {
       await writeFile(paths.lockFile, lock);
@@ -253,6 +240,18 @@ describe("scanSkills", () => {
       expect(await readFile(paths.lockFile, "utf8")).toBe(lock);
     }
     await expect(lstat(path.join(agentRoot, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps a CLI source association even when the CLI baseline is not a known hash format", async () => {
+    const paths = resolvePaths(agentRoot);
+    await writeSkill(agentRoot, "manual", "---\nname: manual\n---\n");
+    const entry = {
+      source: "owner/repo", sourceType: "github", sourceUrl: "https://github.com/owner/repo",
+      skillPath: "skills/manual/SKILL.md", skillFolderHash: "not-a-hash",
+      installedAt: "2026-01-01", updatedAt: "2026-01-01",
+    };
+    await writeFile(paths.lockFile, JSON.stringify({ version: 3, skills: { manual: entry } }));
+    expect((await scanSkills(agentRoot))[0]).toMatchObject({ lockEntry: entry, recordedSource: entry });
   });
 
   it.each(["active", "disabled"])("tracks a valid Vercel parent record for an %s skill after local edits", async (location) => {

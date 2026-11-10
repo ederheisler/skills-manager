@@ -26,7 +26,6 @@ function run(command, args) {
 }
 
 run(process.execPath, ['scripts/check-package.mjs', '--before-build']);
-run(process.execPath, ['scripts/build-boundary.mjs']);
 run('tsc', ['-p', 'tsconfig.json']);
 
 const after = await captureBuildIdentity();

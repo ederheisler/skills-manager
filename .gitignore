@@ -4,10 +4,6 @@
 .DS_Store
 node_modules/
 dist/
-native/skills-boundary
-native/skills-boundary.platform.json
-native/skills-git-boundary
-native/skills-git-boundary.platform.json
 graphify-out/cache/
 graphify-out/**/cost.json
 graphify-out/manifest.json

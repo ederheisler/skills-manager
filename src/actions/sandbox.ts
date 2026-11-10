@@ -240,16 +240,16 @@ export async function runConfinedSkills(workspace: string, args: string[], local
     const libraries = await Promise.all(shared.map((entry) => realpath(entry).catch(() => entry)));
     const env = cleanEnvironment(root);
     const source = args[0] === "add" ? args[1] : undefined;
-    const remote = args[0] === "check" || (source && !localSource && !path.isAbsolute(source) && !source.startsWith("./") && !source.startsWith("../"));
+    const remote = args[0] === "check" || args[0] === "update" || (source && !localSource && !path.isAbsolute(source) && !source.startsWith("./") && !source.startsWith("../"));
     const git = remote ? await selectedMacGit(root, env) : undefined;
     if (git) env.PATH = `${path.dirname(git.executable)}:${env.PATH}`;
-    return invoke("/usr/bin/sandbox-exec", ["-p", macProfile(root, location.packages, node, libraries, localSource, git), node, location.executable, ...args], root, env, args[0] === "check");
+    return invoke("/usr/bin/sandbox-exec", ["-p", macProfile(root, location.packages, node, libraries, localSource, git), node, location.executable, ...args], root, env, args[0] === "check" || args[0] === "update");
   }
   if (process.platform === "linux") {
     // No host home, runtime sockets, or credentials are mounted in this namespace.
     const sandboxArgs = linuxArguments(root, location, node, localSource);
     sandboxArgs.push("--chdir", "/workspace", "--", "/app/node", path.join("/app/node_modules/skills", location.relativeExecutable), ...args);
-    return invoke("bwrap", sandboxArgs, root, cleanEnvironment("/workspace"), args[0] === "check");
+    return invoke("bwrap", sandboxArgs, root, cleanEnvironment("/workspace"), args[0] === "check" || args[0] === "update");
   }
   throw new Error("Remote actions require macOS sandbox-exec or Linux bubblewrap; this platform is unsupported.");
 }

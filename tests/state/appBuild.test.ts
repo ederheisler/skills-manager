@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -40,23 +40,17 @@ async function sourceFixture(root: string): Promise<void> {
   await cp(path.join(project, ".gitattributes"), path.join(root, ".gitattributes"));
   await cp(path.join(project, "src", "state", "appBuild.ts"), path.join(root, "src", "state", "appBuild.ts"));
   await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "identity-fixture", version, type: "module" }));
-  await writeFile(path.join(root, ".gitignore"), "/dist/\n/node_modules\n/native/skills-boundary\n/native/skills-boundary.platform.json\n/native/skills-git-boundary\n/native/skills-git-boundary.platform.json\n");
+  await writeFile(path.join(root, ".gitignore"), "/dist/\n/node_modules\n");
   await writeFile(path.join(root, "src", "payload.txt"), payload);
 }
 
 async function productionBuildFixture(root: string): Promise<void> {
   await sourceFixture(root);
-  for (const name of ["build.mjs", "check-package.mjs", "build-boundary.mjs"]) {
+  for (const name of ["build.mjs", "check-package.mjs"]) {
     await cp(path.join(project, "scripts", name), path.join(root, "scripts", name));
   }
   for (const name of ["tsconfig.json", "LICENSE", "THIRD_PARTY_NOTICES"]) {
     await cp(path.join(project, name), path.join(root, name));
-  }
-  await mkdir(path.join(root, "native"));
-  for (const name of await readdir(path.join(project, "native"))) {
-    if (name.endsWith(".c") || name.endsWith(".h")) {
-      await cp(path.join(project, "native", name), path.join(root, "native", name));
-    }
   }
   await symlink(path.join(project, "node_modules"), path.join(root, "node_modules"), "dir");
   await writeFile(path.join(root, "package.json"), JSON.stringify({
@@ -66,10 +60,6 @@ async function productionBuildFixture(root: string): Promise<void> {
     files: [
       "dist/state/appBuild.js",
       "dist/state/buildIdentity.json",
-      "native/skills-boundary",
-      "native/skills-boundary.platform.json",
-      "native/skills-git-boundary",
-      "native/skills-git-boundary.platform.json",
       "LICENSE",
       "THIRD_PARTY_NOTICES",
     ],
@@ -245,10 +235,11 @@ describe("application build identity", () => {
 
     const output = path.join(root, "dist", "state", "appBuild.js");
     const compiledA = await readFile(output, "utf8");
-    await expect(build({ ...buildEnv, CC: path.join(home, "missing-compiler") }))
-      .rejects.toThrow(/Could not run C compiler/);
-    expect(await readFile(output, "utf8")).toBe(compiledA);
-    expect(await readCompiledBuild(root, home)).toEqual({ marker: "A", identity: unknown });
+    await writeFile(source, `${original}\nexport const buildMarker = "failed";\nconst invalid: number = "not a number";\n`);
+    await expect(build(buildEnv)).rejects.toThrow();
+    expect(await readFile(output, "utf8")).not.toBe(compiledA);
+    expect(await readCompiledBuild(root, home)).toEqual({ marker: "failed", identity: unknown });
+    await writeFile(source, `${original}\nexport const buildMarker = "A";\n`);
 
     const bin = path.join(home, "bin");
     await mkdir(bin);
@@ -285,12 +276,8 @@ describe("application build identity", () => {
     await mkdir(path.join(archive, ".git"));
     await writeFile(path.join(archive, ".git", "generated"), "generated\n");
     await mkdir(path.join(archive, "node_modules", "generated"), { recursive: true });
-    await mkdir(path.join(archive, "native"), { recursive: true });
     await writeFile(path.join(archive, "node_modules", "generated", "index.js"), "generated\n");
     await writeFile(path.join(archive, "dist", "generated.js"), "generated\n");
-    for (const name of ["skills-boundary", "skills-boundary.platform.json", "skills-git-boundary", "skills-git-boundary.platform.json"]) {
-      await writeFile(path.join(archive, "native", name), "generated\n");
-    }
     await generate(archive, home, true);
     expect(await readIdentity(archive, home)).toEqual({ version, commit, dirty: false, source: "archive" });
 

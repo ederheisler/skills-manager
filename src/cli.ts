@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { helpText, parseCliOptions, runtimeError, type CliOptions } from "./cliOptions.js";
 import { escapeTerminalSingleLine, quoteTerminalPath } from "./terminalText.js";
-import type { DirectorySelectionOptions, OnboardingIO, SkillsOnboardingResult } from "./onboarding.js";
 
 function errorText(error: unknown): string {
   return escapeTerminalSingleLine(error instanceof Error ? error.message : String(error));
@@ -53,40 +52,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const [{ createInterface }, { selectSavedSkillsDirectory }] = await Promise.all([
-    import("node:readline/promises"),
-    import("./onboarding.js"),
-  ]);
-
-  const select = async (selection: DirectorySelectionOptions): Promise<SkillsOnboardingResult | null> => {
-    const reader = createInterface({ input: process.stdin, output: process.stdout });
-    const controller = new AbortController();
-    reader.on("SIGINT", () => controller.abort());
-    reader.on("close", () => controller.abort());
-    const io: OnboardingIO = {
-      async ask(prompt) {
-        try {
-          return await reader.question(prompt, { signal: controller.signal });
-        } catch (error) {
-          if (controller.signal.aborted) return null;
-          throw error;
-        }
-      },
-      write(message) {
-        process.stdout.write(message);
-      },
-    };
-    try {
-      return await selectSavedSkillsDirectory(io, selection);
-    } finally {
-      reader.close();
-    }
-  };
-
-  const onboarding = await select({ explicitSkillsDir: options.skillsDir });
-  if (onboarding === null) return;
-
-  const [{ createCliRenderer }, { SkillsManagerTui }] = await Promise.all([
+  const [{ createCliRenderer }, { selectSkillsDirectoryInTui, SkillsManagerTui }] = await Promise.all([
     import("@opentui/core"),
     import("./tui.js"),
   ]);
@@ -95,7 +61,12 @@ async function main(): Promise<void> {
   renderer.once("destroy", () => { rendererDestroyed = true; });
   let app: InstanceType<typeof SkillsManagerTui> | undefined;
   try {
-    app = new SkillsManagerTui(renderer, onboarding.root);
+    const onboarding = await selectSkillsDirectoryInTui(renderer, { explicitSkillsDir: options.skillsDir });
+    if (onboarding === null || renderer.isDestroyed) {
+      if (!renderer.isDestroyed) renderer.destroy();
+      return;
+    }
+    app = new SkillsManagerTui(renderer, onboarding.root, { startupWarnings: onboarding.warnings });
     await app.start();
     const outcome = await app.waitForExit();
     if (outcome === null) {

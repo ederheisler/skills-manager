@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { scanSkills } from "../state/repo.js";
 import { assertApprovedSkillsRoot, cleanupGitIndex, hasIndexTransaction, inspectGitIndex, readSkillPath, withSkillsLock, type ApprovedSkillsRoot } from "./boundary.js";
-import { runConfinedGit } from "./gitBoundary.js";
+import { runValidatedGit } from "./gitBoundary.js";
 import { commitIndexTransaction, indexFingerprint as readIndexFingerprint, pullIndexWorktreeTransaction, recoverIndexTransaction } from "./gitTransaction.js";
 
 export interface GitResult { command: string; stdout: string; stderr: string; exitCode: number }
@@ -192,7 +192,7 @@ async function run(root: string, args: string[], options: { env?: NodeJS.Process
   try {
     if (options.boundary) {
       const { approved, rootIdentity, binding, remote } = options.boundary;
-      const result = await runConfinedGit(root, [...config, ...overrides, ...args], {
+      const result = await runValidatedGit(root, [...config, ...overrides, ...args], {
         env: environment(binding?.repositoryRoot ?? root, options.env), input: options.input,
         expectedRoot: { ...rootIdentity, identity: approved.identity },
         ...(binding ? {

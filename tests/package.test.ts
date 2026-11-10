@@ -23,6 +23,7 @@ describe("Node release artifact", () => {
       npm_config_audit: "false",
       npm_config_fund: "false",
       npm_config_update_notifier: "false",
+      CC: path.join(temporary, "compiler-must-not-run"),
     };
 
     try {
@@ -33,12 +34,6 @@ describe("Node release artifact", () => {
       expect((await lstat(template)).isFile()).toBe(true);
       // This copied fixture is unsourced, even when the test itself runs from an archive.
       await writeFile(template, "$Format:%H$\n$Format:%T$\n");
-      await mkdir(path.join(source, "native"));
-      for (const name of await readdir(path.join(project, "native"))) {
-        if (name.endsWith(".c") || name.endsWith(".h")) {
-          await cp(path.join(project, "native", name), path.join(source, "native", name));
-        }
-      }
       await symlink(path.join(project, "node_modules"), path.join(source, "node_modules"), "dir");
       await mkdir(path.join(source, "dist", "actions"), { recursive: true });
       await mkdir(path.join(source, ".claude"));
@@ -70,24 +65,12 @@ describe("Node release artifact", () => {
       expect(files).toContain("package/dist/terminalText.js");
       expect(files).toContain("package/dist/state/config.js");
       expect(files).toContain("package/dist/actions/gitTransaction.js");
-      expect(files).toContain("package/dist/actions/gitTransactionWorker.js");
-      expect(files).toContain("package/native/skills-boundary");
-      expect(files).toContain("package/native/skills-boundary.platform.json");
-      expect(files).toContain("package/native/skills-git-boundary");
-      expect(files).toContain("package/native/skills-git-boundary.platform.json");
+      expect(files).not.toContain("package/dist/actions/gitTransactionWorker.js");
+      expect(files.some((file) => file.startsWith("package/native/"))).toBe(false);
       expect(files).not.toContain("package/dist/actions/personal.js");
       expect(files).not.toContain("package/private-backup.txt");
       expect(files.some((file) => /(?:\.claude|node_modules|scripts\/|\.c$|\.h$)/.test(file))).toBe(false);
 
-      const { stdout: metadataText } = await run("tar", ["-xOf", archive, "package/native/skills-boundary.platform.json"], { env });
-      const metadata = JSON.parse(metadataText);
-      expect(metadata).toEqual({
-        platform: process.platform,
-        arch: process.arch,
-        libc: process.platform === "linux" ? "glibc" : null,
-      });
-      const { stdout: gitMetadataText } = await run("tar", ["-xOf", archive, "package/native/skills-git-boundary.platform.json"], { env });
-      expect(JSON.parse(gitMetadataText)).toEqual(metadata);
       expect(await readFile(path.join(source, "dist", "actions", "personal.js"), "utf8")).toBe("private generated file\n");
 
       const extracted = path.join(temporary, "extracted");
@@ -105,26 +88,17 @@ describe("Node release artifact", () => {
       const readIdentity = "const { readBuildIdentity } = await import(process.argv[1]); console.log(JSON.stringify(await readBuildIdentity()));";
       const { stdout: identity } = await run(process.execPath, ["--input-type=module", "-e", readIdentity, appBuild], { cwd: temporary, env });
       expect(JSON.parse(identity)).toEqual({ version: manifest.version, commit: null, dirty: false, source: "unknown" });
-      const metadataFile = path.join(installed, "native", "skills-boundary.platform.json");
       const boundary = pathToFileURL(path.join(installed, "dist", "actions", "boundary.js")).href;
       // The module is selected from this test's freshly extracted archive.
       const approve = "const { approveSkillsRoot } = await import(process.argv[1]); console.log(JSON.stringify(await approveSkillsRoot(process.argv[2])));";
       const { stdout: approvedRoot } = await run(process.execPath, ["--input-type=module", "-e", approve, boundary, skills], { env });
-      const launch = "const { withSkillsLock } = await import(process.argv[1]); const { writeFile } = await import('node:fs/promises'); const root = JSON.parse(process.argv[2]); await withSkillsLock(root, () => writeFile(root.path + '/unexpected-write', 'changed'));";
-      for (const mismatch of [
-        { ...metadata, platform: process.platform === "darwin" ? "linux" : "darwin" },
-        { ...metadata, arch: "other-architecture" },
-        { ...metadata, libc: process.platform === "linux" ? "musl" : "glibc" },
-      ]) {
-        await writeFile(metadataFile, JSON.stringify(mismatch));
-        await expect(run(process.execPath, ["--input-type=module", "-e", launch, boundary, approvedRoot], { env }))
-          .rejects.toThrow(/helper is incompatible/i);
-      }
-      await rm(metadataFile);
-      await expect(run(process.execPath, ["--input-type=module", "-e", launch, boundary, approvedRoot], { env }))
-        .rejects.toThrow(/platform metadata is missing or invalid/i);
-      await expect(lstat(path.join(skills, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
-      expect(await readdir(skills)).toEqual(["sentinel"]);
+      const launch = "import { writeFile } from 'node:fs/promises'; const { withSkillsLock } = await import(process.argv[1]); const root = JSON.parse(process.argv[2]); await withSkillsLock(root, () => writeFile(root.path + '/sentinel', 'approved change\\n'));";
+      await run(process.execPath, ["--input-type=module", "-e", launch, boundary, approvedRoot], { env });
+      expect(await readFile(path.join(skills, "sentinel"), "utf8")).toBe("approved change\n");
+      await writeFile(path.join(skills, "sentinel"), "selected unchanged\n");
+      const staleRoot = JSON.stringify({ ...JSON.parse(approvedRoot), identity: "0".repeat(64) });
+      await expect(run(process.execPath, ["--input-type=module", "-e", launch, boundary, staleRoot], { env }))
+        .rejects.toThrow(/changed|stale|identity|approval/i);
       expect(await readFile(path.join(skills, "sentinel"), "utf8")).toBe("selected unchanged\n");
       expect(await readFile(outside, "utf8")).toBe("outside unchanged\n");
 
@@ -149,7 +123,7 @@ describe("Node release artifact", () => {
         await link(outside, target);
         await expect(run("npm", ["run", "build"], {
           cwd: source,
-          env: { ...env, CC: path.join(temporary, "compiler-must-not-run") },
+          env,
           maxBuffer: 10 * 1024 * 1024,
         })).rejects.toThrow(relative === "dist/state/buildIdentity.json"
           ? /refusing unsafe build identity output/i

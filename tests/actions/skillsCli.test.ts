@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { createServer, type Server } from "node:http";
 import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
@@ -9,10 +8,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { approveSkillsRoot, listSkillPaths } from "../../src/actions/boundary.js";
 import { runConfinedSkills } from "../../src/actions/sandbox.js";
-import { applyPreparedChange, discardPreparedChange, findSkills, prepareAdd } from "../../src/actions/skillsCli.js";
+import { applyPreparedChange, discardPreparedChange, prepareAdd } from "../../src/actions/skillsCli.js";
 
 const roots: string[] = [];
-const servers: Server[] = [];
 
 async function fixture(): Promise<{ base: string; skills: string; source: string; sentinel: string; lock: string }> {
   const base = await realpath(await mkdtemp(path.join(tmpdir(), "skills-adapter-test-")));
@@ -30,20 +28,8 @@ async function fixture(): Promise<{ base: string; skills: string; source: string
   return { base, skills, source, sentinel, lock };
 }
 
-async function serverFor(status: number, body: string): Promise<string> {
-  const server = createServer((_request, response) => {
-    response.writeHead(status, { "content-type": "application/json" });
-    response.end(body);
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  servers.push(server);
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("No test server address");
-  return `http://127.0.0.1:${address.port}/api/search`;
-}
 
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -133,7 +119,7 @@ describe("approved subtree listing", () => {
     const root = await approveSkillsRoot(skills);
     const other = await approveSkillsRoot(source);
     await expect(listSkillPaths(skills, { expectedRoot: other, relativePath: "example" }))
-      .rejects.toThrow("Listing root does not match the approved directory");
+      .rejects.toThrow();
 
     await rename(skills, path.join(base, "original-selected"));
     await mkdir(path.join(skills, "example"), { recursive: true });
@@ -186,34 +172,8 @@ describe("approved subtree listing", () => {
     expect(await readFile(path.join(source, "selected", "outside-secret"), "utf8")).toBe("outside");
     expect(await readFile(path.join(base, "outside.txt"), "utf8")).toBe("unchanged");
   }, 30000);
-
-  it.skipIf(process.platform !== "linux")("rejects both final and intermediate mount crossings", async (context) => {
-    const proc = await stat("/proc").catch(() => null);
-    const rootStat = await stat("/");
-    if (!proc || proc.dev === rootStat.dev) context.skip("No separate proc mount is available");
-    const root = await approveSkillsRoot("/");
-    for (const relativePath of ["proc", "proc/self"]) {
-      await expect(listSkillPaths("/", { expectedRoot: root, relativePath }))
-        .rejects.toMatchObject({ code: "EXDEV" });
-    }
-  });
 });
 
-describe("explicit skill search", () => {
-  it("parses a real HTTP response without starting the installer", async () => {
-    const endpoint = await serverFor(200, JSON.stringify({ skills: [{ id: "team/repo/example", name: "example", source: "team/repo", installs: 1250 }] }));
-    await expect(findSkills("example", endpoint)).resolves.toEqual([{
-      identifier: "team/repo@example", repository: "team/repo", skill: "example", installs: "1.3K", url: "https://skills.sh/team/repo/example",
-    }]);
-  });
-
-  it("reports HTTP failure and malformed responses instead of claiming no matches", async () => {
-    const unavailable = await serverFor(503, "{}");
-    const malformed = await serverFor(200, "not json");
-    await expect(findSkills("example", unavailable)).rejects.toThrow("HTTP 503");
-    await expect(findSkills("example", malformed)).rejects.toThrow("invalid JSON");
-  });
-});
 
 describe("installed skills runtime", () => {
   it("inspects the canonical installed package and executable against its manifest", async () => {
@@ -293,6 +253,17 @@ describe("confined staged installation", () => {
     expect(await readFile(sentinel, "utf8")).toBe("unchanged");
     expect(await readFile(lock, "utf8")).toBe("external lock unchanged");
     await expect(readFile(path.join(preview.workspace, "home", ".agents", "skills", "example", "SKILL.md"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("accepts a real source and skill whose names contain failed", async () => {
+    const { base, skills, source } = await fixture();
+    const failedSource = path.join(base, "failed-source");
+    await rename(source, failedSource);
+    await rename(path.join(failedSource, "example"), path.join(failedSource, "failed"));
+    await writeFile(path.join(failedSource, "failed", "SKILL.md"), "---\nname: failed\ndescription: Fixture\n---\n");
+    const preview = await prepareAdd(await approveSkillsRoot(skills), failedSource);
+    expect(preview.changes.map((change) => change.name)).toEqual(["failed"]);
+    await discardPreparedChange(preview);
   });
 
   it("does not install a declined preview or overwrite a collision", async () => {

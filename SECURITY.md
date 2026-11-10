@@ -20,13 +20,13 @@ The app reads skills as untrusted data. It must not execute frontmatter or infer
 
 App locks coordinate app instances, not external editors, filesystem moves, or Git commands. Do not run those operations concurrently with an app action. Stale checks are not atomic pathname guards. Processes running as your user can replace the app, alter saved state, or move already-open files; the app does not claim protection against those actions.
 
-Saved source receipts and Vercel installer lock entries are continuity metadata, not publisher authentication or proof of prior approval or unchanged local content. An untrusted restore over the same installation can forge those associations. Review sources before updates and staged content before import.
+Saved source receipts and Vercel installer lock entries are continuity metadata, not publisher authentication or proof of prior approval or unchanged local content. An untrusted restore over the same installation can forge those associations. Installation and replacement review the source and staged content. Pressing `u` or `p` directly authorizes updating from saved sources without those confirmations.
 
 Ambiguous recovery state is retained for inspection. The app must not delete foreign locks or overwrite foreign files merely to make recovery succeed.
 
 ## Selecting and changing skills
 
-Linux mutations require Landlock ABI 5 or later and mount-aware `statx`. If the required boundary is unavailable, the app refuses the mutation rather than allowing unrestricted writes.
+Local filesystem and Git safeguards run in the TypeScript application using Node filesystem and crypto APIs and the existing Git executable. They are not an operating-system confinement boundary. The app has no custom native helper binaries and does not require an end-user compiler. OpenTUI retains its published prebuilt runtime dependencies.
 
 The app inspects only the selected installation. Onboarding offers `~/.agents/skills` by default or another directory by explicit selection. A linked directory requires approval of its resolved target. If the directory is missing, onboarding offers read-only mode and does not create it. Completed setup is reused for an unchanged root, but every launch freshly validates its physical identity. A new or changed root requires setup again. Adoption does not copy, merge, move, or relink skills, create Git state, or rewrite an installer's lock.
 
@@ -36,15 +36,15 @@ Declared authors are metadata, not proof of ownership. Missing authors and unver
 
 Review exact paths before approving a change. Enable and disable move only the selected entry. Removing a link never authorizes deleting its target. Link text is preserved, so moving a relative link can change its resolution while disabled. Moving a shared skill can leave harness links dangling until the skill returns.
 
-The app refuses unsafe paths, collisions, stale previews, and operations for which it cannot establish the filesystem boundary. The reserved `.skills-manager` directory holds locks, operation records, and recovery data. An unrelated directory at that location is a collision, not permission to take it over. Do not remove recovery data to clear an error. Follow the displayed recovery state first. A completed deletion is irreversible after recovery cleanup. The app does not present multi-file operations as atomic.
+The app refuses unsafe paths, collisions, stale previews, hardlinked or special files where unsafe, and operations for which it cannot validate the approved root and destination. It does not follow skill links to mutate their targets. App operations are serialized, but pathname checks do not make hostile concurrent changes safe. The reserved `.skills-manager` directory holds locks, operation records, and recovery data. An unrelated directory at that location is a collision, not permission to take it over. Do not remove recovery data to clear an error. Follow the displayed recovery state first. A completed deletion is irreversible after recovery cleanup. The app does not present multi-file operations as atomic.
 
 ## Git and remote actions
 
 Optional Git actions require Git 2.48 or later. Commits and pulls require Git's `files` ref backend and refuse `reftable` repositories.
 
-Local skills work without Git. Onboarding does not ask about Git. To initialize Git, press `i` in Git view and approve the confirmation. The app never automatically initializes Git, commits, changes a remote, or pushes.
+Local skills work without Git. Onboarding runs inside the terminal app and does not ask about Git. Pressing `g` opens Git view and offers initialization if the selected directory has no repository. Initialization requires explicit confirmation; `i` in Git view can reopen that confirmation. The app never automatically initializes Git, commits, changes a remote, or pushes.
 
-Skill file writes and local commits are limited to the selected skills directory. Commit previews list the exact skill paths. Unrelated staged and unstaged files and transient recovery data stay outside the commit. The app does not add exclusions or untrack files.
+Skill content writes and local commits are limited to the selected skills directory. Installation and update actions also publish the underlying CLI's generated tracking lock. Commit previews list the exact skill paths. Unrelated staged and unstaged files and transient recovery data stay outside the commit. The app does not add exclusions or untrack files.
 
 Push is an explicit action in Git view. A push sends branch history for the entire repository, including commits outside the selected skills directory. Push does not preserve uncommitted files. Review the actual repository, redacted destination, branch, upstream, and history before approval. Create a remote outside the app and make sure that its provider grants access only to the intended readers. Git cannot determine destination privacy from a URL. The app does not create provider repositories, change their visibility, or overwrite existing remotes.
 
@@ -88,6 +88,10 @@ Remote preparation runs in a disposable workspace behind an operating-system bou
 
 The boundary confines the upstream process's filesystem access. It is not a general-purpose hostile-code sandbox. Approved remote actions can use the network, including loopback. Skill documents are parsed as data, not executed.
 
-The app reviews staged results before importing them into the selected installation. It never temporarily enables live disabled skills to update them. External installer locks remain read-only. Update actions using saved sources require separate review of the source URL and ref before contact, then staged-content approval before import. Checks use disposable locks and stage CLI-reported updates for comparison without installing them or requiring that review. Unknown sources require explicit selection.
+The `skills` CLI is the backend for discovery, installation, checks, and updates. The app invokes its commands rather than reimplementing source discovery, update comparisons, or installation decisions. `u` and `p` authorize immediate updates with visible progress and failures, without source or full-content confirmations. Installation and replacement retain their reviews.
 
-A matching receipt associates a source with the same physical installation. Valid existing Vercel installer lock entries can also provide source tracking without a manager receipt. A saved baseline is not proof of current local content. For a CLI-reported update, the app compares the installed skill with staged upstream content. Matching contents do not warrant an update solely because a baseline is stale. Staging uses a separate remote snapshot and can fail or be ambiguous. Explicit CLI failures and unrecognized results are unavailable; the CLI's up-to-date result is accepted when no failure is reported. Copied or recreated installations can require source re-review. Upstream telemetry is disabled with `DISABLE_TELEMETRY=1` and `DO_NOT_TRACK=1`. Upstream documents that this also disables its security-audit requests. Remote actions still contact their requested services and source hosts. Authentication or network failures are visible, not empty successful results.
+The CLI runs in disposable isolation. Its generated skill files and complete tracking lock are published through filesystem safeguards; the app does not merge or independently calculate upstream versions. Publication refuses stale or unsafe destinations and preserves unrelated tracking. Disabled skills remain disabled. A failure after some files were applied is reported as partial; these multi-file operations are not atomic.
+
+Link-mode updates are refused because temporary checkout links cannot be published safely. Remote replacements must use the CLI's skill name; the app does not synthesize rename aliases.
+
+Valid CLI tracking takes precedence over an older manager receipt. Browsing and checks do not rewrite that tracking. CLI-reported failures and unrecognized check results are unavailable rather than current; ordinary up-to-date results are accepted. The CLI can itself suppress some failures, including returning no search results after a network failure. Upstream telemetry is disabled with `DISABLE_TELEMETRY=1` and `DO_NOT_TRACK=1`; upstream documents that this also disables its security-audit requests. Remote actions still contact their requested services and source hosts.

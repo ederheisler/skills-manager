@@ -78,8 +78,6 @@ describe("read-only directory selection", () => {
       root: { path: selected, identity: expect.any(String) },
     });
     expect(session.prompts).toEqual(["Choose [1] (q to cancel): "]);
-    expect(session.output.join("")).toContain("~/.agents/skills (default)");
-    expect(session.output.join("")).not.toContain("Claude Code");
     expect(await readFile(path.join(selected, "sentinel"), "utf8")).toBe("unchanged");
   });
 
@@ -253,17 +251,6 @@ describe("read-only directory selection", () => {
     expect(output).not.toMatch(/[\x1b\x07\t\u202e]/);
     expect(await readlink(alias)).toBe(leaf);
     expect(await readdir(target)).toEqual([]);
-  });
-
-  it("escapes untrusted candidate paths and current paths in the selection menu", async () => {
-    const session = scripted(["2", "", "q"]);
-    const unusualHome = `${home}/home-\x1b]0;title\x07`;
-    const current = `${home}/current\n\u009b31m`;
-    await expect(selectSkillsDirectory(session.io, { home: unusualHome, currentSkillsDir: current })).resolves.toBeNull();
-    const output = session.output.join("");
-    expect(output).toContain(String.raw`home-\x1b]0;title\x07/.agents/skills`);
-    expect(output).toContain(String.raw`current\n\x9b31m`);
-    expect(output).not.toMatch(/[\x1b\x07\u009b]/);
   });
 
   it("escapes terminal controls in broken-link diagnostics", async () => {

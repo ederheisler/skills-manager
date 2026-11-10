@@ -1,11 +1,8 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { approveSkillsRoot, fingerprintSkill, fingerprintTree, recoverSkills, type ApprovedSkillsRoot } from "../../src/actions/boundary.js";
+import { approveSkillsRoot, fingerprintTree, recoverSkills, withSkillsLock, type ApprovedSkillsRoot } from "../../src/actions/boundary.js";
 import { disableSkill, enableSkill } from "../../src/actions/toggle.js";
 
 let sandbox: string;
@@ -292,143 +289,23 @@ describe("skill toggles at the selected directory", () => {
   });
 });
 
-describe("atomic manager state bootstrap", () => {
-  const faults = [
-    "bootstrap-after-mkdir",
-    "bootstrap-after-owner",
-    "bootstrap-after-lock",
-    "bootstrap-before-publish",
-    "bootstrap-after-publish",
-  ] as const;
-  type BootstrapFault = typeof faults[number];
-  let faultProject = "";
-
-  beforeAll(async () => {
-    faultProject = await realpath(await mkdtemp(join(tmpdir(), "skills-bootstrap-helper-")));
-    const actionsDir = join(faultProject, "src", "actions");
-    const nativeDir = join(faultProject, "native");
-    await mkdir(actionsDir, { recursive: true });
-    await mkdir(nativeDir);
-    const sourceActions = new URL("../../src/actions/", import.meta.url);
-    await Promise.all(["boundary.ts", "toggle.ts"].map((name) =>
-      copyFile(new URL(name, sourceActions), join(actionsDir, name)),
-    ));
-    await writeFile(join(faultProject, "package.json"), '{"type":"module"}\n');
-    await writeFile(join(nativeDir, "skills-boundary.platform.json"), JSON.stringify({
-      platform: process.platform,
-      arch: process.arch,
-      libc: process.platform === "linux" ? "glibc" : null,
-    }) + "\n");
-
-    const source = fileURLToPath(new URL("../../native/skills-boundary.c", import.meta.url));
-    const compiler = spawn(process.env.CC || "cc", [
-      "-std=c11", "-O2", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Wpedantic",
-      "-DSKILLS_MANAGER_TEST_FAULTS=1", source, "-o", join(nativeDir, "skills-boundary"),
-    ], { stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    compiler.stderr.setEncoding("utf8");
-    compiler.stderr.on("data", (chunk: string) => { stderr += chunk; });
-    const [code, signal] = await once(compiler, "close") as [number | null, NodeJS.Signals | null];
-    if (code !== 0 || signal) throw new Error(`Cannot build disposable bootstrap helper (${signal ?? code}): ${stderr}`);
-  }, 60000);
-
-  afterAll(async () => {
-    if (faultProject) await rm(faultProject, { recursive: true, force: true });
-  });
-
-  async function runBootstrap(fault: BootstrapFault, version: string, instrumented = true) {
-    const moduleUrl = instrumented
-      ? pathToFileURL(join(faultProject, "src", "actions", "toggle.ts")).href
-      : new URL("../../src/actions/toggle.ts", import.meta.url).href;
-    const program = `import { disableSkill } from ${JSON.stringify(moduleUrl)}; await disableSkill(JSON.parse(process.argv[1]), "foo", process.argv[2]);`;
-    const child = spawn("node", ["--import", "tsx", "--input-type=module", "--eval", program, JSON.stringify(root), version], {
-      env: { ...process.env, SKILLS_BOUNDARY_FAULT: fault },
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-    const [code, signal] = await once(child, "close") as [number | null, NodeJS.Signals | null];
-    return { code, signal, stderr };
-  }
-
-  it.each(faults)("recovers safely after a crash at %s", async (fault) => {
-    const enabled = join(skillsDir, "foo");
-    const disabled = join(skillsDir, ".disabled_skills", "foo");
-    const manager = join(skillsDir, ".skills-manager");
-    const version = await fingerprintSkill(root, "foo", enabled);
-    const original = await lstat(enabled);
-
-    const result = await runBootstrap(fault, version);
-
-    expect(result.code).not.toBe(0);
-    expect(result.signal).toBeNull();
-    expect(result.stderr).toMatch(/\bstatus 86\b/);
-    await expect(readFile(join(enabled, "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
-    expect((await lstat(enabled)).ino).toBe(original.ino);
-    await expectMissing(disabled);
-    await expectOutsideUnchanged();
-
-    const published = fault === "bootstrap-after-publish";
-    const extraEntries = (await readdir(skillsDir)).filter((name) => name !== "foo" && name !== ".skills-manager");
-    let orphan: string | undefined;
-    let orphanInode: number | undefined;
-    let orphanEntries: string[] = [];
-    let managerInode: number | undefined;
-    if (published) {
-      expect(extraEntries).toEqual([]);
-      const state = await lstat(manager);
-      expect(state.isDirectory()).toBe(true);
-      managerInode = state.ino;
-    } else {
-      await expectMissing(manager);
-      expect(extraEntries).toHaveLength(1);
-      orphan = join(skillsDir, extraEntries[0]);
-      const state = await lstat(orphan);
-      expect(state.isDirectory()).toBe(true);
-      orphanInode = state.ino;
-      await writeFile(join(orphan, "user-sentinel"), "preserve orphan data");
-      orphanEntries = (await readdir(orphan)).sort();
-    }
+describe("manager state and recovery", () => {
+  it("does not create manager state when there is nothing to recover", async () => {
+    const before = (await readdir(skillsDir)).sort();
 
     await recoverSkills(root);
-    if (orphan) {
-      expect((await lstat(orphan)).ino).toBe(orphanInode);
-      expect((await readdir(orphan)).sort()).toEqual(orphanEntries);
-      await expect(readFile(join(orphan, "user-sentinel"), "utf8")).resolves.toBe("preserve orphan data");
-    }
-    await disableSkill(root, "foo", version);
 
-    await expectMissing(enabled);
-    await expect(readFile(join(disabled, "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
-    if (orphan) {
-      expect((await lstat(orphan)).ino).toBe(orphanInode);
-      expect((await readdir(orphan)).sort()).toEqual(orphanEntries);
-      await expect(readFile(join(orphan, "user-sentinel"), "utf8")).resolves.toBe("preserve orphan data");
-    }
-    if (published) expect((await lstat(manager)).ino).toBe(managerInode);
+    expect((await readdir(skillsDir)).sort()).toEqual(before);
+    await expect(readFile(join(skillsDir, "foo", "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
     await expectOutsideUnchanged();
-  }, 30000);
-
-  it.each(faults)("does not activate %s injection in the normal helper", async (fault) => {
-    const enabled = join(skillsDir, "foo");
-    const disabled = join(skillsDir, ".disabled_skills", "foo");
-    const version = await fingerprintSkill(root, "foo", enabled);
-
-    const result = await runBootstrap(fault, version, false);
-
-    expect(result, result.stderr).toMatchObject({ code: 0, signal: null });
-    await expectMissing(enabled);
-    await expect(readFile(join(disabled, "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
-    await expectOutsideUnchanged();
-  }, 30000);
+  });
 
   it.each(["directory", "file", "symlink"] as const)(
-    "does not disturb a foreign manager %s while bootstrap faults are enabled",
+    "does not disturb a foreign manager %s during mutation or recovery",
     async (kind) => {
       const enabled = join(skillsDir, "foo");
       const manager = join(skillsDir, ".skills-manager");
-      const version = await fingerprintSkill(root, "foo", enabled);
+      const version = await fingerprintTree(enabled);
       if (kind === "directory") {
         await mkdir(manager);
         await writeFile(join(manager, "sentinel"), "foreign manager data");
@@ -438,12 +315,9 @@ describe("atomic manager state bootstrap", () => {
       const before = await lstat(manager);
       const rootEntries = (await readdir(skillsDir)).sort();
 
-      const result = await runBootstrap("bootstrap-after-mkdir", version);
+      await expect(disableSkill(root, "foo", version)).rejects.toThrow();
+      await expect(recoverSkills(root)).rejects.toThrow();
 
-      expect(result.code).not.toBe(0);
-      expect(result.signal).toBeNull();
-      expect(result.stderr).not.toMatch(/\bstatus 86\b/);
-      expect(result.stderr).toMatch(/reserved|\.skills-manager/i);
       expect((await readdir(skillsDir)).sort()).toEqual(rootEntries);
       expect((await lstat(manager)).ino).toBe(before.ino);
       if (kind === "directory") {
@@ -455,6 +329,137 @@ describe("atomic manager state bootstrap", () => {
       await expectMissing(join(skillsDir, ".disabled_skills", "foo"));
       await expectOutsideUnchanged();
     },
-    30000,
   );
+
+  it("preserves the source when a file blocks creation of the disabled directory", async () => {
+    const enabled = join(skillsDir, "foo");
+    const disabledDir = join(skillsDir, ".disabled_skills");
+    const version = await fingerprintTree(enabled);
+    const before = await lstat(enabled);
+    await writeFile(disabledDir, "user-owned obstruction");
+    const obstruction = await lstat(disabledDir);
+
+    await expect(disableSkill(root, "foo", version)).rejects.toThrow();
+    await recoverSkills(root);
+
+    expect((await lstat(enabled)).ino).toBe(before.ino);
+    await expect(readFile(join(enabled, "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
+    expect((await lstat(disabledDir)).ino).toBe(obstruction.ino);
+    await expect(readFile(disabledDir, "utf8")).resolves.toBe("user-owned obstruction");
+    await expectOutsideUnchanged();
+
+    await unlink(disabledDir);
+    await disableSkill(root, "foo", version);
+    await expectMissing(enabled);
+    await expect(readFile(join(disabledDir, "foo", "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
+    await recoverSkills(root);
+    await recoverSkills(root);
+    await expectOutsideUnchanged();
+  });
+
+  it("allows a toggle inside the selected root's existing lock", async () => {
+    const enabled = join(skillsDir, "foo");
+    const disabled = join(skillsDir, ".disabled_skills", "foo");
+
+    await withSkillsLock(root, async () => {
+      await disableSkill(root, "foo", await fingerprintTree(enabled));
+      await enableSkill(root, "foo", await fingerprintTree(disabled));
+    });
+
+    await expect(readFile(join(enabled, "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
+    await expectMissing(disabled);
+    await expectOutsideUnchanged();
+  });
+
+  it("serializes independent callers using the same approved root", async () => {
+    const order: string[] = [];
+    const { promise: firstEntered, resolve: entered } = Promise.withResolvers<void>();
+    const { promise: firstReleased, resolve: release } = Promise.withResolvers<void>();
+    const first = withSkillsLock(root, async () => {
+      order.push("first entered");
+      entered();
+      await firstReleased;
+      order.push("first finished");
+    });
+    await firstEntered;
+    const second = withSkillsLock(root, async () => {
+      order.push("second entered");
+      await disableSkill(root, "foo", await fingerprintTree(join(skillsDir, "foo")));
+    });
+    release();
+
+    await Promise.all([first, second]);
+
+    expect(order).toEqual(["first entered", "first finished", "second entered"]);
+    await expectMissing(join(skillsDir, "foo"));
+    await expect(readFile(join(skillsDir, ".disabled_skills", "foo", "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
+    await expectOutsideUnchanged();
+  });
+
+  it("leaves ambiguous bootstrap state intact and refuses to start a mutation", async () => {
+    const enabled = join(skillsDir, "foo");
+    const version = await fingerprintTree(enabled);
+    const orphan = join(skillsDir, ".skills-manager-bootstrap-00000000000000000000000000000000");
+    await mkdir(orphan);
+    await writeFile(join(orphan, "user-sentinel"), "preserve orphan data");
+    const before = await lstat(orphan);
+    const entries = (await readdir(skillsDir)).sort();
+
+    await expect(recoverSkills(root)).rejects.toThrow();
+    await expect(disableSkill(root, "foo", version)).rejects.toThrow();
+
+    expect((await readdir(skillsDir)).sort()).toEqual(entries);
+    expect((await lstat(orphan)).ino).toBe(before.ino);
+    expect(await readdir(orphan)).toEqual(["user-sentinel"]);
+    await expect(readFile(join(orphan, "user-sentinel"), "utf8")).resolves.toBe("preserve orphan data");
+    await expect(readFile(join(enabled, "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
+    await expectMissing(join(skillsDir, ".disabled_skills", "foo"));
+    await expectOutsideUnchanged();
+  });
+
+  it("refuses an ambiguous legacy journal without discarding it or moving the skill", async () => {
+    const enabled = join(skillsDir, "foo");
+    const disabled = join(skillsDir, ".disabled_skills", "foo");
+    const version = await fingerprintTree(enabled);
+    await withSkillsLock(root, async () => {});
+    const manager = join(skillsDir, ".skills-manager");
+    const journal = join(manager, "journal");
+    const legacyBytes = Buffer.from([0x53, 0x4d, 0x00, 0xff, 0x01, 0x00]);
+    await writeFile(journal, legacyBytes, { flag: "wx", mode: 0o600 });
+    const before = await lstat(journal);
+    const entries = (await readdir(manager)).sort();
+
+    await expect(recoverSkills(root)).rejects.toThrow();
+    await expect(disableSkill(root, "foo", version)).rejects.toThrow();
+
+    expect((await readdir(manager)).sort()).toEqual(entries);
+    const after = await lstat(journal);
+    expect([after.ino, after.mode, after.mtimeMs]).toEqual([before.ino, before.mode, before.mtimeMs]);
+    await expect(readFile(journal)).resolves.toEqual(legacyBytes);
+    await expect(readFile(join(enabled, "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
+    await expectMissing(disabled);
+    await expectOutsideUnchanged();
+
+    await unlink(journal);
+    await recoverSkills(root);
+    await disableSkill(root, "foo", version);
+    await expectMissing(enabled);
+    await expect(readFile(join(disabled, "SKILL.md"), "utf8")).resolves.toBe(originalSkill);
+    await expectOutsideUnchanged();
+  });
+
+  it("releases the selected root's lock after a rejected toggle", async () => {
+    const enabled = join(skillsDir, "foo");
+    const disabled = join(skillsDir, ".disabled_skills", "foo");
+    const version = await fingerprintTree(enabled);
+    await writeFile(join(enabled, "SKILL.md"), "changed after review");
+
+    await expect(disableSkill(root, "foo", version)).rejects.toThrow();
+    await disableSkill(root, "foo", await fingerprintTree(enabled));
+
+    await expectMissing(enabled);
+    await expect(readFile(join(disabled, "SKILL.md"), "utf8")).resolves.toBe("changed after review");
+    await expectOutsideUnchanged();
+  });
 });
+

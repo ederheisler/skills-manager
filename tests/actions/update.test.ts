@@ -8,9 +8,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { approveSkillsRoot, type ApprovedSkillsRoot } from "../../src/actions/boundary.js";
 import * as sandbox from "../../src/actions/sandbox.js";
 import { applyPreparedChange, discardPreparedChange, prepareSourceChange } from "../../src/actions/skillsCli.js";
-import { prepareReplacement, prepareUpdate } from "../../src/actions/update.js";
+import { prepareReplacement, prepareUpdate, prepareUpdates } from "../../src/actions/update.js";
+import { checkForUpdates } from "../../src/actions/checkUpdates.js";
 import { scanSkills } from "../../src/state/repo.js";
-import type { LockEntry } from "../../src/state/types.js";
 import { matchUpstreamReceipt } from "../../src/state/upstreamProvenance.js";
 
 const roots: string[] = [];
@@ -110,57 +110,27 @@ async function gitRemote(base: string): Promise<GitRemoteFixture> {
   return { url: `http://127.0.0.1:${address.port}/owner/fixture.git`, work, bare, requests, git };
 }
 
-async function vercelFixture() {
+async function trackedFixture() {
   const selected = await fixture();
   const remote = await gitRemote(selected.base);
-  const ref = "release@example";
-  const hash = await remote.git(remote.work, "rev-parse", `${ref}^{tree}`);
-  const entry: LockEntry = {
-    source: "owner/fixture", sourceType: "github", sourceUrl: "https://github.com/owner/fixture.git",
-    skillPath: "SKILL.md", skillFolderHash: hash, ref,
+  const ref = "release";
+  const entry = {
+    source: remote.url, sourceType: "git", sourceUrl: remote.url,
+    skillPath: "SKILL.md", skillFolderHash: "0".repeat(64), ref, installMode: "copy",
     installedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   };
-  const lockBytes = JSON.stringify({ version: 3, skills: { example: entry } }, null, 2);
+  const unrelated = { ...entry, source: "https://elsewhere.invalid/repo.git", sourceUrl: "https://elsewhere.invalid/repo.git" };
+  const lockBytes = JSON.stringify({ version: 3, skills: { example: entry, unrelated }, dismissed: { welcome: true } }, null, 2);
   await writeFile(selected.lock, lockBytes);
+  await remote.git(remote.work, "checkout", "-q", ref);
+  const remoteSkill = "---\nname: example\ndescription: Updated Git fixture\n---\n\nnew upstream content\n";
+  await writeFile(path.join(remote.work, "SKILL.md"), remoteSkill);
+  await writeFile(path.join(remote.work, "upstream-only.bin"), Buffer.from([0, 1, 2, 255]));
+  await remote.git(remote.work, "add", ".");
+  await remote.git(remote.work, "commit", "-q", "-m", "update fixture");
+  await remote.git(remote.work, "push", "-q", remote.bare, ref);
   const [skill] = await scanSkills(selected.root.path);
-  return { ...selected, ...remote, entry, lockBytes, skill };
-}
-
-/** Redirect the approved GitHub source to loopback and normalize the staged GitHub record. */
-function redirectVercelInstaller(url: string, entry: LockEntry, remoteHash = entry.skillFolderHash) {
-  const realInstaller = sandbox.runConfinedSkills;
-  return vi.spyOn(sandbox, "runConfinedSkills").mockImplementation(async (workspace, args, localSource) => {
-    const approvedSource = `${entry.sourceUrl}#${encodeURIComponent(entry.ref!)}`;
-    if (args[0] !== "add" || args[1] !== approvedSource || localSource) {
-      throw new Error("Unexpected installer source in Vercel fixture");
-    }
-    const redirected = [...args];
-    redirected[1] = `${url}#${encodeURIComponent(entry.ref!)}`;
-    const output = await realInstaller(workspace, redirected);
-    const lockPath = path.join(workspace, "state", "skills", ".skill-lock.json");
-    const staged = JSON.parse(await readFile(lockPath, "utf8"));
-    expect(staged.skills.example.ref).toBe(entry.ref);
-    Object.assign(staged.skills.example, {
-      source: entry.source, sourceType: entry.sourceType, sourceUrl: entry.sourceUrl, skillPath: entry.skillPath, skillFolderHash: remoteHash,
-    });
-    await writeFile(lockPath, JSON.stringify(staged));
-    const result = JSON.parse(output.stdout);
-    for (const skill of result) skill.source = entry.source;
-    return { ...output, stdout: JSON.stringify(result) };
-  });
-}
-
-async function publishVercelUpdate({ work, bare, git, entry }: GitRemoteFixture & { entry: LockEntry }) {
-  const remoteSkill = "---\nname: example\ndescription: Updated Vercel fixture\n---\n\nnew upstream content\n";
-  const remoteNote = "new upstream file\n";
-  await git(work, "checkout", "-q", entry.ref!);
-  await writeFile(path.join(work, "SKILL.md"), remoteSkill);
-  await writeFile(path.join(work, "upstream-only.txt"), remoteNote);
-  await git(work, "add", ".");
-  await git(work, "commit", "-q", "-m", "update Vercel fixture");
-  await git(work, "push", "-q", bare, entry.ref!);
-  const remoteHash = await git(work, "rev-parse", `${entry.ref}^{tree}`);
-  return { remoteSkill, remoteNote, remoteHash };
+  return { ...selected, ...remote, entry, unrelated, lockBytes, skill, remoteSkill };
 }
 
 afterEach(async () => {
@@ -175,13 +145,17 @@ afterEach(async () => {
 
 describe("reviewed skill replacement", () => {
   it("requires a source for an adopted unknown-baseline skill", async () => {
-    const { root, target } = await fixture();
+    const { root, target, lock } = await fixture();
     const [skill] = await scanSkills(root.path);
+    await writeFile(lock, JSON.stringify({ version: 3, skills: {} }));
     expect(skill.provenance.kind).toBe("unknown");
     const approved = { source: "owner/repository", sourceType: "github", sourceUrl: "https://github.com/owner/repository.git",
       skillPath: "SKILL.md", skillFolderHash: "", installedAt: "", updatedAt: "" };
     const installer = vi.spyOn(sandbox, "runConfinedSkills").mockRejectedValue(new Error("Unexpected network"));
-    await expect(prepareUpdate(root, skill, approved)).rejects.toThrow(/valid saved remote source association/i);
+    const prepared = await prepareUpdate(root, skill, approved);
+    expect(prepared.changes).toEqual([]);
+    expect(prepared.failed).toEqual([expect.objectContaining({ id: skill.id, reason: expect.stringMatching(/does not track/i) })]);
+    await discardPreparedChange(prepared);
     expect(installer).not.toHaveBeenCalled();
     expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("old locally edited text");
   });
@@ -266,283 +240,174 @@ describe("reviewed skill replacement", () => {
     expect(await readFile(sentinel, "utf8")).toBe("untouched");
   });
 
-  it.each(["release@example", "release%40example"])("updates the exact reviewed ref %s", async (ref) => {
-    const { base, root, target } = await fixture();
-    const { url, work, bare, git } = await gitRemote(base);
-    const [adopted] = await scanSkills(root.path);
-    await applyPreparedChange(await prepareReplacement(root, adopted, `${url}#${encodeURIComponent(ref)}`));
-    let [skill] = await scanSkills(root.path);
-    expect(skill.lockEntry?.ref).toBe(ref);
-    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain(`initial ${ref}`);
 
-    await git(work, "checkout", "-q", ref);
-    await writeFile(path.join(work, "SKILL.md"), `---\nname: example\ndescription: Updated Git fixture\n---\n\nupdated ${ref}\n`);
-    await git(work, "commit", "-qam", "update");
-    await git(work, "push", "-q", bare, ref);
-    const approved = skill.lockEntry;
-    if (!approved) throw new Error("Expected a saved remote source.");
-    const preview = await prepareUpdate(root, skill, approved);
-    expect(preview.changes[0].review).toContain(`updated ${ref}`);
-    expect(preview.changes[0].review).not.toContain("wrong release branch");
-    await applyPreparedChange(preview);
-    [skill] = await scanSkills(root.path);
-    expect(skill.lockEntry?.ref).toBe(ref);
-    expect((await matchUpstreamReceipt(root.path, target, "example"))?.historicalBaseline).toBe("unknown");
-    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain(`updated ${ref}`);
-  }, 120_000);
-
-  it("refuses a different approval or changed saved source before contacting the remote", async () => {
-    const { base, root, target } = await fixture();
-    const { url, requests } = await gitRemote(base);
-    const [adopted] = await scanSkills(root.path);
-    await applyPreparedChange(await prepareReplacement(root, adopted, `${url}#release%40example`));
-    const [skill] = await scanSkills(root.path);
-    if (!skill.lockEntry) throw new Error("Expected a saved remote source.");
-    const approved = { ...skill.lockEntry };
-    const requestCount = requests.length;
-    for (const changed of [
-      { ...approved, sourceUrl: `${url}-other` },
-      { ...approved, ref: "release" },
-      { ...approved, updatedAt: "different" },
-    ]) {
-      await expect(prepareUpdate(root, skill, changed)).rejects.toThrow(/source.*changed.*approval/i);
-      expect(requests).toHaveLength(requestCount);
-    }
-    const receiptPath = path.join(root.path, ".skills-manager", "metadata", "example.json");
-    const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
-    receipt.entry.ref = "release";
-    await writeFile(receiptPath, JSON.stringify(receipt));
-
-    await expect(prepareUpdate(root, skill, approved)).rejects.toThrow(/source.*changed.*approval/i);
-    expect(requests).toHaveLength(requestCount);
-    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("initial release@example");
-  }, 120_000);
-
-  it("reviews and applies a Vercel v3 source over the complete locally edited disabled skill", async () => {
-    const fixture = await vercelFixture();
-    const { root, target, lock, lockBytes, entry, skill, requests } = fixture;
-    expect(skill.lockEntry).toEqual(entry);
-    expect(skill.provenance).toEqual({ kind: "source", source: entry.source, sourceUrl: entry.sourceUrl });
-    expect(requests).toHaveLength(0);
-    expect(await readFile(lock, "utf8")).toBe(lockBytes);
-    await expect(lstat(path.join(root.path, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
-
-    const { remoteSkill, remoteNote, remoteHash } = await publishVercelUpdate(fixture);
-    expect(remoteHash).not.toBe(entry.skillFolderHash);
-    const localSkill = "---\nname: example\ndescription: Local edit\n---\n\nedited after source approval\n";
-    const localNote = "local-only content requiring review\n";
-    await writeFile(path.join(target, "SKILL.md"), localSkill);
-    await writeFile(path.join(target, "local-only.txt"), localNote);
-    const installer = redirectVercelInstaller(fixture.url, entry, remoteHash);
-    const preview = await prepareUpdate(root, skill, structuredClone(entry));
-    try {
-      expect(installer).toHaveBeenCalledTimes(1);
-      expect(requests.length).toBeGreaterThan(0);
-      expect(preview.changes).toHaveLength(1);
-      expect(preview.changes[0]).toMatchObject({ destination: target, enabled: false, action: "replace" });
-      const review = preview.changes[0].review;
-      expect(review).toContain(`--- SKILL.md (changed)\nBEFORE:\n${localSkill}\nAFTER:\n${remoteSkill}`);
-      expect(review).toContain(`--- local-only.txt (removed)\nBEFORE:\n${localNote}`);
-      expect(review).toContain(`--- upstream-only.txt (added)\nAFTER:\n${remoteNote}`);
-      expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toBe(localSkill);
-      expect(await readFile(lock, "utf8")).toBe(lockBytes);
-      await expect(lstat(path.join(root.path, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
-
-      await applyPreparedChange(preview);
-      expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toBe(remoteSkill);
-      expect(await readFile(path.join(target, "upstream-only.txt"), "utf8")).toBe(remoteNote);
-      await expect(lstat(path.join(target, "local-only.txt"))).rejects.toMatchObject({ code: "ENOENT" });
-      await expect(lstat(path.join(root.path, "example"))).rejects.toMatchObject({ code: "ENOENT" });
-      expect(await readFile(lock, "utf8")).toBe(lockBytes);
-      const receipt = await matchUpstreamReceipt(root.path, target, "example");
-      expect(receipt?.entry).toMatchObject({ source: entry.source, skillFolderHash: remoteHash });
-      const [rescanned] = await scanSkills(root.path);
-      expect(rescanned.lockEntry).toEqual(receipt?.entry);
-    } finally {
-      await discardPreparedChange(preview);
-    }
-  }, 120_000);
-
-  it("compares the full approved Vercel record before contacting its source", async () => {
-    const { root, target, lock, lockBytes, entry, skill, url, requests } = await vercelFixture();
-    expect(skill.lockEntry).toEqual(entry);
-    const installer = redirectVercelInstaller(url, entry);
-    for (const changed of [
-      { ...entry, source: "other/fixture" },
-      { ...entry, sourceType: "git" },
-      { ...entry, sourceUrl: "https://github.com/other/fixture.git" },
-      { ...entry, skillPath: "other/SKILL.md" },
-      { ...entry, skillFolderHash: "0".repeat(40) },
-      { ...entry, installedAt: "different" },
-      { ...entry, updatedAt: "different" },
-      { ...entry, ref: "release" },
-      { ...entry, additionalMetadata: { changed: true } },
-    ]) {
-      await expect(prepareUpdate(root, skill, changed)).rejects.toThrow(/saved source changed since approval/i);
-    }
-    expect(installer).not.toHaveBeenCalled();
-    expect(requests).toHaveLength(0);
-    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("old locally edited text");
-    expect(await readFile(lock, "utf8")).toBe(lockBytes);
-    await expect(lstat(path.join(root.path, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
-  }, 120_000);
-
-  it.each([
-    "changed timestamp", "changed hash", "changed ref", "changed source", "added metadata",
-    "corrupt JSON", "invalid version", "removed entry", "removed lock",
-  ])("refuses a %s after Vercel source approval without contacting it", async (change) => {
-    const { root, target, lock, entry, skill, url, requests } = await vercelFixture();
-    expect(skill.lockEntry).toEqual(entry);
-    const installer = redirectVercelInstaller(url, entry);
-    if (change === "removed lock") {
-      await rm(lock);
-    } else if (change === "corrupt JSON") {
-      await writeFile(lock, "{broken");
-    } else {
-      let changed: object = entry;
-      if (change === "changed timestamp") changed = { ...entry, updatedAt: "different" };
-      if (change === "changed hash") changed = { ...entry, skillFolderHash: "0".repeat(40) };
-      if (change === "changed ref") changed = { ...entry, ref: "release" };
-      if (change === "changed source") changed = { ...entry, source: "other/fixture", sourceUrl: "https://github.com/other/fixture.git" };
-      if (change === "added metadata") changed = { ...entry, additionalMetadata: { reviewed: false } };
-      await writeFile(lock, JSON.stringify({
-        version: change === "invalid version" ? 2 : 3,
-        skills: change === "removed entry" ? {} : { example: changed },
-      }));
-    }
-    await expect(prepareUpdate(root, skill, entry)).rejects.toThrow(/saved (?:remote )?source|source changed/i);
-    expect(installer).not.toHaveBeenCalled();
-    expect(requests).toHaveLength(0);
-    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("old locally edited text");
-    await expect(lstat(path.join(root.path, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
-  }, 120_000);
-
-  it.each(["duplicate", "leaf symlink", "disabled symlink", "root replacement", "missing SKILL.md", "SKILL.md symlink"])(
-    "refuses a %s introduced after Vercel source approval before contacting it",
-    async (change) => {
-      const { base, root, target, lock, lockBytes, entry, skill, url, requests } = await vercelFixture();
-      expect(skill.lockEntry).toEqual(entry);
-      const installer = redirectVercelInstaller(url, entry);
-      const originalText = await readFile(path.join(target, "SKILL.md"), "utf8");
-      const sentinelText = "unapproved substitute must remain untouched\n";
-      let original = path.join(target, "SKILL.md");
-      let substitute: string | null = null;
-      if (change === "duplicate") {
-        const duplicate = path.join(root.path, "example");
-        await mkdir(duplicate);
-        substitute = path.join(duplicate, "SKILL.md");
-      } else if (change === "leaf symlink") {
-        const saved = path.join(base, "saved-example");
-        const outside = path.join(base, "outside-example");
-        await rename(target, saved);
-        await mkdir(outside);
-        await symlink(outside, target);
-        original = path.join(saved, "SKILL.md");
-        substitute = path.join(outside, "SKILL.md");
-      } else if (change === "disabled symlink") {
-        const disabled = path.dirname(target);
-        const saved = path.join(base, "saved-disabled");
-        const outside = path.join(base, "outside-disabled");
-        await rename(disabled, saved);
-        await mkdir(path.join(outside, "example"), { recursive: true });
-        await symlink(outside, disabled);
-        original = path.join(saved, "example", "SKILL.md");
-        substitute = path.join(outside, "example", "SKILL.md");
-      } else if (change === "root replacement") {
-        const saved = path.join(base, "saved-root");
-        await rename(root.path, saved);
-        await mkdir(target, { recursive: true });
-        original = path.join(saved, ".disabled_skills", "example", "SKILL.md");
-        substitute = path.join(target, "SKILL.md");
-      } else {
-        const saved = path.join(base, "saved-SKILL.md");
-        await rename(original, saved);
-        original = saved;
-        if (change === "SKILL.md symlink") {
-          substitute = path.join(base, "outside-SKILL.md");
-          await symlink(substitute, path.join(target, "SKILL.md"));
-        }
-      }
-      if (substitute) await writeFile(substitute, sentinelText);
-      await expect(prepareUpdate(root, skill, entry)).rejects.toThrow();
-      expect(installer).not.toHaveBeenCalled();
-      expect(requests).toHaveLength(0);
-      expect(await readFile(original, "utf8")).toBe(originalText);
-      if (substitute) expect(await readFile(substitute, "utf8")).toBe(sentinelText);
-      else await expect(lstat(path.join(target, "SKILL.md"))).rejects.toMatchObject({ code: "ENOENT" });
-      expect(await readFile(lock, "utf8")).toBe(lockBytes);
-      await expect(lstat(path.join(root.path, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
-    }, 120_000,
-  );
-
-  it("refuses an active Vercel skill when the empty disabled directory becomes a symlink", async () => {
-    const { base, root, target, lock, lockBytes, entry, url, requests } = await vercelFixture();
-    const active = path.join(root.path, "example");
-    const disabled = path.join(root.path, ".disabled_skills");
-    await rename(target, active);
-    const [skill] = await scanSkills(root.path);
-    expect(skill.lockEntry).toEqual(entry);
-    const installer = redirectVercelInstaller(url, entry);
-    const originalText = await readFile(path.join(active, "SKILL.md"), "utf8");
-    const outside = path.join(base, "outside-empty-disabled");
-    await mkdir(outside);
-    await writeFile(path.join(outside, "sentinel"), "outside untouched");
-    await rename(disabled, path.join(base, "saved-empty-disabled"));
-    await symlink(outside, disabled);
-
-    await expect(prepareUpdate(root, skill, entry)).rejects.toThrow();
-    expect(installer).not.toHaveBeenCalled();
-    expect(requests).toHaveLength(0);
-    expect(await readFile(path.join(active, "SKILL.md"), "utf8")).toBe(originalText);
-    expect(await readFile(path.join(outside, "sentinel"), "utf8")).toBe("outside untouched");
-    await expect(lstat(path.join(outside, "example"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readFile(lock, "utf8")).toBe(lockBytes);
-    await expect(lstat(path.join(root.path, ".skills-manager"))).rejects.toMatchObject({ code: "ENOENT" });
-  }, 120_000);
-
-  it.each(["staged content", "destination content"])(
-    "refuses Vercel %s changed after review without overwriting the destination",
-    async (change) => {
-      const fixture = await vercelFixture();
-      const { root, target, lock, lockBytes, entry, skill } = fixture;
-      const { remoteHash } = await publishVercelUpdate(fixture);
-      const installer = redirectVercelInstaller(fixture.url, entry, remoteHash);
-      const originalText = await readFile(path.join(target, "SKILL.md"), "utf8");
-      const preview = await prepareUpdate(root, skill, entry);
-      try {
-        expect(installer).toHaveBeenCalledTimes(1);
-        expect(fixture.requests.length).toBeGreaterThan(0);
-        const edited = "new edit after review\n";
-        const file = change === "staged content"
-          ? path.join(preview.workspace, "home", ".agents", "skills", "example", "SKILL.md")
-          : path.join(target, "SKILL.md");
-        await writeFile(file, edited);
-        await expect(applyPreparedChange(preview)).rejects.toThrow(/changed after review/i);
-        expect(await readFile(path.join(target, "SKILL.md"), "utf8"))
-          .toBe(change === "destination content" ? edited : originalText);
-        expect(await readFile(lock, "utf8")).toBe(lockBytes);
-      } finally {
-        await discardPreparedChange(preview);
-      }
-    }, 120_000,
-  );
-
-  it("honors a URL fragment selector after its ref", async () => {
-    const { base, root } = await fixture();
+  it("refuses a remote replacement whose CLI lock name differs from its destination", async () => {
+    const { base, root, lock, target } = await fixture();
+    await writeFile(lock, JSON.stringify({ version: 3, skills: {} }));
     const { url } = await gitRemote(base);
     const [skill] = await scanSkills(root.path);
-    const preview = await prepareReplacement(root, skill, `${url}#release@another`);
-    expect(preview.changes).toHaveLength(1);
-    expect(preview.changes[0].review).toContain("unselected skill");
-    await discardPreparedChange(preview);
+    await expect(prepareReplacement(root, skill, `${url}#release@another`)).rejects.toThrow(/tracks this skill as "another".*normal name/i);
+    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("old locally edited text");
   }, 120_000);
 
   it("refuses to import when the real installer resolves a different ref", async () => {
-    const { base, root, target } = await fixture();
+    const { base, root, target, lock } = await fixture();
+    await writeFile(lock, JSON.stringify({ version: 3, skills: {} }));
     const { url } = await gitRemote(base);
     const [skill] = await scanSkills(root.path);
     await expect(prepareSourceChange(root, `${url}#release`, skill, { ref: "release@example" }))
       .rejects.toThrow(/ref/i);
     expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("old locally edited text");
+  }, 120_000);
+});
+
+describe("skills CLI updates", () => {
+  it("publishes the real CLI update and lock while keeping a disabled skill disabled", async () => {
+    const { root, target, lock, sentinel, entry, unrelated, skill, remoteSkill, requests } = await trackedFixture();
+    await symlink(sentinel, path.join(target, "outside-link"));
+    const prepared = await prepareUpdates(root, [skill]);
+    expect(prepared.failed).toEqual([]);
+    expect(prepared.changes.map((change) => change.name)).toEqual(["example"]);
+    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("old locally edited text");
+    await applyPreparedChange(prepared);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toBe(remoteSkill);
+    expect(await readFile(path.join(target, "upstream-only.bin"))).toEqual(Buffer.from([0, 1, 2, 255]));
+    expect(await readFile(sentinel, "utf8")).toBe("untouched");
+    await expect(lstat(path.join(root.path, "example"))).rejects.toMatchObject({ code: "ENOENT" });
+    const updatedLock = JSON.parse(await readFile(lock, "utf8"));
+    expect(updatedLock.skills.example.skillFolderHash).not.toBe(entry.skillFolderHash);
+    expect(updatedLock.skills.example.installMode).toBe("copy");
+    expect(updatedLock.skills.unrelated).toEqual(unrelated);
+    expect(updatedLock.dismissed).toEqual({ welcome: true });
+    const [rescanned] = await scanSkills(root.path);
+    expect(rescanned.lockEntry).toEqual(updatedLock.skills.example);
+    const check = await checkForUpdates([rescanned]);
+    expect(check.updated).toEqual([]);
+    expect(check.unavailable).toEqual([]);
+    const current = await prepareUpdates(root, [rescanned]);
+    expect(current.changes).toEqual([]);
+    expect(current.failed).toEqual([]);
+    await discardPreparedChange(current);
+  }, 120_000);
+
+  it("reports a current skill correctly when the same CLI batch updates another skill", async () => {
+    const { root, target, lock, url } = await trackedFixture();
+    const currentPath = path.join(root.path, "another", "SKILL.md");
+    await mkdir(path.dirname(currentPath));
+    await writeFile(currentPath, "---\nname: another\ndescription: Existing fixture\n---\n");
+    const currentSkill = (await scanSkills(root.path)).find((skill) => skill.name === "another")!;
+    const add = await prepareReplacement(root, currentSkill, `${url}#release@another`);
+    await applyPreparedChange(add);
+    const currentContents = await readFile(currentPath, "utf8");
+    const currentEntry = JSON.parse(await readFile(lock, "utf8")).skills.another;
+    const selected = await scanSkills(root.path);
+    expect(selected.map((skill) => skill.name).sort()).toEqual(["another", "example"]);
+    const prepared = await prepareUpdates(root, selected);
+    expect(prepared.changes.map((change) => change.name)).toEqual(["example"]);
+    expect(prepared.failed).toEqual([]);
+    await applyPreparedChange(prepared);
+    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("new upstream content");
+    expect(await readFile(currentPath, "utf8")).toBe(currentContents);
+    expect(JSON.parse(await readFile(lock, "utf8")).skills.another).toEqual(currentEntry);
+  }, 120_000);
+
+  it("keeps successful CLI updates when another selected source fails", async () => {
+    const { root, lock, target, entry, skill } = await trackedFixture();
+    const brokenPath = path.join(root.path, "broken");
+    await mkdir(brokenPath);
+    await writeFile(path.join(brokenPath, "SKILL.md"), "---\nname: broken\ndescription: unavailable\n---\n");
+    const broken = { ...entry, source: entry.source.replace("fixture.git", "missing.git"),
+      sourceUrl: entry.sourceUrl.replace("fixture.git", "missing.git") };
+    const original = JSON.parse(await readFile(lock, "utf8"));
+    original.skills.broken = broken;
+    await writeFile(lock, JSON.stringify(original));
+    const rescanned = await scanSkills(root.path);
+    const failedSkill = rescanned.find((item) => item.name === "broken")!;
+    const prepared = await prepareUpdates(root, [skill, failedSkill]);
+    expect(prepared.changes.map((change) => change.name)).toEqual(["example"]);
+    expect(prepared.failed).toEqual([expect.objectContaining({ id: failedSkill.id, name: "broken" })]);
+    await applyPreparedChange(prepared);
+    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("new upstream content");
+    expect(await readFile(path.join(brokenPath, "SKILL.md"), "utf8")).toContain("unavailable");
+    const updated = JSON.parse(await readFile(lock, "utf8"));
+    expect(updated.skills.broken).toEqual(broken);
+    expect(updated.skills.example.skillFolderHash).not.toBe(entry.skillFolderHash);
+  }, 120_000);
+
+  it.each(["source", "lock", "destination"])("refuses a changed %s without publishing an unsafe update", async (changed) => {
+    const { root, target, lock, entry, skill, lockBytes, requests } = await trackedFixture();
+    if (changed === "source") {
+      const replacement = { ...entry, sourceUrl: entry.sourceUrl.replace("fixture.git", "missing.git") };
+      await writeFile(lock, JSON.stringify({ version: 3, skills: { example: replacement } }));
+      const prepared = await prepareUpdate(root, skill, entry);
+      expect(prepared.changes).toEqual([]);
+      expect(prepared.failed?.[0].reason).toMatch(/changed/i);
+      expect(requests).toEqual([]);
+      await discardPreparedChange(prepared);
+      return;
+    }
+    const prepared = await prepareUpdate(root, skill, entry);
+    expect(prepared.changes).toHaveLength(1);
+    if (changed === "lock") await writeFile(lock, `${lockBytes}\n`);
+    else await writeFile(path.join(target, "SKILL.md"), "later local edit");
+    await expect(applyPreparedChange(prepared)).rejects.toThrow(/changed/i);
+    expect(await readFile(lock, "utf8")).toBe(changed === "lock" ? `${lockBytes}\n` : lockBytes);
+    expect(await readFile(path.join(target, "SKILL.md"), "utf8"))
+      .toBe(changed === "destination" ? "later local edit" : "---\nname: example\ndescription: Old\n---\n\nold locally edited text\n");
+  }, 120_000);
+
+  it("creates the shared CLI lock for a real remote replacement", async () => {
+    const { base, root, target, lock } = await fixture();
+    await rm(lock);
+    const { url } = await gitRemote(base);
+    const [skill] = await scanSkills(root.path);
+    const prepared = await prepareReplacement(root, skill, `${url}#release`);
+    await applyPreparedChange(prepared);
+    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("wrong release branch");
+    const cliLock = JSON.parse(await readFile(lock, "utf8"));
+    expect(cliLock.skills.example).toMatchObject({ sourceType: "git", sourceUrl: url, ref: "release" });
+    expect((await scanSkills(root.path))[0].lockEntry).toEqual(cliLock.skills.example);
+  }, 120_000);
+
+  it.each(["", "{broken"])("refuses a corrupt existing CLI lock before contacting a remote", async (corrupt) => {
+    const { base, root, target, lock } = await fixture();
+    await writeFile(lock, corrupt);
+    const { url, requests } = await gitRemote(base);
+    const [skill] = await scanSkills(root.path);
+    await expect(prepareReplacement(root, skill, `${url}#release`)).rejects.toThrow(/lock is corrupt/i);
+    expect(requests).toEqual([]);
+    expect(await readFile(lock, "utf8")).toBe(corrupt);
+    expect(await readFile(path.join(target, "SKILL.md"), "utf8")).toContain("old locally edited text");
+  }, 120_000);
+
+  it.each([
+    ["update", "symlink"],
+    ["add", "oversized"],
+  ] as const)("rejects a %s CLI-generated %s lock before publishing", async (action, artifact) => {
+    const { root, target, lock, lockBytes, sentinel, skill, entry, url } = await trackedFixture();
+    const originalRunner = sandbox.runConfinedSkills;
+    let workspace = "";
+    vi.spyOn(sandbox, "runConfinedSkills").mockImplementation(async (dir, args, localSource) => {
+      const result = await originalRunner(dir, args, localSource);
+      workspace = dir;
+      const generatedLock = path.join(dir, "state", "skills", ".skill-lock.json");
+      if (artifact === "symlink") {
+        await rm(generatedLock);
+        await symlink(sentinel, generatedLock);
+      } else {
+        await writeFile(generatedLock, "x".repeat(1024 * 1024 + 1));
+      }
+      return result;
+    });
+    const preparation = action === "update"
+      ? prepareUpdate(root, skill, entry)
+      : prepareReplacement(root, skill, `${url}#release`);
+    await expect(preparation).rejects.toThrow();
+    expect(workspace).not.toBe("");
+    await expect(lstat(workspace)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(target + "/SKILL.md", "utf8")).toContain("old locally edited text");
+    expect(await readFile(lock, "utf8")).toBe(lockBytes);
+    expect(await readFile(sentinel, "utf8")).toBe("untouched");
   }, 120_000);
 });

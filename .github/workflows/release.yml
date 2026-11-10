@@ -134,14 +134,14 @@ jobs:
               draft: false, prerelease,
               make_latest: prerelease ? 'false' : 'legacy',
               body: [
-                'Requires Node.js >=26.13.0 and <27, npm, Git >=2.48, and a C11 compiler (`cc`).',
+                'Requires Node.js >=26.13.0 and <27, npm, and Git for installation. Optional in-app Git actions require Git >=2.48.',
                 '',
                 'Run from this tagged repository:',
                 '```sh',
                 `npx --yes github:ederheisler/skills-manager#${tag}`,
                 '```',
                 '',
-                'GitHub provides source archives automatically. No prebuilt native binaries or npm registry package are published.',
+                'GitHub provides source archives automatically. The app builds TypeScript locally and uses OpenTUI published prebuilt dependencies. No app-owned native helpers or npm registry package are published.',
               ].join('\n'),
             });
             core.notice(`Published ${tag} at ${sha}.`);
