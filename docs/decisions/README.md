@@ -20,3 +20,7 @@ These records explain accepted decisions and their reasons. For current behavior
 - [Application update planning](2026-11-03-open-source-portability.md#application-update-planning).
 - [Update controls and check results](2026-11-03-open-source-portability.md#update-controls-and-check-results).
 - [Vercel skills CLI updates](2026-11-03-open-source-portability.md#vercel-skills-cli-updates).
+- [Skills CLI backend and immediate updates](2026-11-03-open-source-portability.md#skills-cli-backend-and-immediate-updates).
+- [Npx-first launch and agent guidance](2026-11-03-open-source-portability.md#npx-first-launch-and-agent-guidance).
+- [In-app onboarding and Git entry](2026-11-03-open-source-portability.md#in-app-onboarding-and-git-entry).
+- [In-process local safeguards](2026-11-03-open-source-portability.md#in-process-local-safeguards).

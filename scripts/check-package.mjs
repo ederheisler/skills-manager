@@ -11,10 +11,6 @@ const generatedAssets = new Set(['dist/state/buildIdentity.json']);
 const requiredAssets = new Set([
   'LICENSE',
   'THIRD_PARTY_NOTICES',
-  'native/skills-boundary',
-  'native/skills-boundary.platform.json',
-  'native/skills-git-boundary',
-  'native/skills-git-boundary.platform.json',
 ]);
 
 for (const file of manifest.files) {
@@ -33,7 +29,7 @@ for (const name of await readdir(root)) {
   }
 }
 
-const directories = new Set(['src', 'native']);
+const directories = new Set(['src']);
 for (const file of listed) {
   for (let directory = path.posix.dirname(file); directory !== '.'; directory = path.posix.dirname(directory)) {
     directories.add(directory);
@@ -44,7 +40,7 @@ for (const directory of directories) {
   try {
     stats = await lstat(path.join(root, directory));
   } catch (error) {
-    if (beforeBuild && error.code === 'ENOENT' && directory !== 'src' && directory !== 'native') continue;
+    if (beforeBuild && error.code === 'ENOENT' && directory !== 'src') continue;
     throw error;
   }
   if (!stats.isDirectory()) throw new Error(`Package directory must not be a link: ${directory}`);
@@ -67,10 +63,10 @@ async function inspectSources(directory, relative = '') {
   }
 }
 
-async function requireRegularFile(relative, executable = false) {
+async function requireRegularFile(relative) {
   const stats = await lstat(path.join(root, relative));
-  if (!stats.isFile() || stats.size === 0 || (executable && (stats.mode & 0o111) === 0)) {
-    throw new Error(`Required package file is not a nonempty${executable ? ' executable' : ''} regular file: ${relative}`);
+  if (!stats.isFile() || stats.size === 0 || stats.nlink !== 1) {
+    throw new Error(`Required package file is not a nonempty, singly linked regular file: ${relative}`);
   }
 }
 
@@ -110,15 +106,5 @@ if (!beforeBuild) {
   if (!knownIdentity && !unknownIdentity) throw new Error('Build identity metadata is missing or invalid.');
   for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES']) {
     await requireRegularFile(file);
-  }
-  for (const helper of ['skills-boundary', 'skills-git-boundary']) {
-    await requireRegularFile(`native/${helper}`, true);
-    await requireRegularFile(`native/${helper}.platform.json`);
-    const nativePlatform = JSON.parse(await readFile(path.join(root, `native/${helper}.platform.json`), 'utf8'));
-    const libc = process.platform === 'linux' && process.report.getReport().header.glibcVersionRuntime ? 'glibc' : null;
-    if (nativePlatform.platform !== process.platform || nativePlatform.arch !== process.arch || nativePlatform.libc !== libc ||
-        (process.platform === 'linux' && libc !== 'glibc')) {
-      throw new Error(`The ${helper} native helper does not match the current operating system, architecture, and supported libc.`);
-    }
   }
 }

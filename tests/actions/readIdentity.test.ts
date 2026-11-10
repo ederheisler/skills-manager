@@ -1,16 +1,12 @@
-import { spawnSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { approveSkillsRoot, listSkillPaths, readSkillFiles, readSkillPath, withSkillsLock } from "../../src/actions/boundary.js";
 
 const relative = "alpha/docs/read.txt";
 let sandbox: string;
 let root: string;
-let raceDirectory: string;
-let raceHelper: string;
 
 beforeEach(async () => {
   sandbox = await realpath(await mkdtemp(join(tmpdir(), "skills-read-identity-")));
@@ -157,78 +153,42 @@ describe("stable path identity", () => {
   });
 });
 
-describe("strict in-read snapshots", () => {
-  beforeAll(async () => {
-    raceDirectory = await realpath(await mkdtemp(join(tmpdir(), "skills-read-race-helper-")));
-    raceHelper = join(raceDirectory, "skills-boundary");
-    const source = fileURLToPath(new URL("../../native/skills-boundary.c", import.meta.url));
-    // Intercept only the real file read, changing the filesystem after its pinned
-    // snapshot and before the native command performs its final chain check.
-    const instrumented = `
-#define _GNU_SOURCE 1
-#define _DARWIN_C_SOURCE 1
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-static ssize_t racing_read(int fd, void *buffer, size_t size);
-#define read racing_read
-#define main boundary_original_main
-#include ${JSON.stringify(source)}
-#undef main
-#undef read
-static ssize_t racing_read(int fd, void *buffer, size_t size) {
-    static int changed;
-    ssize_t result = read(fd, buffer, size);
-    struct stat opened, named;
-    const char *file = getenv("READ_RACE_FILE");
-    const char *kind = getenv("READ_RACE_KIND");
-    if (!changed && result > 0 && file && kind && fstat(fd, &opened) == 0 &&
-        lstat(file, &named) == 0 && opened.st_dev == named.st_dev && opened.st_ino == named.st_ino) {
-        changed = 1;
-        if (!strcmp(kind, "leaf")) {
-            int output = open(file, O_WRONLY | O_NOFOLLOW);
-            if (output < 0 || pwrite(output, "X", 1, 0) != 1 ||
-                fchmod(output, (named.st_mode & 07777) ^ 0100) < 0 || close(output) < 0) _exit(97);
-        } else if (!strcmp(kind, "sibling")) {
-            if (mkdir(getenv("READ_RACE_PATH"), 0700) < 0) _exit(97);
-        } else if (!strcmp(kind, "replace")) {
-            if (rename(getenv("READ_RACE_PATH"), getenv("READ_RACE_PARKED")) < 0 ||
-                rename(getenv("READ_RACE_REPLACEMENT"), getenv("READ_RACE_PATH")) < 0) _exit(97);
-        } else _exit(97);
-    }
-    return result;
-}
-int main(int argc, char **argv) { return boundary_original_main(argc, argv); }
-`;
-    const compiler = spawnSync(process.env.CC || "cc", [
-      "-std=c11", "-O2", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Wpedantic",
-      "-x", "c", "-", "-o", raceHelper,
-    ], { input: instrumented, encoding: "utf8" });
-    expect(compiler.status, compiler.stderr).toBe(0);
-  }, 60000);
-
-  afterAll(async () => {
-    if (raceDirectory) await rm(raceDirectory, { recursive: true, force: true });
+describe("in-process read refusals", () => {
+  it("rejects a stale approved root before reading replacement bytes", async () => {
+    const approved = await approveSkillsRoot(root);
+    await rename(root, join(sandbox, "original-root"));
+    await mkdir(join(root, "alpha", "docs"), { recursive: true });
+    await writeFile(join(root, relative), "unapproved replacement");
+    await expect(readSkillPath(root, relative, { expectedRoot: approved })).rejects.toMatchObject({ code: "ESTALE" });
+    await expect(listSkillPaths(root, { expectedRoot: approved })).rejects.toMatchObject({ code: "ESTALE" });
   });
 
-  it.each(["leaf", "root-sibling", "ancestor-sibling", "ancestor-replacement"] as const)(
-    "rejects a %s change after the leaf is read", async (scenario) => {
-      const env = { ...process.env, READ_RACE_FILE: join(root, relative), READ_RACE_KIND: "leaf" };
-      if (scenario === "root-sibling" || scenario === "ancestor-sibling") {
-        env.READ_RACE_KIND = "sibling";
-        Object.assign(env, { READ_RACE_PATH: scenario === "root-sibling" ? join(root, ".skills-manager") : join(root, "alpha", "docs", "sibling") });
-      } else if (scenario === "ancestor-replacement") {
-        const replacement = join(sandbox, "replacement-alpha");
-        await mkdir(replacement);
-        env.READ_RACE_KIND = "replace";
-        Object.assign(env, { READ_RACE_PATH: join(root, "alpha"), READ_RACE_PARKED: join(sandbox, "original-alpha"), READ_RACE_REPLACEMENT: replacement });
-      }
-      const result = spawnSync(raceHelper, ["read", root, relative, "18446744073709551615", "-"], { env, encoding: "utf8" });
-      expect(result.status, result.stderr).toBe(1);
-      expect(result.stdout).toMatch(/^ERR\tESTALE\t/);
-    },
-  );
+  it("rejects a linked child ancestor rather than reading the target", async () => {
+    const outside = join(sandbox, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "secret"), "outside bytes");
+    await symlink(outside, join(root, "alpha", "outside"), "dir");
+    await expect(readSkillPath(root, "alpha/outside/secret")).rejects.toThrow();
+    expect(await listSkillPaths(root)).toContainEqual({ path: "alpha/outside", kind: "symlink" });
+    expect((await readSkillPath(root, "alpha/outside")).content.toString()).toBe(outside);
+  });
+
+  it("refuses a hardlinked reviewed file without modifying either name", async () => {
+    const file = join(root, relative);
+    const outside = join(sandbox, "alias");
+    await link(file, outside);
+    const before = await leafSnapshot(file);
+    await expect(readSkillPath(root, relative)).rejects.toThrow(/hard-linked/);
+    await expect(readSkillFiles(root)).rejects.toThrow();
+    expect(await leafSnapshot(file)).toEqual(before);
+    expect((await lstat(outside)).nlink).toBe(2);
+  });
+
+  it("rejects non-normalized paths and invalid bounds", async () => {
+    for (const relativePath of ["../outside", "/absolute", "alpha/../alpha/docs/read.txt", "alpha//docs/read.txt", ""]) {
+      await expect(readSkillPath(root, relativePath)).rejects.toThrow();
+    }
+    await expect(readSkillPath(root, relative, { maxBytes: -1 })).rejects.toThrow();
+    await expect(readSkillPath(root, relative, { maxBytes: Number.NaN })).rejects.toThrow();
+  });
 });

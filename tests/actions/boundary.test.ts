@@ -1,58 +1,33 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import type * as FsPromises from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { approveSkillsRoot, countSkillPathLines, directoryIdentity, fingerprintContents, fingerprintSkill, fingerprintSkillContents, fingerprintTree, hasIndexTransaction, importSkill, listSkillPaths, readManagedMetadata, readSkillPath, recoverSkills, removeDisposableTree, withSkillsLock, type ApprovedSkillsRoot } from "../../src/actions/boundary.js";
+import { approveSkillsRoot, countSkillPathLines, directoryIdentity, fingerprintContents, fingerprintSkill, fingerprintSkillContents, fingerprintTree, hasIndexTransaction, importSkill, listSkillPaths, publishCliLock, readManagedMetadata, readSkillPath, recoverSkills, removeDisposableTree, snapshotCliLock, withSkillsLock, type ApprovedSkillsRoot } from "../../src/actions/boundary.js";
 import { commitSelected, previewCommit } from "../../src/actions/git.js";
 import { removeManagedSkill } from "../../src/actions/remove.js";
 import { disableSkill, enableSkill } from "../../src/actions/toggle.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof FsPromises>();
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
 
 let sandbox: string;
 let skillsDir: string;
 let root: ApprovedSkillsRoot;
 let outside: string;
-let faultProject = "";
 const skillContents = "---\nname: foo\n---\noriginal\n";
 const lockContents = '{"version":3,"skills":{"foo":{"source":"owner/repo"}}}\n';
 
-beforeAll(async () => {
-  faultProject = await realpath(await mkdtemp(join(tmpdir(), "skills-fault-helper-")));
-  const actionsDir = join(faultProject, "src", "actions");
-  const nativeDir = join(faultProject, "native");
-  await mkdir(actionsDir, { recursive: true });
-  await mkdir(nativeDir);
-  const sourceActions = new URL("../../src/actions/", import.meta.url);
-  await Promise.all(["boundary.ts", "toggle.ts", "remove.ts"].map((name) =>
-    copyFile(new URL(name, sourceActions), join(actionsDir, name)),
-  ));
-  await writeFile(join(faultProject, "package.json"), '{"type":"module"}\n');
-  await writeFile(join(nativeDir, "skills-boundary.platform.json"), JSON.stringify({
-    platform: process.platform,
-    arch: process.arch,
-    libc: process.platform === "linux" ? "glibc" : null,
-  }) + "\n");
-
-  const source = fileURLToPath(new URL("../../native/skills-boundary.c", import.meta.url));
-  const compiler = spawn(process.env.CC || "cc", [
-    "-std=c11", "-O2", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Wpedantic",
-    "-DSKILLS_MANAGER_TEST_FAULTS=1", source, "-o", join(nativeDir, "skills-boundary"),
-  ], { stdio: ["ignore", "ignore", "pipe"] });
-  let stderr = "";
-  compiler.stderr.setEncoding("utf8");
-  compiler.stderr.on("data", (chunk: string) => { stderr += chunk; });
-  const [code, signal] = await once(compiler, "close") as [number | null, NodeJS.Signals | null];
-  if (code !== 0 || signal) throw new Error(`Cannot build disposable fault helper (${signal ?? code}): ${stderr}`);
-}, 60000);
-
-afterAll(async () => {
-  if (faultProject) await rm(faultProject, { recursive: true, force: true });
-});
 
 beforeEach(async () => {
+  const actual = await vi.importActual<typeof FsPromises>("node:fs/promises");
+  vi.mocked(rename).mockImplementation(actual.rename);
   sandbox = await realpath(await mkdtemp(join(tmpdir(), "skills-boundary-")));
   skillsDir = join(sandbox, "selected-skills");
   outside = join(sandbox, "outside");
@@ -96,89 +71,295 @@ async function expectOutsideUnchanged(): Promise<void> {
 
 type ChildResult = { code: number | null; signal: NodeJS.Signals | null; stderr: string };
 type Operation = "disable" | "remove" | "import" | "index-check" | "recover";
-type Fault = "after-intent" | "after-move" | "after-commit" | "rename" | "journal-write" | "journal-replace";
 
-// Each caller is a separate Node process; each wrapper in turn invokes the real native helper.
-async function runOperation(operation: Operation, args: string[], fault?: Fault, instrumented = fault !== undefined): Promise<ChildResult> {
-  const source = operation === "disable" ? "toggle" : operation === "remove" ? "remove" : "boundary";
-  const moduleUrl = instrumented
-    ? pathToFileURL(join(faultProject, "src", "actions", `${source}.ts`)).href
-    : new URL(`../../src/actions/${source}.ts`, import.meta.url).href;
-  const symbol = operation === "disable"
-    ? "disableSkill"
-    : operation === "remove"
-      ? "removeManagedSkill"
-      : operation === "import" ? "importSkill" : operation === "recover" ? "recoverSkills" : "withSkillsLock, hasIndexTransaction";
-  const call = operation === "disable"
-    ? "await disableSkill(root, process.argv[2], process.argv[3]);"
-    : operation === "remove"
-      ? "await removeManagedSkill(root, process.argv[2], process.argv[3], process.argv[4]);"
-      : operation === "import"
-        ? "await importSkill(root, process.argv[2], process.argv[3], { replace: true, expectedPath: process.argv[4], expectedVersion: process.argv[5], expectedStagedVersion: process.argv[6] });"
-        : operation === "recover"
-          ? "await recoverSkills(root);"
-          : "if (!(await withSkillsLock(root, () => hasIndexTransaction(root)))) throw new Error('Pending index transaction not detected');";
-  const program = `import { ${symbol} } from ${JSON.stringify(moduleUrl)}; const root = JSON.parse(process.argv[1]); ${call}`;
-  const env = { ...process.env };
-  delete env.SKILLS_BOUNDARY_FAULT;
-  if (fault !== undefined) env.SKILLS_BOUNDARY_FAULT = fault;
-
+// A second app instance runs the same in-process implementation.
+async function runOperation(operation: Operation, args: string[]): Promise<ChildResult> {
+  const moduleUrl = new URL("../../src/actions/boundary.ts", import.meta.url).href;
+  const program = `import { moveReviewedSkill, deleteReviewedSkill, importSkill, recoverSkills, withSkillsLock, hasIndexTransaction } from ${JSON.stringify(moduleUrl)};
+    const root = JSON.parse(process.argv[1]), args = process.argv.slice(2);
+    ${operation === "disable" ? 'await moveReviewedSkill(root, args[0], args[1], "disable");' :
+      operation === "remove" ? "await deleteReviewedSkill(root, args[0], args[1], args[2]);" :
+      operation === "import" ? "await importSkill(root, args[0], args[1], { replace:true, expectedPath:args[2], expectedVersion:args[3], expectedStagedVersion:args[4] });" :
+      operation === "recover" ? "await recoverSkills(root);" :
+      "if (!await withSkillsLock(root, () => hasIndexTransaction(root))) throw new Error('Pending index transaction not detected');"}`;
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", program, JSON.stringify(root), ...args], {
-    env,
-    detached: operation === "recover",
-    timeout: operation === "index-check" ? 10000 : undefined,
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"], timeout: 10000,
   });
   let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-  // A real deadline is needed to terminate a blocked native helper and its caller.
-  const timer = operation === "recover" ? setTimeout(() => {
-    if (child.pid) {
-      try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
-    }
-  }, 5000) : undefined;
-  try {
-    const [code, signal] = await once(child, "close") as [number | null, NodeJS.Signals | null];
-    return { code, signal, stderr };
-  } finally {
-    clearTimeout(timer);
-  }
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  const [code, signal] = await once(child, "close") as [number | null, NodeJS.Signals | null];
+  return { code, signal, stderr };
 }
 
-describe("helper platform metadata", () => {
-  it("rejects metadata changed after a successful operation", async () => {
-    const metadataPath = join(faultProject, "native", "skills-boundary.platform.json");
-    const original = await readFile(metadataPath, "utf8");
-    // Import the temporary copy so the real helper metadata remains untouched.
-    const boundary = await import(pathToFileURL(join(faultProject, "src", "actions", "boundary.ts")).href);
+describe("CLI lock publication", () => {
+  it("serializes shared tracking publication across sibling app roots and refuses the stale loser", async () => {
+    const sibling = join(sandbox, "sibling-skills");
+    await mkdir(sibling);
+    const siblingRoot = await approveSkillsRoot(sibling);
+    await withSkillsLock(root, async () => {});
+    await withSkillsLock(siblingRoot, async () => {});
+    const lock = join(sandbox, ".skill-lock.json");
+    const snapshot = await snapshotCliLock(lock);
+    const winner = '{"skills":{"foo":{"hash":"winner"},"unrelated":{"keep":true}}}\n';
+    const loser = '{"skills":{"foo":{"hash":"stale-loser"}}}\n';
+    const actual = await vi.importActual<typeof FsPromises>("node:fs/promises");
+    const paused = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+    vi.mocked(rename).mockImplementation(async (from, to) => {
+      if (to !== lock) return actual.rename(from, to);
+      vi.mocked(rename).mockImplementation(actual.rename);
+      paused.resolve();
+      await resume.promise;
+      return actual.rename(from, to);
+    });
+    const publication = withSkillsLock(root, () => publishCliLock(snapshot, winner));
+    await paused.promise;
+    const moduleUrl = new URL("../../src/actions/boundary.ts", import.meta.url).href;
+    const program = `import { withSkillsLock, publishCliLock } from ${JSON.stringify(moduleUrl)};
+      const [root, snapshot, content] = JSON.parse(process.argv[1]);
+      await withSkillsLock(root, async () => {
+        process.send("publishing");
+        try { await publishCliLock(snapshot, content); process.send("published"); }
+        catch (error) { process.send(error.code); }
+      });`;
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", program, JSON.stringify([siblingRoot, snapshot, loser])], {
+      stdio: ["ignore", "ignore", "pipe", "ipc"], timeout: 10000,
+    });
+    const messages: unknown[] = [];
+    let stderr = "", finished = false;
+    child.on("message", (message: unknown) => { messages.push(message); });
+    child.stderr!.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    const closing = once(child, "close").then((result) => { finished = true; return result; });
     try {
-      await boundary.approveSkillsRoot(skillsDir);
-      await writeFile(metadataPath, JSON.stringify({ ...JSON.parse(original), arch: "incompatible" }));
-      await expect(boundary.approveSkillsRoot(skillsDir)).rejects.toThrow("Skills filesystem helper is incompatible");
-    } finally {
-      await writeFile(metadataPath, original);
-    }
+      await once(child, "message");
+      await delay(100);
+      expect(finished).toBe(false);
+    } finally { resume.resolve(); }
+    await publication;
+    const [code, signal] = await closing;
+    expect({ code, signal, stderr }).toEqual({ code: 0, signal: null, stderr: "" });
+    expect(messages).toEqual(["publishing", "ESTALE"]);
+    await expect(readFile(lock, "utf8")).resolves.toBe(winner);
+    await expect(readFile(join(outside, "sentinel"), "utf8")).resolves.toBe("outside stays unchanged");
+  }, 15000);
+
+  it("publishes the exact dependency-generated bytes without changing unrelated entries", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    const original = '{\n  "version": 3,\n  "skills": { "other": { "note": "untouched" }, "foo": { "hash": "old" } }\n}\n';
+    const updated = '{\n  "version": 3,\n  "skills": { "other": { "note": "untouched" }, "foo": { "hash": "new" } },\n  "generated": "é"\n}\n';
+    await writeFile(lock, original);
+    await chmod(lock, 0o640);
+
+    const snapshot = await snapshotCliLock(lock);
+    expect(snapshot.path).toBe(lock);
+    expect(snapshot.identity).toMatch(/^[a-f0-9]{64}$/);
+    expect(snapshot.parentIdentity).toMatch(/^[a-f0-9]{64}$/);
+    expect(snapshot.content).toBe(original);
+    await publishCliLock(snapshot, updated);
+
+    expect(await readFile(lock)).toEqual(Buffer.from(updated));
+    expect((await lstat(lock)).mode & 0o777).toBe(0o640);
+    expect((await readdir(sandbox)).sort()).toEqual([".skill-lock.json", "outside", "selected-skills"]);
+    await expect(readFile(join(outside, "sentinel"), "utf8")).resolves.toBe("outside stays unchanged");
   });
+
+  it("creates an absent lock only in the snapshotted parent", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    await unlink(lock);
+    const snapshot = await snapshotCliLock(lock);
+    expect(snapshot).toMatchObject({ path: lock, identity: "missing", content: "" });
+    expect(snapshot.parentIdentity).toMatch(/^[a-f0-9]{64}$/);
+
+    const generated = '{ "skills": { "foo": { "hash": "new" } } }\n';
+    await publishCliLock(snapshot, generated);
+    expect(await readFile(lock)).toEqual(Buffer.from(generated));
+    expect((await readdir(sandbox)).sort()).toEqual([".skill-lock.json", "outside", "selected-skills"]);
+  });
+
+  it("refuses to replace a lock that appeared after an absent snapshot", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    await unlink(lock);
+    const snapshot = await snapshotCliLock(lock);
+    await writeFile(lock, "new foreign lock");
+
+    await expect(publishCliLock(snapshot, "generated")).rejects.toMatchObject({ code: "ESTALE" });
+    await expect(readFile(lock, "utf8")).resolves.toBe("new foreign lock");
+  });
+
+  it("refuses a same-inode content change", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    const snapshot = await snapshotCliLock(lock);
+    await writeFile(lock, "changed after review");
+
+    await expect(publishCliLock(snapshot, "generated")).rejects.toMatchObject({ code: "ESTALE" });
+    await expect(readFile(lock, "utf8")).resolves.toBe("changed after review");
+    expect((await readdir(sandbox)).sort()).toEqual([".skill-lock.json", "outside", "selected-skills"]);
+  });
+
+  it("compares the original bytes as well as the captured identities", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    const snapshot = await snapshotCliLock(lock);
+    await expect(publishCliLock({ ...snapshot, content: "different original" }, "generated"))
+      .rejects.toMatchObject({ code: "ESTALE" });
+    await expect(readFile(lock, "utf8")).resolves.toBe(lockContents);
+  });
+
+  it("transports both maximum-size locks and empty content without truncation", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    const original = "a".repeat(1024 * 1024);
+    const updated = "b".repeat(1024 * 1024);
+    await writeFile(lock, original);
+    const snapshot = await snapshotCliLock(lock);
+    expect(snapshot.content).toBe(original);
+    await publishCliLock(snapshot, updated);
+    await expect(readFile(lock, "utf8")).resolves.toBe(updated);
+
+    const next = await snapshotCliLock(lock);
+    await publishCliLock(next, "");
+    expect(await readFile(lock)).toEqual(Buffer.alloc(0));
+    const empty = await snapshotCliLock(lock);
+    expect(empty.content).toBe("");
+    await publishCliLock(empty, "after-empty");
+    await expect(readFile(lock, "utf8")).resolves.toBe("after-empty");
+  });
+
+  it("refuses an inode replacement even when its content is unchanged", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    const original = join(sandbox, "original-lock");
+    const snapshot = await snapshotCliLock(lock);
+    await rename(lock, original);
+    await writeFile(lock, lockContents);
+
+    await expect(publishCliLock(snapshot, "generated")).rejects.toMatchObject({ code: "ESTALE" });
+    await expect(readFile(lock, "utf8")).resolves.toBe(lockContents);
+    await expect(readFile(original, "utf8")).resolves.toBe(lockContents);
+  });
+
+  it("refuses a replaced parent even when its lock contains the original bytes", async () => {
+    const parent = join(sandbox, "lock-parent");
+    const parked = join(sandbox, "original-parent");
+    const lock = join(parent, ".skill-lock.json");
+    await mkdir(parent);
+    await writeFile(lock, lockContents);
+    const snapshot = await snapshotCliLock(lock);
+    await rename(parent, parked);
+    await mkdir(parent);
+    await writeFile(lock, lockContents);
+
+    await expect(publishCliLock(snapshot, "generated")).rejects.toMatchObject({ code: "ESTALE" });
+    await expect(readFile(lock, "utf8")).resolves.toBe(lockContents);
+    await expect(readFile(join(parked, ".skill-lock.json"), "utf8")).resolves.toBe(lockContents);
+  });
+
+  it("refuses symlinked lock files, including replacements after snapshot", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    const target = join(outside, "sentinel");
+    const snapshot = await snapshotCliLock(lock);
+    await unlink(lock);
+    await symlink(target, lock);
+
+    await expect(snapshotCliLock(lock)).rejects.toThrow();
+    await expect(publishCliLock(snapshot, "generated")).rejects.toThrow();
+    await expect(readFile(target, "utf8")).resolves.toBe("outside stays unchanged");
+    expect(await readlink(lock)).toBe(target);
+  });
+
+  it("refuses hard-linked lock files at snapshot and publication", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    const alias = join(outside, "lock-alias");
+    const snapshot = await snapshotCliLock(lock);
+    await link(lock, alias);
+
+    await expect(snapshotCliLock(lock)).rejects.toThrow();
+    await expect(publishCliLock(snapshot, "generated")).rejects.toThrow();
+    await expect(readFile(lock, "utf8")).resolves.toBe(lockContents);
+    await expect(readFile(alias, "utf8")).resolves.toBe(lockContents);
+  });
+
+  it("refuses a symlink in the parent path", async () => {
+    const parent = join(sandbox, "lock-parent");
+    const alias = join(sandbox, "lock-alias");
+    const lock = join(parent, ".skill-lock.json");
+    await mkdir(parent);
+    await writeFile(lock, lockContents);
+    await symlink(parent, alias, "dir");
+    await expect(snapshotCliLock(join(alias, ".skill-lock.json"))).rejects.toThrow();
+
+    const snapshot = await snapshotCliLock(lock);
+    await rename(parent, join(sandbox, "original-parent"));
+    await symlink(outside, parent, "dir");
+    await expect(publishCliLock(snapshot, "generated")).rejects.toThrow();
+    await expect(readFile(join(sandbox, "original-parent", ".skill-lock.json"), "utf8")).resolves.toBe(lockContents);
+    await expect(readFile(join(outside, "sentinel"), "utf8")).resolves.toBe("outside stays unchanged");
+  });
+
+  it("preserves a UTF-8 BOM and rejects invalid or oversized lock bytes", async () => {
+    const lock = join(sandbox, ".skill-lock.json");
+    const bom = "\uFEFF{\"skills\":{}}\n";
+    await writeFile(lock, bom);
+    const snapshot = await snapshotCliLock(lock);
+    expect(snapshot.content).toBe(bom);
+    await expect(publishCliLock(snapshot, "x".repeat(1024 * 1024 + 1))).rejects.toThrow();
+    await expect(readFile(lock, "utf8")).resolves.toBe(bom);
+    await writeFile(lock, Buffer.from([0xff]));
+    await expect(snapshotCliLock(lock)).rejects.toThrow();
+    await writeFile(lock, "x".repeat(1024 * 1024 + 1));
+    await expect(snapshotCliLock(lock)).rejects.toMatchObject({ code: "EFBIG" });
+  });
+
+  it("rejects other file names without changing the lock", async () => {
+    await expect(snapshotCliLock(join(sandbox, "other.json"))).rejects.toThrow();
+    await expect(readFile(join(sandbox, ".skill-lock.json"), "utf8")).resolves.toBe(lockContents);
+  });
+
+  it("captures a missing parent without creating it and creates the exact chain on publication", async () => {
+    const first = join(sandbox, "xdg");
+    const lock = join(first, "state", "skills", ".skill-lock.json");
+    const snapshot = await snapshotCliLock(lock);
+    expect(snapshot.identity).toBe("missing");
+    expect(snapshot.content).toBe("");
+    await expectMissing(first);
+
+    const generated = '{"skills":{"new":{"source":"owner/repo"}}}\n';
+    await publishCliLock(snapshot, generated);
+    await expect(readFile(lock, "utf8")).resolves.toBe(generated);
+    expect(await readdir(join(first, "state", "skills"))).toEqual([".skill-lock.json"]);
+    await expectOutsideUnchanged();
+  });
+
+  it("refuses a parent chain that appeared after the missing-parent snapshot", async () => {
+    const first = join(sandbox, "xdg");
+    const lock = join(first, "state", ".skill-lock.json");
+    const snapshot = await snapshotCliLock(lock);
+    await mkdir(first);
+    await writeFile(join(first, "foreign"), "leave intact");
+
+    await expect(publishCliLock(snapshot, "generated")).rejects.toMatchObject({ code: "ESTALE" });
+    await expect(readFile(join(first, "foreign"), "utf8")).resolves.toBe("leave intact");
+    await expectMissing(join(first, "state"));
+    await expectOutsideUnchanged();
+  });
+
+  it("refuses a symlink inserted into a missing parent chain", async () => {
+    const first = join(sandbox, "xdg");
+    const lock = join(first, "state", ".skill-lock.json");
+    const snapshot = await snapshotCliLock(lock);
+    await symlink(outside, first, "dir");
+    await expect(publishCliLock(snapshot, "generated")).rejects.toThrow();
+    expect(await readlink(first)).toBe(outside);
+    await expectOutsideUnchanged();
+  });
+
 });
 
 describe("disposable workspaces", () => {
-  it("cleans the identified workspace when an unrelated sibling appears", async () => {
+  it("cleans only the identified workspace and preserves unrelated siblings", async () => {
     const workspace = join(sandbox, "workspace");
-    const sibling = join(sandbox, ".skills-manager-test-sibling");
+    const sibling = join(sandbox, "unrelated");
     await mkdir(workspace);
     await writeFile(join(workspace, "staged.txt"), "temporary content");
-    const token = JSON.parse(await directoryIdentity(workspace)) as { identity: string };
-    const child = spawn(join(faultProject, "native", "skills-boundary"), ["dispose", workspace, token.identity], {
-      env: { ...process.env, SKILLS_BOUNDARY_FAULT: "dispose-parent-sibling" },
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 10000,
-    });
-    let stdout = "", stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
-    const [code, signal] = await once(child, "close") as [number | null, NodeJS.Signals | null];
-    expect({ code, signal, stdout, stderr }).toEqual({ code: 0, signal: null, stdout: "READY\n", stderr: "" });
+    const token = await directoryIdentity(workspace);
+    await mkdir(sibling);
+    await removeDisposableTree(workspace, token);
     await expectMissing(workspace);
     expect(await readdir(sibling)).toEqual([]);
     await expectOutsideUnchanged();
@@ -202,6 +383,24 @@ describe("disposable workspaces", () => {
 });
 
 describe("cross-process mutation and recovery", () => {
+  it("cleans only its own staging after an ENOTEMPTY bootstrap collision and validates the winner", async () => {
+    const manager = join(skillsDir, ".skills-manager");
+    const actual = await vi.importActual<typeof FsPromises>("node:fs/promises");
+    vi.mocked(rename).mockImplementation(async (from, to) => {
+      if (to !== manager) return actual.rename(from, to);
+      vi.mocked(rename).mockImplementation(actual.rename);
+      await mkdir(manager, { mode: 0o700 });
+      await writeFile(join(manager, "owner"), "skills-manager-owned-state-v1\n", { mode: 0o600 });
+      await writeFile(join(manager, "lock"), "", { mode: 0o600 });
+      throw Object.assign(new Error("Concurrent bootstrap winner"), { code: "ENOTEMPTY" });
+    });
+    await withSkillsLock(root, async () => {});
+    expect((await readdir(skillsDir)).some((name) => name.startsWith(".skills-manager-bootstrap-"))).toBe(false);
+    expect((await readdir(manager)).sort()).toEqual(["lock", "owner"]);
+    await expect(readFile(join(manager, "owner"), "utf8")).resolves.toBe("skills-manager-owned-state-v1\n");
+    await expectOutsideUnchanged();
+  });
+
   it("does not create manager state merely by recovering an untouched directory", async () => {
     await recoverSkills(root);
     await expectMissing(join(skillsDir, ".skills-manager"));
@@ -220,7 +419,10 @@ describe("cross-process mutation and recovery", () => {
     await chmod(fifo, 0o600);
     expect((await lstat(fifo)).isFIFO()).toBe(true);
 
-    const paths = [skillsDir, manager, owner, lock, fifo, join(skillsDir, "foo"), join(skillsDir, "foo", "SKILL.md")];
+    // Creating/releasing the Node lock may update the manager directory's
+    // timestamps; every controlled file and skill keeps its exact snapshot.
+    const paths = [skillsDir, owner, lock, fifo, join(skillsDir, "foo"), join(skillsDir, "foo", "SKILL.md")];
+    const managerBefore = await lstat(manager);
     const before = await Promise.all(paths.map(entrySnapshot));
     const rootEntries = (await readdir(skillsDir)).sort();
     const stateEntries = (await readdir(manager)).sort();
@@ -234,6 +436,9 @@ describe("cross-process mutation and recovery", () => {
     expect(result.stderr).toMatch(name === "journal" ? /journal/i : /controlled.state|owned|marker/i);
     expect((await lstat(fifo)).isFIFO()).toBe(true);
     expect(await Promise.all(paths.map(entrySnapshot))).toEqual(before);
+    const managerAfter = await lstat(manager);
+    expect([managerAfter.dev, managerAfter.ino, managerAfter.mode, managerAfter.nlink, managerAfter.uid, managerAfter.gid])
+      .toEqual([managerBefore.dev, managerBefore.ino, managerBefore.mode, managerBefore.nlink, managerBefore.uid, managerBefore.gid]);
     expect((await readdir(skillsDir)).sort()).toEqual(rootEntries);
     expect((await readdir(manager)).sort()).toEqual(stateEntries);
     if (ownerBytes !== null) expect(await readFile(owner)).toEqual(ownerBytes);
@@ -268,6 +473,7 @@ describe("cross-process mutation and recovery", () => {
     const enabled = join(skillsDir, "foo");
     const disabled = join(skillsDir, ".disabled_skills", "foo");
     const version = await fingerprintTree(enabled);
+    await withSkillsLock(root, async () => {});
 
     const results = await Promise.all(Array.from({ length: 4 }, () =>
       runOperation("disable", ["foo", version]),
@@ -281,123 +487,78 @@ describe("cross-process mutation and recovery", () => {
     await expectOutsideUnchanged();
   }, 30000);
 
-  it.each(["after-intent", "after-move", "after-commit", "rename", "journal-write", "journal-replace"] as const)(
-    "does not activate %s injection in the normal helper",
-    async (fault) => {
-      const enabled = join(skillsDir, "foo");
-      const disabled = join(skillsDir, ".disabled_skills", "foo");
-      const version = await fingerprintTree(enabled);
-
-      const result = await runOperation("disable", ["foo", version], fault, false);
-
-      expect(result, result.stderr).toMatchObject({ code: 0, signal: null });
-      await expectMissing(enabled);
-      await expect(readFile(join(disabled, "SKILL.md"), "utf8")).resolves.toBe(skillContents);
-      await expectOutsideUnchanged();
-    },
-    30000,
-  );
-
-  it.each(["rename", "journal-write", "journal-replace"] as const)(
-    "reports %s failure, preserves the old state, and can recover for the next operation",
-    async (fault) => {
-      const enabled = join(skillsDir, "foo");
-      const disabled = join(skillsDir, ".disabled_skills", "foo");
-      await symlink(outside, join(enabled, "outside-link"), "dir");
-      const version = await fingerprintTree(enabled);
-
-      const result = await runOperation("disable", ["foo", version], fault);
-      expect(result.code).not.toBe(0);
-      expect(result.signal).toBeNull();
-      expect(result.stderr).toContain(fault);
-      await expect(readFile(join(enabled, "SKILL.md"), "utf8")).resolves.toBe(skillContents);
-      expect(await readlink(join(enabled, "outside-link"))).toBe(outside);
-      await expectMissing(disabled);
-      await expectOutsideUnchanged();
-
-      const recovery = await recoverSkills(root);
-      if (fault === "journal-replace") expect(recovery).toMatch(/recover/i);
-      await expect(readFile(join(enabled, "SKILL.md"), "utf8")).resolves.toBe(skillContents);
-      await expectMissing(disabled);
-      await expectOutsideUnchanged();
-
-      await disableSkill(root, "foo", version);
-      await expectMissing(enabled);
-      await expect(readFile(join(disabled, "SKILL.md"), "utf8")).resolves.toBe(skillContents);
-      expect(await readlink(join(disabled, "outside-link"))).toBe(outside);
-      await expectOutsideUnchanged();
-    },
-    30000,
-  );
-
-  it.each([
-    ["after-intent", false],
-    ["after-move", false],
-    ["after-commit", true],
-  ] as const)("recovers a failed disable at %s (committed: %s)", async (fault, committed) => {
-    const enabled = join(skillsDir, "foo");
-    const disabled = join(skillsDir, ".disabled_skills", "foo");
-    await symlink(outside, join(enabled, "outside-link"), "dir");
-    const version = await fingerprintTree(enabled);
-
-    const result = await runOperation("disable", ["foo", version], fault);
-    expect(result.code).not.toBe(0);
-    expect(result.signal).toBeNull();
-    expect(result.stderr).toMatch(/\b86\b/);
+  it.each(["intent", "committed"] as const)("recovers a %s toggle journal idempotently", async (phase) => {
+    await withSkillsLock(root, async () => {});
+    const active = join(skillsDir, "foo"), disabled = join(skillsDir, ".disabled_skills", "foo");
+    await mkdir(join(skillsDir, ".disabled_skills"));
+    const fingerprint = await fingerprintTree(active);
+    await writeFile(join(skillsDir, ".skills-manager", "journal"), JSON.stringify({
+      version: 2, rootIdentity: root.identity, phase,
+      moves: [{ from: "foo", to: ".disabled_skills/foo", fingerprint }],
+      rollbackCleanup: [], commitCleanup: [],
+    }), { mode: 0o600 });
+    await rename(active, disabled);
     await recoverSkills(root);
-    await recoverSkills(root);
-
-    const remaining = committed ? disabled : enabled;
-    const absent = committed ? enabled : disabled;
-    await expectMissing(absent);
-    await expect(readFile(join(remaining, "SKILL.md"), "utf8")).resolves.toBe(skillContents);
-    expect(await readlink(join(remaining, "outside-link"))).toBe(outside);
+    await expect(recoverSkills(root)).resolves.toBeUndefined();
+    await expect(readFile(join(phase === "committed" ? disabled : active, "SKILL.md"), "utf8")).resolves.toBe(skillContents);
+    await expectMissing(phase === "committed" ? active : disabled);
     await expectOutsideUnchanged();
-  }, 30000);
+  });
 
-  it("reports an ambiguous recovery rather than overwriting a newly created entry", async () => {
-    const enabled = join(skillsDir, "foo");
-    const disabled = join(skillsDir, ".disabled_skills", "foo");
-    const version = await fingerprintTree(enabled);
-    const result = await runOperation("disable", ["foo", version], "after-move");
-    expect(result.code).not.toBe(0);
-    expect(result.signal).toBeNull();
-    expect(result.stderr).toMatch(/\b86\b/);
-    await mkdir(enabled);
-    await writeFile(join(enabled, "SKILL.md"), "new entry created after the crash");
-
-    await expect(recoverSkills(root)).rejects.toThrow();
-    await expect(recoverSkills(root)).rejects.toThrow();
-
-    await expect(readFile(join(enabled, "SKILL.md"), "utf8")).resolves.toBe("new entry created after the crash");
-    await expect(readFile(join(disabled, "SKILL.md"), "utf8")).resolves.toBe(skillContents);
+  it.each(["intent", "committed"] as const)("recovers %s quarantined removal without following links", async (phase) => {
+    await withSkillsLock(root, async () => {});
+    const active = join(skillsDir, "foo"), manager = join(skillsDir, ".skills-manager");
+    await symlink(outside, join(active, "outside-link"));
+    const fingerprint = await fingerprintTree(active);
+    await writeFile(join(manager, "journal"), JSON.stringify({
+      version: 2, rootIdentity: root.identity, phase,
+      moves: [{ from: "foo", to: ".skills-manager/quarantine", fingerprint }],
+      rollbackCleanup: [], commitCleanup: [{ path: ".skills-manager/quarantine", fingerprint }],
+    }), { mode: 0o600 });
+    await rename(active, join(manager, "quarantine"));
+    await recoverSkills(root); await recoverSkills(root);
+    if (phase === "committed") await expectMissing(active);
+    else expect(await readlink(join(active, "outside-link"))).toBe(outside);
     await expectOutsideUnchanged();
-  }, 30000);
+  });
 
-  it.each([
-    ["after-intent", false],
-    ["after-move", false],
-    ["after-commit", true],
-  ] as const)("recovers a failed removal at %s (committed: %s)", async (fault, committed) => {
-    const skill = join(skillsDir, "foo");
-    await symlink(outside, join(skill, "outside-link"), "dir");
-    const version = await fingerprintTree(skill);
-
-    const result = await runOperation("remove", ["foo", skill, version], fault);
-    expect(result.code).not.toBe(0);
-    expect(result.signal).toBeNull();
-    expect(result.stderr).toMatch(/\b86\b/);
-    await recoverSkills(root);
-    await recoverSkills(root);
-
-    if (committed) {
-      await expectMissing(skill);
-    } else {
-      await expect(readFile(join(skill, "SKILL.md"), "utf8")).resolves.toBe(skillContents);
-      expect(await readlink(join(skill, "outside-link"))).toBe(outside);
-    }
+  it("preserves ambiguous and legacy journals rather than overwriting new entries", async () => {
+    await withSkillsLock(root, async () => {});
+    const active = join(skillsDir, "foo"), manager = join(skillsDir, ".skills-manager");
+    await mkdir(join(skillsDir, ".disabled_skills"));
+    const fingerprint = await fingerprintTree(active);
+    const bytes = JSON.stringify({
+      version: 2, rootIdentity: root.identity, phase: "intent",
+      moves: [{ from: "foo", to: ".disabled_skills/foo", fingerprint }], rollbackCleanup: [], commitCleanup: [],
+    });
+    await writeFile(join(manager, "journal"), bytes, { mode: 0o600 });
+    await rename(active, join(skillsDir, ".disabled_skills", "foo"));
+    await mkdir(active); await writeFile(join(active, "SKILL.md"), "new user data");
+    await expect(recoverSkills(root)).rejects.toMatchObject({ code: "ESTALE" });
+    await expect(readFile(join(manager, "journal"), "utf8")).resolves.toBe(bytes);
+    await expect(readFile(join(active, "SKILL.md"), "utf8")).resolves.toBe("new user data");
+    await writeFile(join(manager, "journal"), Buffer.from("SMJNL01\\0legacy binary journal"));
+    await expect(recoverSkills(root)).rejects.toThrow(/legacy|ambiguous/);
+    expect((await readFile(join(manager, "journal"))).subarray(0, 7).toString()).toBe("SMJNL01");
     await expectOutsideUnchanged();
-  }, 30000);
+  });
+
+  it("recovers a known dead same-host lock and preserves a foreign lock", async () => {
+    await withSkillsLock(root, async () => {});
+    const child = spawn(process.execPath, ["--eval", ""], { stdio: "ignore" });
+    const pid = child.pid!;
+    await once(child, "close");
+    const lock = join(skillsDir, ".skills-manager", "app-lock");
+    await mkdir(lock, { mode: 0o700 });
+    await writeFile(join(lock, "owner"), JSON.stringify({ version: 1, pid, host: hostname(), nonce: randomUUID() }), { mode: 0o600 });
+    await expect(recoverSkills(root)).resolves.toBeUndefined();
+    await expectMissing(lock);
+    await mkdir(lock, { mode: 0o700 });
+    const foreign = JSON.stringify({ version: 1, pid, host: "foreign-host", nonce: randomUUID() });
+    await writeFile(join(lock, "owner"), foreign, { mode: 0o600 });
+    await expect(recoverSkills(root)).rejects.toMatchObject({ code: "EBUSY" });
+    await expect(readFile(join(lock, "owner"), "utf8")).resolves.toBe(foreign);
+  });
 });
 
 describe("pending Git index transactions", () => {
@@ -412,7 +573,7 @@ describe("pending Git index transactions", () => {
     await expectOutsideUnchanged();
   });
 
-  it.each(["git-transaction-journal", "git-transaction-journal.next", "git-transaction-journal.delete"])("blocks mutations while %s is pending", async (journalName) => {
+  it.each(["git-transaction.json", "git-transaction.json.next", "git-transaction-journal", "git-transaction-journal.next", "git-transaction-journal.delete", "transaction.journal"])("blocks mutations while %s is pending", async (journalName) => {
     const enabledFoo = join(skillsDir, "foo");
     const disabledFoo = join(skillsDir, ".disabled_skills", "foo");
     await disableSkill(root, "foo", await fingerprintTree(enabledFoo));
@@ -804,80 +965,17 @@ describe("nested paths with newlines", () => {
   }, 30000);
 });
 
-describe("safe concurrent reads", () => {
-  it("never reads or lists outside entries while an intermediate directory is swapped for a symlink", async () => {
-    const skill = join(skillsDir, "foo");
-    const directory = join(skill, "docs");
-    const parked = join(skill, ".parked-docs");
-    const inside = "inside document";
-    const outsideBytes = "OUTSIDE-SENTINEL-CONTENT";
-    const outsideName = "outside-only-secret-name";
-    await mkdir(directory);
-    await writeFile(join(directory, "visible.txt"), inside);
-    await writeFile(join(outside, "visible.txt"), outsideBytes);
-    await writeFile(join(outside, outsideName), outsideBytes);
-
-    const baseline = await readSkillPath(skill, "docs/visible.txt");
-    expect(baseline.kind).toBe("file");
-    expect(baseline.content.toString("utf8")).toBe(inside);
-    expect(await listSkillPaths(skill)).toContainEqual({ path: "docs/visible.txt", kind: "file" });
-
-    const assertSafeObservation = async (): Promise<void> => {
-      const [entry, entries] = await Promise.all([
-        readSkillPath(skill, "docs/visible.txt").catch(() => null),
-        listSkillPaths(skill).catch(() => null),
-      ]);
-      if (entry) {
-        const content = entry.content.toString("utf8");
-        expect(content).not.toContain(outsideBytes);
-        if (entry.kind === "file") expect(content).toBe(inside);
-      }
-      if (entries) {
-        expect(entries.some((item) => item.path.includes(outsideName))).toBe(false);
-      }
-    };
-
-    await rename(directory, parked);
-    await symlink(outside, directory, "dir");
-    try {
-      await assertSafeObservation();
-    } finally {
-      await unlink(directory);
-      await rename(parked, directory);
-    }
-
-    let stopped = false;
-    let swaps = 0;
-    let swapFailure: unknown;
-    const swapping = (async () => {
-      while (!stopped) {
-        await rename(directory, parked);
-        await symlink(outside, directory, "dir");
-        swaps++;
-        await delay(2);
-        await unlink(directory);
-        await rename(parked, directory);
-        await delay(2);
-      }
-    })().catch((error: unknown) => {
-      swapFailure = error;
-      stopped = true;
-    });
-
-    try {
-      for (let attempt = 0; attempt < 30; attempt++) await assertSafeObservation();
-    } finally {
-      stopped = true;
-      await swapping;
-    }
-    if (swapFailure) throw swapFailure;
-    expect(swaps).toBeGreaterThan(1);
-    await expect(readFile(join(directory, "visible.txt"), "utf8")).resolves.toBe(inside);
-    await expect(readFile(join(outside, "sentinel"), "utf8")).resolves.toBe("outside stays unchanged");
-    await expect(readFile(join(outside, "visible.txt"), "utf8")).resolves.toBe(outsideBytes);
-    await expect(readFile(join(outside, outsideName), "utf8")).resolves.toBe(outsideBytes);
-    expect((await readdir(outside)).sort()).toEqual(["sentinel", "visible.txt", outsideName].sort());
-  }, 30000);
+describe("child link reads", () => {
+  it("rejects traversal through a linked ancestor and lists only link text", async () => {
+    const docs = join(skillsDir, "foo", "docs");
+    await symlink(outside, docs, "dir");
+    await expect(readSkillPath(skillsDir, "foo/docs/sentinel")).rejects.toThrow();
+    const entries = await listSkillPaths(skillsDir);
+    expect(entries).toContainEqual({ path: "foo/docs", kind: "symlink" });
+    expect(entries.some((entry) => entry.path.startsWith("foo/docs/"))).toBe(false);
+    expect((await readSkillPath(skillsDir, "foo/docs")).content.toString()).toBe(outside);
+    await expectOutsideUnchanged();
+  });
 });
 
 describe("reviewed imports", () => {
@@ -974,34 +1072,27 @@ describe("reviewed imports", () => {
     await expectOutsideUnchanged();
   });
 
-  it.each([
-    ["after-intent", false],
-    ["after-move", false],
-    ["after-commit", true],
-  ] as const)("recovers a failed replacement at %s (committed: %s)", async (fault, committed) => {
-    const existing = join(skillsDir, "foo");
-    const staged = await stagedSkill("reviewed replacement");
-    await symlink(outside, join(existing, "outside-link"), "dir");
-    const expectedVersion = await fingerprintTree(existing);
-    const expectedStagedVersion = await fingerprintTree(staged);
-
-    const result = await runOperation(
-      "import",
-      ["foo", staged, existing, expectedVersion, expectedStagedVersion],
-      fault,
-    );
-    expect(result.code).not.toBe(0);
-    expect(result.signal).toBeNull();
-    expect(result.stderr).toMatch(/\b86\b/);
-    await recoverSkills(root);
-    await recoverSkills(root);
-
-    await expect(readFile(join(existing, "SKILL.md"), "utf8"))
-      .resolves.toBe(committed ? "reviewed replacement" : skillContents);
-    if (committed) await expectMissing(join(existing, "outside-link"));
-    else expect(await readlink(join(existing, "outside-link"))).toBe(outside);
+  it.each(["intent", "committed"] as const)("recovers a %s replacement from its exact journaled trees", async (phase) => {
+    await withSkillsLock(root, async () => {});
+    const existing = join(skillsDir, "foo"), manager = join(skillsDir, ".skills-manager");
+    const incoming = join(manager, "incoming");
+    await mkdir(incoming); await writeFile(join(incoming, "SKILL.md"), "replacement");
+    const old = await fingerprintTree(existing), replacement = await fingerprintTree(incoming);
+    await writeFile(join(manager, "journal"), JSON.stringify({
+      version: 2, rootIdentity: root.identity, phase,
+      moves: [
+        { from: "foo", to: ".skills-manager/quarantine", fingerprint: old },
+        { from: ".skills-manager/incoming", to: "foo", fingerprint: replacement },
+      ],
+      rollbackCleanup: [{ path: ".skills-manager/incoming", fingerprint: replacement }],
+      commitCleanup: [{ path: ".skills-manager/quarantine", fingerprint: old }],
+    }), { mode: 0o600 });
+    await rename(existing, join(manager, "quarantine")); await rename(incoming, existing);
+    await recoverSkills(root); await recoverSkills(root);
+    await expect(readFile(join(existing, "SKILL.md"), "utf8")).resolves.toBe(phase === "committed" ? "replacement" : skillContents);
+    await expectMissing(incoming); await expectMissing(join(manager, "quarantine"));
     await expectOutsideUnchanged();
-  }, 30000);
+  });
 
   it("rejects a replacement when the installed tree changed after review", async () => {
     const existing = join(skillsDir, "foo");

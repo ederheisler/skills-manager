@@ -15,6 +15,8 @@ assert.ok(path.isAbsolute(args[0]), 'Installed package root must be absolute');
 const installed = await realpath(args[0]);
 const manifest = JSON.parse(await readFile(path.join(installed, 'package.json'), 'utf8'));
 assert.equal(manifest.name, 'skills-manager');
+assert.ok(manifest.files.every((file) => !file.startsWith('native/')), 'The app must not package custom native helpers');
+assert.ok(!manifest.files.includes('dist/actions/gitTransactionWorker.js'), 'Git transactions must run in the app');
 assert.equal(typeof manifest.bin?.['skills-manager'], 'string');
 const cli = await realpath(path.resolve(installed, manifest.bin['skills-manager']));
 assert.ok(cli.startsWith(`${installed}${path.sep}`), 'Installed CLI must be inside the package');
@@ -128,6 +130,8 @@ async function inspectRefreshedSession(mode, startingCli) {
 const startupPromptMarkers = [
   'Choose a skills directory.',
   'Choose [',
+  '~/.agents/skills (default)',
+  'Choose another directory',
   'Skills directory path',
   'Manage this resolved target?',
   'Review optional remote backup?',
@@ -146,16 +150,18 @@ function startupPrompts(text) {
 }
 
 async function browseInTerminal(skillsDir, {
-  saved = false, refresh = false, explicit = !saved, startingCli = cli, updateMode = 'install', expectedNotice,
+  saved = false, refresh = false, onboarding = false, initializeGit = false, explicit = !saved && !onboarding,
+  startingCli = cli, updateMode = 'install', expectedNotice, expectedCheckName, expectedCheckReason, updateSkill = false,
 } = {}) {
   const relay = fileURLToPath(new URL('./release-smoke-pty.py', import.meta.url));
   if (refresh) await writeFile(launchTrace, '');
   let transcript = '';
   let stderr = '';
-  let step = 0;
+  let step = onboarding ? -2 : 0;
   let stageStart = 0;
   let failure;
   let refreshedCli;
+  const beforeInitialization = initializeGit ? await snapshot(skillsDir) : undefined;
   const terminal = new xterm.Terminal({ cols: 140, rows: 40, allowProposedApi: true });
   let pending = Promise.resolve();
   const child = spawn('python3', [relay, startingCli, ...(explicit ? ['--skills-dir', skillsDir] : [])], {
@@ -168,7 +174,7 @@ async function browseInTerminal(skillsDir, {
   child.stderr.setEncoding('utf8');
   child.on('error', (error) => { failure = error; });
   const timer = setTimeout(() => {
-    failure = new Error('Timed out waiting for the installed CLI help, application updates menu, and quit');
+    failure = new Error('Timed out waiting for the installed CLI onboarding, browse, Git, application updates, and quit flow');
     child.kill('SIGTERM');
   }, refresh ? 900_000 : 90_000);
   child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -189,10 +195,28 @@ async function browseInTerminal(skillsDir, {
       && screen.includes('skills-manager (app)') && screen.includes('Vercel skills CLI')
       && (screen.match(/Automatic checks:\s*off/g) ?? []).length === 2
       && !screen.includes('Checking...');
-    if (step === 0) {
+    if (onboarding) {
+      assert.ok(!transcript.includes('Choose [') && !transcript.includes('Skills directory path (blank to go back):'),
+        'Onboarding must render native TUI screens, not readline prompts');
+    }
+    if (step === -2 && screen.includes('Skills directory')
+      && screen.includes('~/.agents/skills (default)') && screen.includes('Choose another directory')) {
+      assert.ok(!browse, 'The directory selector must be rendered before browsing');
+      step = -1;
+      stageStart = transcript.length;
+      child.stdin.write('2');
+    } else if (step === -1 && screen.includes('Skills directory path')
+      && !screen.includes('Choose another directory')) {
+      step = 0;
+      stageStart = transcript.length;
+      child.stdin.write(`${skillsDir}\r`);
+      return;
+    }
+    if (step < 0) return;
+    if (step === 0 && !onboarding) {
       assert.deepEqual(startupPrompts(text), [], 'Unexpected startup prompt before browsing');
     }
-    if (step === 0 && /Skills\s+1\s+shown/.test(screen) && browse
+    if (step === 0 && /Skills\s+1\s+shown/.test(screen) && browse && screen.includes(skillsDir)
       && (!expectedNotice || screen.includes(expectedNotice))) {
       const lines = screen.split('\n');
       const header = lines.find((line) => /Skills\s+1\s+shown/.test(line));
@@ -201,11 +225,87 @@ async function browseInTerminal(skillsDir, {
         const noticeRow = lines.findIndex((line) => line.includes(expectedNotice));
         const controlsRow = lines.findIndex((line) => line.includes('x app updates'));
         const directoryRow = lines.findIndex((line) => line.includes('Directory:'));
-        assert.ok(noticeRow > controlsRow && directoryRow > noticeRow,
-          'The skill update notice must appear in the footer between controls and directory');
+        assert.equal(noticeRow, controlsRow + 1, 'The skill update notice must occupy the middle footer row');
+        assert.equal(directoryRow, noticeRow + 1, 'The directory must occupy the bottom footer row');
+        assert.notEqual(buffer.getLine(buffer.viewportY + noticeRow)?.translateToString(false).at(-1), ' ',
+          'The footer notice must reach the right edge');
       }
-      assert.deepEqual(startupPrompts(text), [], 'Unexpected startup prompt before browsing');
-      if (!saved) assert.ok(text.includes('Selected skills directory:'), 'The first launch must show its selected directory');
+      if (expectedCheckName) {
+        assert.ok(screen.includes(`Update check unavailable for ${expectedCheckName}:`),
+          'The selected skill details must identify the unavailable check and show its reason');
+        assert.match(screen, expectedCheckReason,
+          'The selected skill details must include the check reason');
+        assert.ok(!screen.includes(`Update failed for ${expectedCheckName}:`),
+          'An unavailable check must not be presented as a failed update');
+      }
+      if (!onboarding) assert.deepEqual(startupPrompts(text), [], 'Unexpected startup prompt before browsing');
+      assert.ok(!screen.includes('Skills directory path') && !screen.includes('Choose another directory'),
+        'Browsing must replace the onboarding screen');
+      assert.ok(screen.includes(skillsDir), 'Browsing must show the selected directory');
+      step = initializeGit ? 30 : updateSkill ? 20 : 3;
+      stageStart = transcript.length;
+      child.stdin.write(initializeGit ? 'g' : updateSkill ? 'u' : '?');
+    } else if (step === 20 && /\b0\s+updated\b/i.test(screen) && /\b1\s+failed\b/i.test(screen)) {
+      const lines = screen.split('\n');
+      const controlsRow = lines.findIndex((line) => line.includes('x app updates'));
+      const directoryRow = lines.findIndex((line) => line.includes('Directory:'));
+      assert.equal(directoryRow, controlsRow + 2, 'The footer must retain three rows after an update');
+      assert.match(lines[controlsRow + 1] ?? '', /\b0\s+updated\b.*\b1\s+failed\b/i,
+        'The update result must appear on the middle footer row');
+      assert.doesNotMatch(lines[controlsRow] ?? '', /\b0\s+updated\b/i,
+        'The update result must not appear among shortcuts');
+      const failedLine = screen.split('\n').find((line) => line.includes(expectedCheckName) && /update failed/i.test(line));
+      assert.match(failedLine ?? '', /\b(?:not track(?:ed)?|untracked)\b/i,
+        'The failed update must identify the missing CLI tracking');
+      assert.ok(!screen.includes('Review saved sources') && !screen.includes('Review prepared skill changes'),
+        'Updating a skill must not require a confirmation');
+      step = 3;
+      stageStart = transcript.length;
+      child.stdin.write('?');
+    } else if (step === 30 && screen.includes('Initialize Git') && /y\s+initialize/.test(screen)) {
+      const lines = screen.split('\n');
+      const titleRow = lines.findIndex((line) => line.includes('┌─Initialize Git'));
+      assert.notEqual(titleRow, -1, 'Git initialization review must have a rendered dialog border');
+      const left = lines[titleRow].indexOf('┌─Initialize Git');
+      const right = lines[titleRow].indexOf('┐', left);
+      assert.ok(right > left, 'Git initialization review must have a right border');
+      const review = lines.slice(titleRow + 1)
+        .filter((line) => line[left] === '│' && line[right] === '│')
+        .map((line) => line.slice(left + 1, right).trim()).join('');
+      assert.ok(review.includes(skillsDir), 'Git initialization review must identify the exact selected directory across wrapped rows');
+      step = 31;
+      stageStart = transcript.length;
+      child.stdin.write('\x1b');
+    } else if (step === 31 && /i\s+initialize/.test(screen) && !screen.includes('Initialize Git')) {
+      step = 32;
+      void Promise.all([
+        snapshot(skillsDir).then((current) => assert.deepEqual(current, beforeInitialization,
+          'Cancelling Git initialization must leave the selected directory unchanged')),
+        missing(path.join(skillsDir, '.git')),
+        missing(path.join(work, '.git')),
+      ]).then(() => {
+        step = 33;
+        stageStart = transcript.length;
+        child.stdin.write('i');
+      }).catch((error) => {
+        failure = error;
+        child.kill('SIGTERM');
+      });
+    } else if (step === 33 && screen.includes('Initialize Git') && /y\s+initialize/.test(screen)) {
+      step = 34;
+      void missing(path.join(skillsDir, '.git')).then(() => {
+        step = 35;
+        stageStart = transcript.length;
+        child.stdin.write('y');
+      }).catch((error) => {
+        failure = error;
+        child.kill('SIGTERM');
+      });
+    } else if (step === 35 && /n\s+add remote/.test(screen) && !screen.includes('Initialize Git')) {
+      step = 36;
+      stageStart = transcript.length;
+      child.stdin.write('\x1b');
+    } else if (step === 36 && browse) {
       step = 3;
       stageStart = transcript.length;
       child.stdin.write('?');
@@ -400,7 +500,7 @@ async function run() {
   const configDirectory = path.join(work, 'config');
   const configFile = path.join(configDirectory, 'skills-manager', 'config.json');
   await missing(configFile);
-  await browseInTerminal(browseRoot);
+  await browseInTerminal(browseRoot, { onboarding: true });
   const configBytes = await readFile(configFile);
   const canonicalBrowseRoot = await realpath(browseRoot);
   const configRelative = path.relative(canonicalBrowseRoot, await realpath(configFile));
@@ -457,6 +557,10 @@ async function run() {
   }
   await assertBrowseSafety();
 
+  // An explicit approved directory must also bypass onboarding.
+  await browseInTerminal(browseRoot, { saved: true, explicit: true });
+  await assertBrowseSafety();
+
   // A normal launch without --skills-dir restores the saved root without questions.
   await browseInTerminal(browseRoot, { saved: true });
   await assertBrowseSafety();
@@ -472,7 +576,34 @@ async function run() {
     await assertBrowseSafety({ refreshed: true });
   }
 
-  // Exercise the installed native boundary with independently reviewed source bytes.
+  // Git initialization is a separate fixture: browse-only adoption stays untouched.
+  const initializeRoot = path.join(work, 'initialize-skills');
+  await put(path.join(initializeRoot, 'initialize', 'SKILL.md'),
+    '---\nname: initialize\ndescription: Git initialization fixture\n---\n\n# Initialize\n');
+  const initializeBefore = await snapshot(initializeRoot);
+  await browseInTerminal(initializeRoot, { initializeGit: true });
+  assert.ok((await lstat(path.join(initializeRoot, '.git'))).isDirectory(),
+    'Approving initialization must create Git metadata in the selected directory');
+  assert.equal((await git(initializeRoot, 'rev-parse', '--show-toplevel')).trim(), await realpath(initializeRoot));
+  assert.equal(await git(initializeRoot, 'remote'), '', 'Initialization must not create a remote');
+  await assert.rejects(git(initializeRoot, 'rev-parse', '--verify', 'HEAD'), { code: 128 },
+    'Initialization must not create a commit');
+  assert.equal(await git(initializeRoot, 'ls-files'), '', 'Initialization must not stage skill files');
+  // In-process locking retains its private lock file and versioned state marker.
+  assert.deepEqual((await snapshot(initializeRoot)).filter(([name]) => name !== '.git' && !name.startsWith('.git/')), [
+    ['.skills-manager', 'directory'],
+    ['.skills-manager/lock', 'file', ''],
+    ['.skills-manager/owner', 'file', Buffer.from('skills-manager-owned-state-v1\n').toString('hex')],
+    ...initializeBefore,
+  ], 'Initialization must preserve skill bytes and create only the expected owned boundary metadata');
+  await Promise.all([
+    missing(path.join(work, '.git')),
+    missing(path.join(initializeRoot, 'initialize', '.git')),
+    missing(path.join(browseRoot, '.git')),
+  ]);
+  assert.deepEqual(await snapshot(browseRoot), browseBefore);
+
+  // Exercise the installed in-process safeguards with independently reviewed source bytes.
   const localRoot = path.join(work, 'local');
   const adoptedText = '---\nname: adopted\ndescription: Existing skill\n---\n\nkeep adopted\n';
   await put(path.join(localRoot, 'adopted', 'SKILL.md'), adoptedText);
@@ -593,16 +724,32 @@ async function run() {
   assert.deepEqual(await snapshot(outside), outsideBefore);
   assert.deepEqual(await readFile(externalLock), lockBefore);
 
-  // An unsupported recorded source produces a deterministic status notice without network access.
-  const receiptText = await boundary.readManagedMetadata(upstreamRoot, 'example', upstreamApproved);
-  const metadata = (await snapshot(path.join(upstreamRoot, '.skills-manager')))
+  // A legacy receipt without a CLI lock remains explicitly untracked. The
+  // update key must report that distinction without writing or asking for review.
+  const untrackedRoot = path.join(work, 'untracked-fixture', 'skills');
+  await mkdir(untrackedRoot, { recursive: true });
+  const untrackedApproved = await boundary.approveSkillsRoot(untrackedRoot);
+  const untracked = await installer.prepareAdd(untrackedApproved, upstreamSource);
+  await installer.applyPreparedChange(untracked);
+  const receiptText = await boundary.readManagedMetadata(untrackedRoot, 'example', untrackedApproved);
+  const untrackedReceipt = JSON.parse(receiptText);
+  const metadata = (await snapshot(path.join(untrackedRoot, '.skills-manager')))
     .filter(([, kind, bytes]) => kind === 'file' && Buffer.from(bytes, 'hex').toString('utf8') === receiptText);
   assert.equal(metadata.length, 1, 'The installed receipt must have one metadata file');
-  receipt.entry = { ...receipt.entry, source: 'fixture', sourceType: 'git', sourceUrl: 'https://example.invalid/fixture' };
-  await writeFile(path.join(upstreamRoot, '.skills-manager', metadata[0][0]), JSON.stringify(receipt));
-  const upstreamBeforeBrowse = await snapshot(upstreamRoot);
-  await browseInTerminal(upstreamRoot, { saved: true, explicit: true, expectedNotice: '1 skills could not be checked' });
-  assert.deepEqual(await snapshot(upstreamRoot), upstreamBeforeBrowse, 'Browsing the source fixture must be read-only');
+  untrackedReceipt.entry = {
+    ...untrackedReceipt.entry, source: 'example/project', sourceType: 'github',
+    sourceUrl: 'https://github.com/example/project', skillFolderHash: '',
+  };
+  await writeFile(path.join(untrackedRoot, '.skills-manager', metadata[0][0]), JSON.stringify(untrackedReceipt));
+  const untrackedLock = path.join(path.dirname(untrackedRoot), '.skill-lock.json');
+  await missing(untrackedLock);
+  const untrackedBeforeBrowse = await snapshot(untrackedRoot);
+  await browseInTerminal(untrackedRoot, {
+    saved: true, explicit: true, expectedNotice: '1 skills could not be checked', expectedCheckName: 'example',
+    expectedCheckReason: /skills CLI.*(?:not track(?:ed)?|untracked)/i, updateSkill: true,
+  });
+  assert.deepEqual(await snapshot(untrackedRoot), untrackedBeforeBrowse, 'A failed update must not change the source fixture');
+  await missing(untrackedLock);
 
   // Real Git transactions, including a local bare push/fetch/pull, must retain
   // unrelated index entries and worktree bytes while advancing only reviewed paths.

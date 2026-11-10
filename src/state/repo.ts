@@ -217,7 +217,7 @@ export async function scanSkills(skillsDir: string): Promise<Skill[]> {
             matchUpstreamReceipt(paths.root, skillPath, name),
             readExternalClaim(paths.root, skillPath, name),
           ]);
-          lockEntry = receipt?.entry ?? claim;
+          lockEntry = claim ?? receipt?.entry ?? null;
           recordedSource = claim;
           if (receipt?.historicalBaseline === "unknown") unknownHistory.add(skillPath);
         } catch {

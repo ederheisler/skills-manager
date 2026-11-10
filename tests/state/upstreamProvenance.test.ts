@@ -2,9 +2,9 @@ import { cp, lstat, mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, wri
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execa } from "execa";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { approveSkillsRoot, fingerprintContents } from "../../src/actions/boundary.js";
-import { applyPreparedChange, prepareAdd } from "../../src/actions/skillsCli.js";
+import { applyPreparedChange, discardPreparedChange, prepareAdd } from "../../src/actions/skillsCli.js";
 import { prepareUpdate } from "../../src/actions/update.js";
 import { scanSkills } from "../../src/state/repo.js";
 import { listOrphanedReceipts, matchUpstreamReceipt, readExternalClaim, readInstalledSource } from "../../src/state/upstreamProvenance.js";
@@ -38,6 +38,7 @@ async function fixture(): Promise<{ base: string; skills: string; staged: string
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  vi.unstubAllEnvs();
 });
 
 describe("external upstream lock claims", () => {
@@ -82,6 +83,39 @@ describe("external upstream lock claims", () => {
     expect((await scanSkills(skills))[0].lockEntry).toEqual(rootEntry);
   });
 
+  it("preserves CLI-only fields and leaves missing version information for the CLI to interpret", async () => {
+    const { base, skills, staged } = await fixture();
+    const target = path.join(skills, "example");
+    await cp(staged, target, { recursive: true });
+    const entry = {
+      source: "https://example.com", sourceType: "well-known", sourceUrl: "https://example.com/.well-known/skills/example",
+      sourceBaseUrl: "https://example.com", wellKnownDigest: "digest", installMode: "copy",
+      installedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    };
+    const lock = path.join(base, ".skill-lock.json");
+    await writeFile(lock, JSON.stringify({ version: 3, skills: { example: entry } }));
+    expect(await readExternalClaim(skills, target, "example")).toEqual({ ...entry, skillPath: "", skillFolderHash: "" });
+    await writeFile(lock, JSON.stringify({ version: 3, skills: { example: { ...entry, sourceBaseUrl: "https://user:secret@example.com" } } }));
+    expect(await readExternalClaim(skills, target, "example")).toBeNull();
+  });
+
+  it("reads the XDG CLI global lock instead of an obsolete home lock for the default root", async () => {
+    const { base, staged, entry } = await fixture();
+    const home = path.join(base, "home");
+    const skills = path.join(home, ".agents", "skills");
+    const state = path.join(base, "xdg-state", "skills");
+    await mkdir(skills, { recursive: true });
+    await mkdir(state, { recursive: true });
+    await cp(staged, path.join(skills, "example"), { recursive: true });
+    const stale = { ...entry, skillFolderHash: "stale" };
+    await writeFile(path.join(home, ".agents", ".skill-lock.json"), JSON.stringify({ version: 3, skills: { example: stale } }));
+    await writeFile(path.join(state, ".skill-lock.json"), JSON.stringify({ version: 3, skills: { example: entry } }));
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("XDG_STATE_HOME", path.join(base, "xdg-state"));
+    expect(await readExternalClaim(skills, path.join(skills, "example"), "example")).toEqual(entry);
+    expect((await scanSkills(skills))[0].lockEntry).toEqual(entry);
+  });
+
   it("rejects malformed, incompatible, oversized and structurally invalid parent locks", async () => {
     const { base, skills, staged, entry } = await fixture();
     const target = path.join(skills, "example");
@@ -96,11 +130,6 @@ describe("external upstream lock claims", () => {
       ["entries array", JSON.stringify({ version: 3, skills: [entry] })],
       ["missing fields", JSON.stringify({ version: 3, skills: { example: { source: entry.source } } })],
       ["wrong field type", JSON.stringify({ version: 3, skills: { example: { ...entry, ref: 42 } } })],
-      ["selected well-known entry", JSON.stringify({ version: 3, skills: { example: {
-        source: "https://example.com", sourceType: "well-known", sourceUrl: "https://example.com",
-        skillFolderHash: "", sourceBaseUrl: "https://example.com", wellKnownDigest: "digest",
-        installedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
-      } } })],
       ["oversized lock", " ".repeat(1024 * 1024 + 1)],
     ];
     for (const [label, bytes] of invalidLocks) {
@@ -111,22 +140,18 @@ describe("external upstream lock claims", () => {
     }
   });
 
-  it("rejects invalid GitHub sources, URLs, recorded hashes and source paths", async () => {
+  it("rejects invalid GitHub sources, URLs and unsafe source paths", async () => {
     const { base, skills, staged, entry } = await fixture();
     const target = path.join(skills, "example");
     const lock = path.join(base, ".skill-lock.json");
     await cp(staged, target, { recursive: true });
     const invalidEntries: Array<[string, Partial<LockEntry>]> = [
-      ["non-GitHub source type", { sourceType: "gitlab" }],
       ["invalid source", { source: "../repository" }],
       ["mismatched repository URL", { sourceUrl: "https://github.com/other/repo.git" }],
       ["untrusted host", { sourceUrl: "https://example.com/owner/repository.git" }],
       ["URL credentials", { sourceUrl: "https://user:password@github.com/owner/repository.git" }],
       ["URL query", { sourceUrl: "https://github.com/owner/repository.git?token=secret" }],
       ["malformed URL", { sourceUrl: "github.com/owner/repository.git" }],
-      ["empty hash", { skillFolderHash: "" }],
-      ["short hash", { skillFolderHash: "f".repeat(39) }],
-      ["non-hex hash", { skillFolderHash: "g".repeat(40) }],
       ["absolute source path", { skillPath: "/outside/SKILL.md" }],
       ["traversing source path", { skillPath: "../outside/SKILL.md" }],
       ["embedded traversal", { skillPath: "skills/../outside/SKILL.md" }],
@@ -338,7 +363,7 @@ describe("controlled import receipts", () => {
     expect(orphan).toMatchObject({ name: "example", orphaned: true, entryKind: "orphaned", lockEntry: null, recordedSource: entry, provenance: { kind: "unknown" } });
   });
 
-  it("prefers a matching managed receipt and falls back to the external record only after its contents change", async () => {
+  it("prefers the actual CLI lock over an otherwise matching managed receipt", async () => {
     const { base, skills, staged, entry: external } = await fixture();
     const root = await approveSkillsRoot(skills);
     await applyPreparedChange(await prepareAdd(root, staged));
@@ -351,10 +376,10 @@ describe("controlled import receipts", () => {
     const managed = await matchUpstreamReceipt(skills, installed, "example", root);
     expect(managed?.entry).toMatchObject({ source: staged, sourceType: "local", sourceUrl: staged });
     expect(await readExternalClaim(skills, installed, "example")).toEqual(external);
-    expect(await readInstalledSource(skills, installed, "example")).toEqual(managed?.entry);
-    expect(await readInstalledSource(skills, installed, "example", root)).toEqual(managed?.entry);
+    expect(await readInstalledSource(skills, installed, "example")).toEqual(external);
+    expect(await readInstalledSource(skills, installed, "example", root)).toEqual(external);
     expect((await scanSkills(skills))[0]).toMatchObject({
-      lockEntry: managed?.entry, recordedSource: external, provenance: { kind: "local" },
+      lockEntry: external, recordedSource: external, provenance: { kind: "source", source: external.source, sourceUrl: external.sourceUrl },
     });
 
     await writeFile(path.join(installed, "nested", "file.txt"), "edited installed content\n");
@@ -394,7 +419,10 @@ describe("controlled import receipts", () => {
     const [skill] = await scanSkills(skills);
     expect(skill.provenance.kind).toBe("unknown");
     expect(skill.lockEntry).toBeNull();
-    await expect(prepareUpdate(copiedRoot, skill, entry)).rejects.toThrow(/valid saved remote source association.*select a source to review a replacement/i);
+    const prepared = await prepareUpdate(copiedRoot, skill, entry);
+    expect(prepared.changes).toEqual([]);
+    expect(prepared.failed?.[0].reason).toMatch(/does not track/i);
+    await discardPreparedChange(prepared);
     await rm(installed, { recursive: true });
     expect(await listOrphanedReceipts(skills)).toEqual([]);
   });
@@ -430,7 +458,10 @@ describe("controlled import receipts", () => {
       const [skill] = await scanSkills(skills);
       expect(skill.provenance.kind).toBe("unknown");
       expect(skill.lockEntry).toBeNull();
-      await expect(prepareUpdate(await approveSkillsRoot(skills), skill, entry)).rejects.toThrow(/valid saved remote source association.*select a source to review a replacement/i);
+      const prepared = await prepareUpdate(await approveSkillsRoot(skills), skill, entry);
+      expect(prepared.changes).toEqual([]);
+      expect(prepared.failed?.[0].reason).toMatch(/does not track/i);
+      await discardPreparedChange(prepared);
     }
   });
 });

@@ -49,13 +49,15 @@ The [release evidence](../superpowers/plans/2026-11-03-portable-open-source-rele
 
 Date: 2026-11-04
 
-The primary installation route was the unpinned GitHub `npx` command. It requested the latest code on `main` without a manual clone. This superseded the [tagged primary route](#implementation-choices) because a fixed tag prevented users from receiving fixes on later runs. The existing `v0.1.0` tag remains part of the release history. [Persistent installation](#persistent-installation) supersedes repeated `npx` launches.
+The primary installation route was the unpinned GitHub `npx` command. It requested the latest code on `main` without a manual clone. This superseded the [tagged primary route](#implementation-choices) because a fixed tag prevented users from receiving fixes on later runs. The existing `v0.1.0` tag remains part of the release history. [Persistent installation](#persistent-installation) introduced an approved installation for later launches. [Npx-first launch and agent guidance](#npx-first-launch-and-agent-guidance) restores `npx` as the primary getting-started route.
 
 ## Persistent installation
 
 Date: 2026-11-05
 
 The user explicitly chose to install once and run `skills-manager` on later launches. The implementation starts with a one-time GitHub `npx` launch. The user then approves persistent installation through the existing Application updates confirmation. Approved in-app updates must refresh the persistent installation, not only a temporary session.
+
+The [npx-first decision](#npx-first-launch-and-agent-guidance) makes persistent installation optional. It retains the in-app confirmation and persistent target for approved updates.
 
 ## Concurrency limits
 
@@ -71,9 +73,11 @@ The hosted repository was replaced at the same URL before public release because
 
 ## macOS arm64 verification
 
-The installed app passed native macOS arm64 tests locally, while the corresponding GitHub jobs could not acquire a runner. Local native verification was considered sufficient, so hosted CI retains Linux arm64, Linux x86_64, and macOS x86_64.
+The installed app passed native macOS arm64 tests locally, while the corresponding GitHub jobs could not acquire a runner. Local native verification was considered sufficient, so hosted CI retained Linux arm64, Linux x86_64, and macOS x86_64.
 
-On 2026-11-06, the user removed the hosted macOS x86_64 and Linux arm64 jobs. Hosted CI now runs Linux x86_64 only, including the Linux upstream-ref and update tests that previously ran on arm64. macOS is verified locally on the maintainer's arm64 machine.
+On 2026-11-06, the user removed the hosted macOS x86_64 and Linux arm64 jobs. Hosted CI then ran Linux x86_64 only, including the Linux upstream-ref and update tests that previously ran on arm64. macOS is verified locally on the maintainer's arm64 machine.
+
+On 2026-11-10, GitHub showed only the Release workflow, triggered by pushes to `main`. No hosted build or test checks remain.
 
 ## Upstream skills versions
 
@@ -119,6 +123,8 @@ The user later chose the underlying `skills` CLI for update checks instead of di
 
 The user subsequently chose not to count ordinary CLI up-to-date results as unavailable. This supersedes the non-update classification above: the app accepts the CLI's up-to-date summary unless it also reports a failure. Explicit failures and unrecognized results remain unavailable. The CLI may silently skip unresolved paths or missing hashes, so its summary does not independently prove every source was checked.
 
+The custom content comparison and separate update tracking above are superseded by [Skills CLI backend and immediate updates](#skills-cli-backend-and-immediate-updates).
+
 The user rejected update and unavailable indicators in the header and chose the footer for this information. Individual skill markers and reviewed update actions remain.
 
 ## Existing repository choice
@@ -134,6 +140,8 @@ Push is explicit in Git view. The review must show the actual repository, destin
 Date: 2026-11-06
 
 The user requested simpler onboarding. Onboarding no longer asks about Git. Git initialization moved to Git view, where `i` opens its confirmation.
+
+The [in-app onboarding decision](#in-app-onboarding-and-git-entry) adds an explicit initialization offer when `g` opens Git view without a repository.
 
 ## Browse category labels
 
@@ -151,7 +159,7 @@ After a version change reaches `main` through a pull request, GitHub Actions cre
 
 Date: 2026-11-04
 
-The maintainer is currently the only repository collaborator. Every change to `main`, including the maintainer's changes, requires a pull request and the selected stable status checks. Direct pushes, force-pushes, deletion, and bypassing protections are prohibited. External contributors submit pull requests from forks. Only the maintainer has merge permission.
+The maintainer is currently the only repository collaborator. Every change to `main`, including the maintainer's changes, requires a pull request. Direct pushes, force-pushes, deletion, and bypassing protections are prohibited. External contributors submit pull requests from forks. Only the maintainer has merge permission. On 2026-11-10, the active branch rules required pull requests and resolved review threads, but no approvals or status checks.
 
 On 2026-11-04, GitHub reported ruleset `26549966` active on `main`. It required pull requests, zero approvals, resolved review threads, and the `Required checks` status from GitHub Actions (integration ID `15368`). It required branches to be up to date, allowed no bypass, and blocked deletion and force-pushes. Zero approvals was an implementation choice for a sole-maintainer repository, not a separately selected review count.
 
@@ -192,3 +200,45 @@ This request covers the CLI package, not installed skill documents. It does not 
 The [upstream version decision](#upstream-skills-versions) remains in force. Tested versions are not an allowlist.
 The user later explicitly approved the [CLI refresh mechanism](../superpowers/plans/2026-11-05-in-app-updates.md#4-refresh-the-vercel-skills-cli).
 The [update plan](../superpowers/plans/2026-11-05-in-app-updates.md#verification) records runtime and platform evidence for the prior CLI refresh. The later [persistent installation](#persistent-installation) decision changes its installation target.
+
+## Skills CLI backend and immediate updates
+
+Date: 2026-11-09
+
+The user reaffirmed that the underlying `skills` CLI is the backend for managing skills, including getting and updating them. The app adds terminal interaction and filesystem safeguards, not a second implementation of discovery, update detection, or installation. Use the CLI's `find`, `add`, `check`, and `update` operations and preserve its generated tracking.
+
+Approved operations may publish the CLI-generated installer lock as well as skill files. This supersedes the read-only installer-lock rule for installation and update actions; browsing and checks remain read-only. Preserve unrelated lock entries and refuse stale or unsafe destinations.
+
+The user explicitly chose immediate updates: `u` updates the selected skill and `p` updates all available skills, without source confirmation or a full-content review. The keypress authorizes the update. Progress and failures remain visible. This supersedes the reviewed-update requirement in [Background skill update checks](#background-skill-update-checks); installation and replacement confirmations are unchanged.
+
+## Npx-first launch and agent guidance
+
+Date: 2026-11-10
+
+The user chose `npx --yes github:ederheisler/skills-manager` as the primary command for running the app. Quick start comes before detailed runtime requirements. Manual cloning and building are development steps, not the normal launch flow.
+
+LLMs and coding agents must use that launcher in an interactive terminal. They must not install the unrelated unscoped npm package `skills-manager`. They must not propose `nvm` or other version-manager commands merely as setup. Actual runtime errors still require factual prerequisite guidance. The documentation must retain the real runtime and platform constraints.
+
+Persistent installation remains optional and requires explicit approval through the app's `x` workflow. This supersedes the requirement to use persistent installation for later launches in [Persistent installation](#persistent-installation). It does not remove the consent requirement or change the target of approved updates.
+
+The user later chose a shorter copyable prompt at the top of the README. It asks the agent to ensure Node.js/npm and Git are available, install missing requirements, and run the exact `npx` launcher. The launcher supplies the Vercel skills dependency, so separate global CLI installation is unnecessary. Detailed runtime requirements remain below the launch flow. [In-process local safeguards](#in-process-local-safeguards) supersedes the former native-helper build requirements.
+
+## In-app onboarding and Git entry
+
+Date: 2026-11-10
+
+The user chose onboarding entirely inside the terminal app, not separate readline or command-line prompts. Directory selection, read-only choices, and link approval belong in the app. Saved setup and filesystem safeguards remain unchanged.
+
+Pressing `g` opens Git view. If no repository exists, the app offers initialization with explicit confirmation. Git remains optional for browsing. This extends [Existing repository choice](#existing-repository-choice) without adding Git questions to onboarding or authorizing automatic initialization.
+
+These are implementation requirements, not evidence that the new flow passed verification.
+
+## In-process local safeguards
+
+Date: 2026-11-10
+
+The user explicitly rejected custom C helpers, helper executables, and compiler dependencies. Local filesystem and Git safety logic belongs in the TypeScript app, using standard Node filesystem and crypto APIs and the existing Git CLI. Do not replace the helpers with another app-owned native binary, FFI shim, helper process, or new runtime dependency. OpenTUI's published prebuilt runtime binaries remain supported.
+
+This decision removes the former operating-system confinement guarantee for local filesystem and Git actions. Keep explicit approvals, normalized paths, root identity and stale-preview checks, refusal to follow skill links to mutate their targets, hardlink and special-file refusals, serialized app operations, scoped Git paths, preservation of unrelated staged and unstaged content, and recoverable changes. External or hostile concurrent edits and Git commands remain unsupported; in-process checks must not be described as atomic pathname guards.
+
+The Vercel skills CLI remains the backend for discovery, installation, checks, and updates. Its existing remote operating-system sandbox is unchanged and must still fail closed when unavailable. The normal `npx` launch requires no end-user compiler. Prior native-helper verification records describe the superseded architecture, not evidence for this cutover.

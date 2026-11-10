@@ -1,6 +1,7 @@
 import { lstat, readdir, realpath } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
-import { approveSkillsRoot, assertApprovedSkillsRoot, fingerprintSkillContents, readManagedMetadata, readParentSkillLock, type ApprovedSkillsRoot } from "../actions/boundary.js";
+import { approveSkillsRoot, assertApprovedSkillsRoot, fingerprintSkillContents, readManagedMetadata, readParentSkillLock, snapshotCliLock, type ApprovedSkillsRoot } from "../actions/boundary.js";
 import type { LockEntry } from "./types.js";
 import { isLockEntry, isRecord } from "./validation.js";
 
@@ -17,6 +18,15 @@ export function validSourceEntry(entry: LockEntry): boolean {
   if (!entry.source || !entry.sourceType || !entry.sourceUrl
     || [entry.source, entry.sourceType, entry.sourceUrl, entry.skillPath, entry.ref ?? ""].some((s) => CONTROL.test(s))) return false;
   if (entry.sourceType === "local") return path.isAbsolute(entry.sourceUrl);
+  const base = (entry as LockEntry & { sourceBaseUrl?: unknown }).sourceBaseUrl;
+  if (base !== undefined) {
+    if (typeof base !== "string" || CONTROL.test(base)) return false;
+    try {
+      const baseUrl = new URL(base);
+      if ((baseUrl.protocol !== "https:" && baseUrl.protocol !== "http:") || !baseUrl.hostname
+        || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash) return false;
+    } catch { return false; }
+  }
   let url: URL;
   try { url = new URL(entry.sourceUrl); } catch { return false; }
   if ((url.protocol !== "https:" && url.protocol !== "http:" && url.protocol !== "ssh:")
@@ -195,6 +205,21 @@ export async function listOrphanedReceipts(skillsDir: string): Promise<Array<{ n
   }
   return orphans;
 }
+/** Match the CLI's global lock only for the actual default installation. */
+export async function cliLockPath(skillsDir: string): Promise<string> {
+  const root = await realpath(skillsDir);
+  const home = path.resolve(homedir());
+  const defaultRoot = await realpath(path.join(home, ".agents", "skills")).catch(() => null);
+  const xdg = process.env.XDG_STATE_HOME;
+  const globalLock = xdg
+    ? path.resolve(xdg, "skills", ".skill-lock.json")
+    : path.join(home, ".agents", ".skill-lock.json");
+  if (root === defaultRoot) return globalLock;
+  const selectedLock = path.join(path.dirname(root), ".skill-lock.json");
+  if (selectedLock === globalLock) throw new Error("This custom directory shares the default CLI lock; select a separate installation.");
+  return selectedLock;
+}
+
 
 /** External v3 lock data records an unverified source, not the state of local files. */
 export async function readExternalClaim(skillsDir: string, skillPath: string, name: string, approved?: ApprovedSkillsRoot): Promise<LockEntry | null> {
@@ -204,8 +229,13 @@ export async function readExternalClaim(skillsDir: string, skillPath: string, na
   }
   const selected = await selectedSkill(skillsDir, skillPath, name);
   if (!selected || await realpath(path.dirname(path.resolve(skillsDir))) !== path.dirname(selected.root)) return null;
+  const lockPath = await cliLockPath(selected.root);
   let text: string | null;
-  try { text = await readParentSkillLock(selected.root, approved); }
+  try {
+    text = lockPath === path.join(path.dirname(selected.root), ".skill-lock.json")
+      ? await readParentSkillLock(selected.root, approved)
+      : (await snapshotCliLock(lockPath)).content || null;
+  }
   catch (error) {
     if (isRecord(error) && error.code === "EFBIG") return null;
     throw error;
@@ -214,10 +244,16 @@ export async function readExternalClaim(skillsDir: string, skillPath: string, na
   let raw: unknown;
   try { raw = JSON.parse(text); } catch { return null; }
   if (!isRecord(raw) || raw.version !== 3 || !isRecord(raw.skills) || !Object.hasOwn(raw.skills, name)) return null;
-  const entry = raw.skills[name];
-  if (!isLockEntry(entry) || entry.sourceType !== "github" || !validSourceEntry(entry) || !/^[a-f0-9]{40}$/i.test(entry.skillFolderHash)
-    || !entry.skillPath || path.win32.isAbsolute(entry.skillPath) || entry.skillPath.includes("\\")
-    || entry.skillPath.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  const saved = raw.skills[name];
+  if (!isRecord(saved)) return null;
+  const entry = {
+    ...saved,
+    skillPath: saved.skillPath === undefined ? "" : saved.skillPath,
+    skillFolderHash: saved.skillFolderHash === undefined ? "" : saved.skillFolderHash,
+  };
+  if (!isLockEntry(entry) || !validSourceEntry(entry)
+    || path.win32.isAbsolute(entry.skillPath) || entry.skillPath.includes("\\")
+    || (entry.skillPath && entry.skillPath.split("/").some((part) => !part || part === "." || part === ".."))) return null;
   return entry;
 }
 
@@ -228,7 +264,7 @@ export async function readInstalledSource(skillsDir: string, skillPath: string, 
     await assertApprovedSkillsRoot(approved);
     if (!await selectedSkill(skillsDir, skillPath, name)) return null;
   }
-  const receipt = await matchUpstreamReceipt(skillsDir, skillPath, name, approved);
-  if (receipt) return receipt.entry;
-  return readExternalClaim(skillsDir, skillPath, name, approved);
+  const claim = await readExternalClaim(skillsDir, skillPath, name, approved);
+  if (claim) return claim;
+  return (await matchUpstreamReceipt(skillsDir, skillPath, name, approved))?.entry ?? null;
 }

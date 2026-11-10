@@ -5,9 +5,17 @@ import { approveSkillsRoot, type ApprovedSkillsRoot } from "./actions/boundary.j
 import { readSavedSetup, writeSavedSetup, type SavedSetup } from "./state/config.js";
 import { escapeTerminalSingleLine, quoteTerminalPath } from "./terminalText.js";
 
+export interface OnboardingPrompt {
+  title: string;
+  description?: string;
+  choices?: Array<{ label: string; value: string }>;
+  defaultIndex?: number;
+}
+
 export interface OnboardingIO {
-  ask(prompt: string): Promise<string | null>;
+  ask(prompt: string, presentation?: OnboardingPrompt): Promise<string | null>;
   write(message: string): void;
+  warn?(message: string): void;
 }
 
 export interface DirectoryCandidate {
@@ -26,6 +34,7 @@ export type SkillsRootSelection = ApprovedSkillsRoot | { path: string; identity:
 
 export interface SkillsOnboardingResult {
   root: SkillsRootSelection;
+  warnings?: string[];
 }
 
 export interface InspectedSkillsDirectory {
@@ -140,19 +149,25 @@ async function chooseSkillsDirectory(io: OnboardingIO, options: DirectorySelecti
 
   for (;;) {
     if (selected === undefined) {
-      io.write("\nChoose a skills directory.\nOnly this directory is inspected. Existing skills are not changed.\n\n");
-      if (options.currentSkillsDir !== undefined) io.write(`  0. Keep current: ${quoteTerminalPath(options.currentSkillsDir)}\n`);
-      io.write(`  1. ~/.agents/skills (${options.currentSkillsDir === undefined ? "default" : "default directory"})\n  2. Choose another directory\n\n`);
-      const answer = await io.ask(options.currentSkillsDir === undefined ? "Choose [1] (q to cancel): " : "Choose [0] (q to cancel): ");
+      const answer = await io.ask(options.currentSkillsDir === undefined ? "Choose [1] (q to cancel): " : "Choose [0] (q to cancel): ", {
+        title: "Skills directory",
+        description: "Only the selected directory is inspected. Existing skills are not changed.",
+        choices: [
+          ...(options.currentSkillsDir === undefined ? [] : [{ label: `Keep current: ${quoteTerminalPath(options.currentSkillsDir)}`, value: "0" }]),
+          { label: "~/.agents/skills (default)", value: "1" },
+          { label: "Choose another directory", value: "2" },
+        ],
+      });
       if (answer === null) return null;
       const choice = answer.trim().toLowerCase();
       if (choice === "q" || choice === "quit" || (options.currentSkillsDir !== undefined && (choice === "" || choice === "0"))) return null;
       if (choice === "" || choice === "1") {
         selected = candidates[0].path;
       } else if (choice === "2") {
-        io.write("\nKnown directories (you can also enter another path):\n");
-        candidates.forEach((candidate) => io.write(`  ${candidate.label}: ${quoteTerminalPath(candidate.path)}\n`));
-        const custom = await io.ask("Skills directory path (blank to go back): ");
+        const custom = await io.ask("Skills directory path (blank to go back): ", {
+          title: "Skills directory path",
+          description: "Enter an absolute path, ~/path, or a path relative to the current directory.",
+        });
         if (custom === null) return null;
         if (custom.trim().length === 0) continue;
         selected = custom;
@@ -182,7 +197,11 @@ async function chooseSkillsDirectory(io: OnboardingIO, options: DirectorySelecti
     }
     if (inspection.linkTarget !== null || path.resolve(inspection.selectedPath) !== inspection.skillsDir) {
       io.write(`Selected path: ${quoteTerminalPath(inspection.selectedPath)}\nResolved target: ${quoteTerminalPath(inspection.skillsDir)}\n`);
-      const answer = await io.ask("Manage this resolved target? [y/N]: ");
+      const answer = await io.ask("Manage this resolved target? [y/N]: ", {
+        title: "Manage this resolved target?",
+        choices: [{ label: "Manage resolved target", value: "y" }],
+        defaultIndex: -1,
+      });
       if (answer === null) return null;
       if (!["y", "yes"].includes(answer.trim().toLowerCase())) {
         io.write("Selection cancelled; the link was not changed.\n");
@@ -193,7 +212,10 @@ async function chooseSkillsDirectory(io: OnboardingIO, options: DirectorySelecti
     io.write(`Selected skills directory: ${quoteTerminalPath(inspection.skillsDir)}\n`);
     if (inspection.missing) {
       io.write(`The directory does not exist: ${quoteTerminalPath(inspection.skillsDir)}\nThe app does not create it. Create it before you make changes.\n`);
-      const answer = await io.ask("Continue in read-only mode? [Y/n]: ");
+      const answer = await io.ask("Continue in read-only mode? [Y/n]: ", {
+        title: "Continue in read-only mode?",
+        choices: [{ label: "Browse read-only", value: "y" }, { label: "Choose another directory", value: "n" }],
+      });
       if (answer === null) return null;
       if (!["", "y", "yes"].includes(answer.trim().toLowerCase())) continue;
     }
@@ -260,7 +282,7 @@ export async function selectSavedSkillsDirectory(io: OnboardingIO, options: Dire
   try {
     saved = await readSavedSetup(home, roots);
   } catch (error) {
-    io.write(`Warning: saved setup could not be read safely; select a directory again (${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}).\n`);
+    (io.warn ?? io.write)(`Warning: saved setup could not be read safely; select a directory again (${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}).\n`);
   }
   if (options.currentSkillsDir === undefined && saved !== null) {
     const reused = await reusableSetup(saved, explicit);
@@ -270,7 +292,11 @@ export async function selectSavedSkillsDirectory(io: OnboardingIO, options: Dire
       try { exists = !(await inspectSelectedSkillsDirectory(explicit)).missing; } catch { /* Selection reports the error. */ }
       if (exists) {
         io.write(`The saved directory changed. Select ${quoteTerminalPath(explicit)} again.\n`);
-        const answer = await io.ask("Use this directory? [y/N]: ");
+        const answer = await io.ask("Use this directory? [y/N]: ", {
+          title: "Use this directory?",
+          choices: [{ label: "Use directory", value: "y" }],
+          defaultIndex: -1,
+        });
         if (!["y", "yes"].includes(answer?.trim().toLowerCase() ?? "")) return null;
       }
     }
@@ -298,7 +324,7 @@ export async function selectSavedSkillsDirectory(io: OnboardingIO, options: Dire
       }
     });
   } catch (error) {
-    io.write(`Warning: this setup could not be saved safely and may need to be selected again (${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}).\n`);
+    (io.warn ?? io.write)(`Warning: this setup could not be saved safely and may need to be selected again (${escapeTerminalSingleLine(error instanceof Error ? error.message : String(error))}).\n`);
   }
   return chosen.result;
 }
